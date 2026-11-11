@@ -78,6 +78,7 @@ typedef struct PDMDEVINSINTRC
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/vmm/pdmthread.h>
 #include <VBox/vmm/pgm.h>
+#include <VBox/vmm/vmapi.h>
 #include <VBox/vmm/iom.h>
 #include <VBox/err.h>
 #include <iprt/asm.h>
@@ -283,8 +284,12 @@ typedef struct TSTPDM
     bool                fInitialized;
     /** Whether the VM is still being constructed. */
     bool                fCreating;
+    /** Whether the devices were told that the VM construction is complete. */
+    bool                fInitCompleteDone;
     /** Whether the VM is powered on. */
     bool                fRunning;
+    /** The main execution engine the devices get to see, VM_EXEC_ENGINE_XXX. */
+    uint8_t             bExecEngine;
     /** The guest RAM, starting at guest physical address 0. */
     uint8_t            *pbRam;
     /** Size of the guest RAM. */
@@ -912,6 +917,9 @@ static DECLCALLBACK(int) tstPdmHlp_PhysGCPhys2CCPtr(PPDMDEVINS pDevIns, RTGCPHYS
     RT_NOREF(pDevIns, fFlags, pLock);
     if (GCPhys >= g_Pdm.cbRam)
         return VERR_PGM_INVALID_GC_PHYSICAL_ADDRESS;
+    /* Like in a PC there is no RAM behind the legacy video memory and the ROMs below 1 MiB. */
+    if (GCPhys - TSTPDM_RAM_HOLE_START < TSTPDM_RAM_HOLE_SIZE)
+        return VERR_PGM_PHYS_PAGE_RESERVED;
     *ppv = &g_Pdm.pbRam[GCPhys];
     return VINF_SUCCESS;
 }
@@ -937,6 +945,14 @@ static DECLCALLBACK(uint64_t) tstPdmHlp_MMPhysGetRamSizeAbove4GB(PPDMDEVINS pDev
 {
     RT_NOREF(pDevIns);
     return 0;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnGetMainExecutionEngine} */
+static DECLCALLBACK(uint8_t) tstPdmHlp_GetMainExecutionEngine(PPDMDEVINS pDevIns)
+{
+    RT_NOREF(pDevIns);
+    return g_Pdm.bExecEngine;
 }
 
 
@@ -1547,6 +1563,7 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnPhysReleasePageMappingLock      = tstPdmHlp_PhysReleasePageMappingLock;
     g_tstPdmDevHlpR3.pfnMMPhysGetRamSizeBelow4GB        = tstPdmHlp_MMPhysGetRamSizeBelow4GB;
     g_tstPdmDevHlpR3.pfnMMPhysGetRamSizeAbove4GB        = tstPdmHlp_MMPhysGetRamSizeAbove4GB;
+    g_tstPdmDevHlpR3.pfnGetMainExecutionEngine          = tstPdmHlp_GetMainExecutionEngine;
     g_tstPdmDevHlpR3.pfnMMHeapAllocZ                    = tstPdmHlp_MMHeapAllocZ;
     g_tstPdmDevHlpR3.pfnMMHeapFree                      = tstPdmHlp_MMHeapFree;
     g_tstPdmDevHlpR3.pfnPCIBusRegister                  = tstPdmHlp_PCIBusRegister;
@@ -1617,6 +1634,7 @@ int tstPdmInit(uint32_t cbRam)
             if (g_Pdm.pbRam)
             {
                 g_Pdm.cbRam        = cbRam;
+                g_Pdm.bExecEngine  = VM_EXEC_ENGINE_NATIVE_API;
                 g_Pdm.fCreating    = true;
                 g_Pdm.fInitialized = true;
                 return VINF_SUCCESS;
@@ -1780,20 +1798,55 @@ int tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PP
 
 
 /**
- * Completes the VM construction and powers the VM on.
+ * Sets the main execution engine the devices get to see.
+ *
+ * @param   bExecEngine         VM_EXEC_ENGINE_XXX.
  */
-void tstPdmPowerOn(void)
+void tstPdmSetExecutionEngine(uint8_t bExecEngine)
 {
-    AssertReturnVoid(g_Pdm.fInitialized && !g_Pdm.fRunning);
+    g_Pdm.bExecEngine = bExecEngine;
+}
 
-    for (uint32_t i = 0; i < g_Pdm.cDevs && g_Pdm.fCreating; i++)
+
+/**
+ * Tells the devices that the VM construction is complete, which is the last
+ * thing that can fail it.
+ *
+ * @returns VBox status code, the first failure a device reports.
+ */
+int tstPdmInitComplete(void)
+{
+    AssertReturn(g_Pdm.fInitialized && g_Pdm.fCreating && !g_Pdm.fInitCompleteDone, VERR_WRONG_ORDER);
+
+    g_Pdm.fInitCompleteDone = true;
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
     {
         PPDMDEVINS pDevIns = g_Pdm.aDevs[i].pDevIns;
         if (pDevIns->pReg->pfnInitComplete)
         {
             int rc = pDevIns->pReg->pfnInitComplete(pDevIns);
-            AssertReleaseRC(rc);
+            if (RT_FAILURE(rc))
+                return rc;
         }
+    }
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Completes the VM construction if that wasn't done yet and powers the VM on.
+ *
+ * PDM doesn't run a VM whose construction failed.  The mock does, so tests can
+ * check how a device behaves which was left behind half set up.
+ */
+void tstPdmPowerOn(void)
+{
+    AssertReturnVoid(g_Pdm.fInitialized && !g_Pdm.fRunning);
+
+    if (g_Pdm.fCreating && !g_Pdm.fInitCompleteDone)
+    {
+        int rc = tstPdmInitComplete();
+        AssertReleaseRC(rc);
     }
     g_Pdm.fCreating = false;
 

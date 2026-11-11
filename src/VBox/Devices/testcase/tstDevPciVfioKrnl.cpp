@@ -409,6 +409,45 @@ static int tstVfioKrnlIommuIoctl(unsigned long uReq, void *pvArg)
             return 0;
         }
 
+        case IOMMU_IOAS_UNMAP:
+        {
+            struct iommu_ioas_unmap *pUnmap = (struct iommu_ioas_unmap *)pvArg;
+            if (pUnmap->size < sizeof(*pUnmap))
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlIoasExists(pUnmap->ioas_id))
+                return errno = ENOENT, -1;
+
+            /* Address 0 with the maximum length stands for everything and succeeds with nothing mapped too. */
+            bool const     fAll  = pUnmap->iova == 0 && pUnmap->length == UINT64_MAX;
+            uint64_t const uLast = fAll ? UINT64_MAX : pUnmap->iova + pUnmap->length - 1;
+            if (   !fAll
+                && (!pUnmap->length || uLast < pUnmap->iova))
+                return errno = EINVAL, -1;
+
+            /* Mappings are removed as a whole or not at all. */
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (   g_Krnl.aDma[i].idIoas == pUnmap->ioas_id
+                    && g_Krnl.aDma[i].uIova <= uLast
+                    && g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb - 1 >= pUnmap->iova
+                    && (   g_Krnl.aDma[i].uIova < pUnmap->iova
+                        || g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb - 1 > uLast))
+                    return errno = ENOENT, -1;
+
+            uint64_t cbUnmapped = 0;
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (   g_Krnl.aDma[i].idIoas == pUnmap->ioas_id
+                    && g_Krnl.aDma[i].uIova <= uLast
+                    && g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb - 1 >= pUnmap->iova)
+                {
+                    cbUnmapped += g_Krnl.aDma[i].cb;
+                    RT_ZERO(g_Krnl.aDma[i]);
+                }
+            if (!cbUnmapped && !fAll)
+                return errno = ENOENT, -1;
+            pUnmap->length = cbUnmapped;
+            return 0;
+        }
+
         case IOMMU_DESTROY:
         {
             struct iommu_destroy *pDestroy = (struct iommu_destroy *)pvArg;
