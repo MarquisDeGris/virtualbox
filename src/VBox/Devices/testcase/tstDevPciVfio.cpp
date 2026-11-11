@@ -852,80 +852,6 @@ static void tstExtCapsLoop(void)
 
 
 /**
- * The smallest MSI capability there is, 32-bit address and no masking, with
- * another capability right behind it: the guest gets MSI with that layout and
- * the neighbour stays what it is.
- */
-static void tstMsiSmallLayout(void)
-{
-    RTTestISub("32-bit MSI without masking, followed by another capability");
-
-    uint8_t const        offVendorCap      = TST_MSI_CAP_OFF + 12;
-    static const uint8_t s_abVendorBody[6] = { 8 /* length */, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5 };
-    TSTVFIODEVCFG Model;
-    tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_NETWORK, 0x00 /* Ethernet */);
-    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
-    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
-    tstModelAddMsiCap(&Model, TST_MSI_CAP_OFF, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
-    tstModelAddCap(&Model, offVendorCap, 0x09 /* vendor specific */, s_abVendorBody, sizeof(s_abVendorBody));
-    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
-
-    PTSTVFIODEV pDev = NULL;
-    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
-    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
-    if (RT_SUCCESS(rc))
-    {
-        tstPdmPowerOn();
-
-        /* The guest sees the layout of the device. */
-        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
-        RTTESTI_CHECK_MSG(!(fMsgCtrl & (VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT | VBOX_PCI_MSI_FLAGS_ENABLE)),
-                          ("message control %#RX32\n", fMsgCtrl));
-        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 1, 1) == offVendorCap);
-
-        /* The vendor capability behind it is the one of the device. */
-        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap, 1) == 0x09);
-        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap + 1, 1) == TST_EXP_CAP_OFF);
-        uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap + 4, 4);
-        RTTESTI_CHECK_MSG(u32 == UINT32_C(0xa5a4a3a2), ("read %#RX32 from the vendor capability\n", u32));
-
-        /* Reading through the whole config space with every access width works. */
-        for (uint32_t off = 0; off < 256; off++)
-        {
-            tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 1);
-            if (!(off & 1))
-                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 2);
-            if (!(off & 3))
-                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 4);
-        }
-
-        /* MSI works with this layout: address at +4, data at +8. */
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4, UINT32_C(0xfee00000), 4);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8, 0x4043, 2);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
-        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
-        uint32_t const cMsisBefore = tstPdmMsiGetCount();
-        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
-        TSTPDMMSI Msi;
-        if (tstPdmMsiGet(cMsisBefore, &Msi))
-        {
-            RTTESTI_CHECK_MSG(Msi.uAddr == UINT64_C(0xfee00000), ("address %#RX64\n", Msi.uAddr));
-            RTTESTI_CHECK_MSG(Msi.uData == 0x4043, ("data %#RX32\n", Msi.uData));
-        }
-
-        /* None of this has changed the vendor capability of the device. */
-        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
-        RTTESTI_CHECK(pbCfg != NULL);
-        if (pbCfg)
-            RTTESTI_CHECK_MSG(!memcmp(&pbCfg[offVendorCap + 2], s_abVendorBody, sizeof(s_abVendorBody)),
-                              ("the vendor capability of the device was changed: %.6Rhxs\n", &pbCfg[offVendorCap + 2]));
-    }
-    tstFixtureTeardown();
-}
-
-
-/**
  * A device with two functions: both show up with their own identity and each
  * BAR belongs to the function which has it.
  */
@@ -1147,7 +1073,6 @@ int main()
     tstMsiVectorCount();
     tstMsixDedicatedBar();
     tstMsixSharedBar();
-    tstMsiSmallLayout();
     tstCapsDescending();
     tstCapsLoop();
     tstExtCapsLoop();

@@ -2057,14 +2057,9 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
                 fSupported = true;
 
-                /*
-                 * The guest gets the capability with the layout it has on the device, so
-                 * it never extends into whatever comes behind it in the config space.
-                 */
-                bool const    f64Bit    = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
-                bool const    fMaskable = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_MASKBIT);
-                uint8_t const offData   = offCap + (f64Bit ? VBOX_MSI_CAP_MESSAGE_DATA_64 : VBOX_MSI_CAP_MESSAGE_DATA_32);
-                cbCap = (uint8_t)(offData - offCap) + (fMaskable ? 2 + 2 + 4 + 4 : 2);
+                /* We always implement MSI with per-vector masking support, which determines the size of the capability. */
+                bool const f64Bit = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
+                cbCap = f64Bit ? VBOX_MSI_CAP_SIZE_64 : VBOX_MSI_CAP_SIZE_32;
                 if ((uint32_t)offCap + cbCap > 256)
                     return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
                                                N_("The MSI capability at offset %#x doesn't fit into the PCI config space"), offCap);
@@ -2076,26 +2071,25 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 MsiReg.iMsiCapOffset   = offCap;
                 MsiReg.iMsiNextOffset  = 0; /* Gets updated later. */
                 MsiReg.fMsi64bit       = f64Bit;
-                MsiReg.fMsiNoMasking   = !fMaskable;
                 rc = PDMDevHlpPCIRegisterMsiEx(pDevIns, pPciDev, &MsiReg);
                 if (RT_FAILURE(rc))
                     return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                                N_("Failed to register the MSI capability at offset %#x with %Rrc"), offCap, rc);
 
-                /* The message control register describes the device and starts out with MSI disabled. */
-                PDMPciDevSetWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,
-                                 u16Mmc & (VBOX_PCI_MSI_FLAGS_QMASK | VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT));
-
-                pciVfioCfgSpaceSetInterceptU16(pFun, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,    VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
-                pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address [Low] */
+                pciVfioCfgSpaceSetInterceptU16(pFun, offCap +  2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
+                pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address [Low] */
                 if (f64Bit)
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address High */
-                pciVfioCfgSpaceSetInterceptU16(pFun, offData, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);         /* Message Data */
-                if (fMaskable)
                 {
-                    pciVfioCfgSpaceSetInterceptU16(pFun, offData + 2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Reserved */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offData + 4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offData + 8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address High */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 20, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
+                }
+                else
+                {
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
                 }
 
                 pFun->offMsiCtrl = offCap + 2;
