@@ -1,24 +1,24 @@
 # Status
 
-Updated: 2026-11-11
+Updated: 2026-11-12
 
 ## Where things are
 
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `cb26af23` (10 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `71037836` (11 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 hardening, continued. Done so far: interrupt setup; MSI-X table and
-pending bits; memory BARs in segments; capability lists; MSI capability;
-config space writes; DMA mapping; guest access paths; configuration
-validation and cleanup. Next: reset and command register handling,
-documentation, sanitizer and fuzz runs.
+WP2 hardening, code changes done: interrupt setup; MSI-X table and pending
+bits; memory BARs in segments; capability lists; MSI capability; config
+space writes; DMA mapping; guest access paths; configuration validation and
+cleanup; reset and command register. Next: documentation block, sanitizer
+and fuzz runs, then WP3 (removal of the device on the host).
 
 ## Done
 
@@ -94,13 +94,25 @@ documentation, sanitizer and fuzz runs.
   - checks which are not system calls no longer take their status from
     errno;
   - the destructor only undoes what was set up.
+- WP2, part 8 (commit `71037836`):
+  - a reset of the VM first makes each function keep quiet (no interrupts,
+    no bus mastering, no decoding), then resets it;
+  - functions which cannot be reset on their own, as is common for devices
+    with several functions like graphics cards, are reset through the bus
+    they are on; if that is not possible either they stay disabled until
+    the guest sets them up again;
+  - when the guest clears the decode bits of the command register, the
+    guest mappings of the BARs are removed before the device stops
+    decoding;
+  - trapped accesses to a memory BAR go through the device file, never
+    through the mapping of the BAR in the VM process.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 41) |
+| Test | Before the fix | With fixes (run 43) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -128,6 +140,9 @@ Each new test was first run against the device without the fix it belongs to.
 | Memory BAR with all accesses trapped on request | fails, 1 check (run 42) | pass |
 | Device without IOMMU, device which is not PCI | pass | pass |
 | Host address which is not a PCI address | fails, 10 checks (run 42) | pass |
+| Guest mappings are gone before the device stops decoding | fails, 2 checks (run 44) | pass |
+| Reset of functions which can not be reset on their own | fails, 2 checks (run 44) | pass |
+| Trapped BAR accesses do not need the mapping of the BAR | the process crashes (run 44) | pass |
 
 ## Test harness (WP1)
 
@@ -155,11 +170,9 @@ device, saved-state stream, legacy group/container API.
 
 ## Next (WP2 continued)
 
-1. Reset: device state after a failed reset, devices with several
-   functions; order of device and guest side updates when the guest changes
-   the command register; trapped BAR accesses through the device file.
-2. Documentation block of the device.
-3. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
+1. Documentation block of the device.
+2. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
+3. Harness: legacy group/container API, so those paths get covered too.
 
 ## Decisions
 
@@ -179,12 +192,14 @@ device, saved-state stream, legacy group/container API.
 | 2026-11-11 | The device requires the native execution engine (KVM) | Guest memory has to stay at a fixed place in the VM process while a device can access it; only this engine guarantees that |
 | 2026-11-11 | Guest memory is mapped for the device when the VM is constructed, not when the guest enables bus mastering | A failure stops the VM start with a clear error instead of leaving a device which half works |
 | 2026-11-11 | A device which does not answer never produces an error status in a guest access path | Same behaviour as an absent device; the guest cannot be blamed and the VM must keep running |
+| 2026-11-12 | Trapped BAR accesses go through the device file, the mapping of a BAR is only used for mapping it into the guest | The host kernel invalidates the mapping at times; a file access fails cleanly where touching the mapping raises a signal |
+| 2026-11-12 | A function which cannot be reset on its own is reset through its bus; without any reset it is left disabled | Devices with several functions usually have no function reset; state must not carry over a guest reboot unnoticed |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 26 tests | `cb26af23` | all pass (run 41) |
+| T1 unit | running in CI, 29 tests | `71037836` | all pass (run 43) |
 | T2 fuzz | not started | | |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
@@ -226,5 +241,7 @@ device, saved-state stream, legacy group/container API.
 | 39, 40 | `scratch/config`, `scratch/red-evidence-9` | tests | failed | a mistake in the fake kernel (copies of eventfds lost a flag) |
 | 41 | code branch @ `cb26af23` (as `scratch/config`) | tests | passed | 26 tests |
 | 42 | `scratch/red-evidence-9` | tests | failed as intended | configuration tests against the driver before the change, 12 failed checks |
+| 43 | code branch @ `71037836` (as `scratch/reset`) | tests | passed | 29 tests |
+| 44 | `scratch/red-evidence-10` | tests | failed as intended | reset and command register tests against the driver before the change |
 
 Run numbers are those GitHub shows for the `build` workflow.
