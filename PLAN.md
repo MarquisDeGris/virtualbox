@@ -68,6 +68,12 @@ What is missing or fragile there (found by reading the code, not yet by test):
    IOMMUFD, sysfs.
 4. **Firmware**: an IOMMU (Intel VT-d or AMD-Vi) is required and cannot be
    replaced by software. Nothing beyond that is required from firmware.
+5. **Execution engine**: the guest memory is mapped for the device once and
+   has to stay at the same place in the VM process for as long as the VM
+   exists. Only the native execution engine (KVM) allocates guest memory
+   that way, so the device requires it and refuses to be constructed with
+   any other one (`VBoxManage modifyvm --vm-execution-engine native-api`).
+   Simulation (T4) and hardware tests therefore run with KVM.
 
 ## 4. Security requirements
 
@@ -87,6 +93,7 @@ administrator and host kernel are trusted.
 | S8 | Saved state with an attached device is refused with a clear error unless the device was detached first. | unit test |
 | S9 | No new privileges: the VM process needs nothing beyond access to the VFIO device node(s) and `/dev/iommu` (or the legacy group/container nodes). | review, documentation |
 | S10 | New code builds warning-free and passes with AddressSanitizer and UndefinedBehaviorSanitizer in the test runs. | CI |
+| S11 | The guest memory mapped for the device stays in place for the life of the VM; the device refuses to run where that is not guaranteed (constraint 5). | unit test |
 
 ## 5. Work packages
 
@@ -217,8 +224,9 @@ minimal description, following upstream's `SECURITY.md`.
 - The layout-bound slot (constraint 1) does not cover plugging in a device
   model the VM has never seen. Lifting that needs VMM support for creating
   ranges at run time; out of scope for version 1, noted for upstream.
-- Direct BAR mappings and their teardown depend on the hypervisor backend
-  (native or KVM based). Both must be covered by T4 or by hardware test.
+- Only the KVM based execution engine is supported (constraint 5). Using the
+  VirtualBox kernel driver based engine would need support in the VMM memory
+  manager; out of scope for version 1, noted for upstream.
 - Nested virtualisation on CI runners may be too limited for T4.
 - Thunderbolt/USB4 authorisation and host-side PCI resource allocation are
   host kernel matters and stay outside this work; they are prerequisites

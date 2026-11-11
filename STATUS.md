@@ -7,7 +7,7 @@ Updated: 2026-11-11
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `05617ea1` (7 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `b27efb27` (9 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -16,7 +16,8 @@ Updated: 2026-11-11
 
 WP2 hardening, continued. Done so far: interrupt setup; MSI-X table and
 pending bits; memory BARs in segments; capability lists; MSI capability;
-config space writes. Next: DMA mapping, error paths, sanitizer and fuzz runs.
+config space writes; DMA mapping; guest access paths. Next: configuration
+validation and cleanup paths, reset, documentation, sanitizer and fuzz runs.
 
 ## Done
 
@@ -64,15 +65,34 @@ config space writes. Next: DMA mapping, error paths, sanitizer and fuzz runs.
     merged with the current content, writes covering several registers
     reach each of them;
   - reset clears the MSI state.
+- WP2, part 5 (commit `f3983a48`):
+  - the guest memory is made available to the device when the VM is
+    constructed: all of it, or the VM does not start and nothing stays
+    mapped;
+  - the guest cannot enable bus mastering on a device which has not got
+    the guest memory;
+  - mappings are removed explicitly when the device is destroyed;
+  - the device requires the native execution engine (KVM), where guest
+    memory stays at a fixed place for the life of the VM, and refuses to
+    be constructed with another one.
+- WP2, part 6 (commit `b27efb27`):
+  - a device which does not answer reads as all ones and ignores writes on
+    all guest access paths (I/O port BARs, legacy VGA ports and memory,
+    memory BARs); no host error status reaches the instruction emulation;
+  - the legacy VGA memory fill stays inside the video memory;
+  - memory BARs are only mapped if they may be read and written;
+  - config space handling settings replace each other instead of mixing;
+    the device quirk for a config space range leaves capabilities alone;
+  - no release assertion is left in the config space read path.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 28) |
+| Test | Before the fix | With fixes (run 34) |
 |------|----------------|---------------------|
-| Construct, config space, BAR, DMA map, destruct | pass | pass |
+| Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
 | MSI vector count (all Multiple Message Enable encodings) | fails, then the process aborts (run 15) | pass |
 | MSI-X, 64 vectors, dedicated BAR | fails, 8 checks (run 15) | pass |
@@ -88,6 +108,12 @@ Each new test was first run against the device without the fix it belongs to.
 | Reset with MSI enabled | fails, 1 check (run 15) | pass |
 | Reset with MSI-X enabled | fails, 3 checks (run 15) | pass |
 | Unknown device node | pass | pass |
+| Execution engines without fixed guest memory | fails, 6 checks (run 33) | pass |
+| Guest memory can not be made available to the device | fails, 10 checks (run 33) | pass |
+| I/O port BAR, device which stops answering | fails, 3 checks (runs 37, 38) | pass |
+| Legacy VGA ranges of a graphics device | fails, 8 checks (runs 37, 38) | pass |
+| Device quirk for a config space range, with and without a capability in it | the process aborts (run 37) | pass |
+| BAR which can not be written | the process crashes (run 38) | pass |
 
 ## Test harness (WP1)
 
@@ -115,9 +141,9 @@ device, saved-state stream, legacy group/container API.
 
 ## Next (WP2 continued)
 
-1. DMA mapping: fail closed, at a defined point, with explicit unmap.
-2. Error paths: descriptor and memory leaks, host I/O errors in guest access
-   handlers, validation of configuration strings, explicit no-IOMMU check.
+1. Configuration validation and cleanup: device address strings, descriptor
+   flags, explicit no-IOMMU check, destructor and error paths.
+2. Reset: device state after a failed reset, multi-function devices.
 3. Documentation block of the device.
 4. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
 
@@ -136,12 +162,15 @@ device, saved-state stream, legacy group/container API.
 | 2026-11-11 | The code branch is only ever fast-forwarded; no history rewriting on published branches until the merge request is prepared | Keeps the public history stable |
 | 2026-11-11 | INTx stays armed as upstream does although it is not functional yet | Scope; handled in WP8 |
 | 2026-11-11 | The MSI capability is emulated in the device instead of using the MSI support of the PCI bus | The bus code knows one capability layout only; the guest has to see the layout of the device |
+| 2026-11-11 | The device requires the native execution engine (KVM) | Guest memory has to stay at a fixed place in the VM process while a device can access it; only this engine guarantees that |
+| 2026-11-11 | Guest memory is mapped for the device when the VM is constructed, not when the guest enables bus mastering | A failure stops the VM start with a clear error instead of leaving a device which half works |
+| 2026-11-11 | A device which does not answer never produces an error status in a guest access path | Same behaviour as an absent device; the guest cannot be blamed and the VM must keep running |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 16 tests | `05617ea1` | all pass (run 28) |
+| T1 unit | running in CI, 22 tests | `b27efb27` | all pass (run 34) |
 | T2 fuzz | not started | | |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
@@ -172,5 +201,13 @@ device, saved-state stream, legacy group/container API.
 | 27 | code branch @ `33ba49dc` | tests | passed | 13 tests |
 | 28 | code branch @ `05617ea1` (as `scratch/msi`) | tests | passed | 16 tests |
 | 29 | `scratch/red-evidence-5` | tests | failed as intended | three new tests against the driver before the MSI emulation, 14 failed checks |
+| 30 | code branch @ `05617ea1` | tests | passed | 16 tests; first run with the watchdog for hanging tests |
+| 31 | `scratch/red-evidence-4` | tests | failed as intended | hanging test stopped after three minutes with a backtrace |
+| 32 | code branch @ `f3983a48` (as `scratch/dma`) | tests | passed | 18 tests |
+| 33 | `scratch/red-evidence-6` | tests | failed as intended | DMA mapping tests against the driver before the change, 19 failed checks |
+| 34 | code branch @ `b27efb27` (as `scratch/access`) | tests | passed | 22 tests |
+| 35, 36 | `scratch/red-evidence-7`, `-8` | tests | cancelled | superseded by 37 and 38 |
+| 37 | `scratch/red-evidence-7` | tests | failed as intended | access path tests against the driver before the change, quirk test last |
+| 38 | `scratch/red-evidence-8` | tests | failed as intended | same with the read-only BAR test last |
 
 Run numbers are those GitHub shows for the `build` workflow.
