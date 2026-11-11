@@ -1,0 +1,174 @@
+name: build
+
+# Builds a ref of this repository headless on Linux.
+#   flavor=baseline  plain release build, no testcases (reference result)
+#   flavor=tests     release build with testcases, runs the device testcases
+# Started through the API (workflow_dispatch) because the code branches do
+# not carry workflow files.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit of the source to build"
+        required: true
+        default: main
+      flavor:
+        description: "baseline or tests"
+        required: true
+        default: baseline
+      kmk_args:
+        description: "Extra arguments for kmk (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.ref }}-${{ inputs.flavor }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Runner facts
+        run: |
+          set -x
+          uname -a
+          nproc
+          free -g
+          df -h / /mnt || true
+          gcc --version | head -1
+          ls -l /dev/kvm || true
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Source facts
+        id: src
+        run: |
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "kbuild=$(git -C kBuild rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git log -1 --format='%H %s'
+          ls kBuild
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            build-essential gcc-multilib g++-multilib libc6-dev-i386 \
+            autoconf automake autopoint gettext texinfo bison flex pkg-config \
+            acpica-tools chrpath nasm yasm xsltproc libxml2-utils genisoimage makeself \
+            glslang-tools python3 python3-dev \
+            libasound2-dev libcap-dev libcurl4-openssl-dev libdevmapper-dev \
+            libpam0g-dev libpulse-dev libssl-dev zlib1g-dev libzstd-dev \
+            libxml2-dev libxslt1-dev libvpx-dev libopus-dev libogg-dev libvorbis-dev \
+            liblzf-dev liblzma-dev libtpms-dev libpng-dev libjpeg-dev \
+            libslirp-dev libssh-dev libvncserver-dev \
+            libx11-dev libxext-dev libxmu-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxcomposite-dev libxfixes-dev libxt-dev \
+            libgl-dev libglu1-mesa-dev mesa-common-dev libvulkan-dev \
+            linux-headers-$(uname -r) || \
+          sudo apt-get install -y -q --no-install-recommends linux-headers-generic
+
+      - name: Cache kBuild binaries
+        id: kbuildcache
+        uses: actions/cache@v4
+        with:
+          path: kBuild/kBuild/bin/linux.amd64
+          key: kbuild-bin-ubuntu2404-${{ steps.src.outputs.kbuild }}
+
+      - name: Bootstrap kBuild
+        if: steps.kbuildcache.outputs.cache-hit != 'true'
+        run: |
+          cd kBuild
+          ./kBuild/env.sh --full make -f bootstrap.gmk > ../kbuild-bootstrap.log 2>&1 \
+            || { tail -150 ../kbuild-bootstrap.log; exit 1; }
+          ls -l kBuild/bin/linux.amd64 | head -40
+
+      - name: Configure
+        run: |
+          export KBUILD_PATH="$PWD/kBuild/kBuild"
+          ./configure --help > configure-help.log 2>&1 || true
+          ./configure --ose --build-headless --disable-docs --disable-additions \
+            --disable-validationkit --disable-python --disable-hardening \
+            --disable-extpack --disable-sdl \
+            > configure-run.log 2>&1 || { cat configure-run.log; tail -100 configure.log || true; exit 1; }
+          cat configure-run.log
+          echo "---- AutoConfig.kmk"; cat AutoConfig.kmk
+          echo "---- env.sh"; cat env.sh
+
+      - name: Local configuration
+        run: |
+          {
+            echo "VBOX_WITH_DOCS :="
+            echo "VBOX_WITH_ADDITIONS :="
+            echo "VBOX_WITH_VALIDATIONKIT :="
+            echo "VBOX_WITH_WEBSERVICES :="
+            echo "VBOX_WITH_UPDATE_AGENT :="
+            if [ "${{ inputs.flavor }}" = "tests" ]; then
+              echo "VBOX_WITH_TESTCASES := 1"
+            else
+              echo "VBOX_WITH_TESTCASES :="
+            fi
+          } > LocalConfig.kmk
+          cat LocalConfig.kmk
+
+      - name: Build
+        run: |
+          set -o pipefail
+          . ./env.sh
+          which kmk
+          kmk --version | head -3
+          ( time kmk -j"$(nproc)" KBUILD_TYPE=release ${{ inputs.kmk_args }} ) > build.log 2>&1 \
+            || { echo "BUILD FAILED"; grep -n -E '(^|[^a-zA-Z])(error|Error|\*\*\*)[: ]' build.log | head -60; echo ----; tail -120 build.log; exit 1; }
+          tail -15 build.log
+          grep -c -E 'warning:' build.log || true
+
+      - name: Build result facts
+        if: always()
+        run: |
+          ls out/linux.amd64/release/bin 2>/dev/null | head -80 || true
+          du -sh out 2>/dev/null || true
+          df -h /
+
+      - name: Run device testcases
+        if: inputs.flavor == 'tests'
+        run: |
+          set -x
+          cd out/linux.amd64/release/bin
+          ls testcase | grep -i -E 'tstDevice|tstPci|tstVfio' || true
+          for t in testcase/tstDeviceStructSize; do
+            [ -x "$t" ] && "$t"
+          done
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ inputs.flavor }}-${{ steps.src.outputs.head }}
+          path: |
+            build.log
+            configure.log
+            configure-run.log
+            configure-help.log
+            kbuild-bootstrap.log
+            AutoConfig.kmk
+            LocalConfig.kmk
+            env.sh
+          if-no-files-found: ignore
+          retention-days: 14
