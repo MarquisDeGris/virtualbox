@@ -42,10 +42,13 @@
 *********************************************************************************************************************************/
 #include <VBox/pci.h>
 #include <VBox/vmm/pdmdev.h>
+#include <VBox/vmm/vmapi.h>
 #include <VBox/err.h>
 #include <iprt/assert.h>
 #include <iprt/string.h>
 #include <iprt/test.h>
+
+#include <errno.h>
 
 #include "VBoxDD.h"
 #include "../Bus/DevPciVfio.h"
@@ -280,13 +283,21 @@ static void tstModelInitMsixDedicatedBar(PTSTVFIODEVCFG pModel, uint16_t cVector
 }
 
 
+/** The main execution engine of the VMs set up by tstFixtureSetup(). */
+static uint8_t  g_bTstExecEngine      = VM_EXEC_ENGINE_NATIVE_API;
+/** Number of requests for mapping guest memory tstFixtureSetup() lets pass
+ * before it makes one fail, UINT32_MAX for not making any fail. */
+static uint32_t g_cTstFailIoasMapSkip = UINT32_MAX;
+
+
 /**
  * Sets up the fake kernel with the given PCI functions and a VM with the ICH9
  * PCI bus and one passthrough device using these functions.
  *
  * tstFixtureTeardown() has to be called regardless of the result.
  *
- * @returns Status code of the passthrough device constructor, or of whatever failed before.
+ * @returns Status code of the passthrough device constructor or of its init complete
+ *          callback, or of whatever failed before.
  * @param   paModels            The PCI functions, the first one becomes function 0.
  * @param   cModels             Number of PCI functions.
  * @param   papDevs             Where to return the fake kernel handles of the functions.
@@ -298,6 +309,8 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
     RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
     if (RT_FAILURE(rc))
         return rc;
+    if (g_cTstFailIoasMapSkip != UINT32_MAX)
+        tstVfioKrnlFailIoctl(IOMMU_IOAS_MAP, g_cTstFailIoasMapSkip, ENOMEM);
     for (uint32_t i = 0; i < cModels; i++)
     {
         rc = tstVfioKrnlDevAdd(&paModels[i], &papDevs[i]);
@@ -310,6 +323,7 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
     RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
     if (RT_FAILURE(rc))
         return rc;
+    tstPdmSetExecutionEngine(g_bTstExecEngine);
 
     /* The root bus with an ECAM window for config space accesses. */
     PCFGMNODE pCfgInst = tstCfgNodeCreate(NULL, "0");
@@ -336,7 +350,10 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
         const char *pszVfioPath = i == 0 && pszVfioPathFun0 ? pszVfioPathFun0 : paModels[i].szNode;
         RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", pszVfioPath), VINF_SUCCESS);
     }
-    return tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, NULL);
+    rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, NULL);
+    if (RT_SUCCESS(rc))
+        rc = tstPdmInitComplete();
+    return rc;
 }
 
 
@@ -377,9 +394,15 @@ static void tstBasics(void)
         RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_CLASS_BASE, 1) == VBOX_PCI_CLASS_NETWORK);
         RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN + 1, VBOX_PCI_VENDOR_ID, 2) == UINT16_MAX);
 
-        /* The device is open exactly once and nothing is mapped for DMA before the guest enables bus mastering. */
+        /* The device is open exactly once. */
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
-        RTTESTI_CHECK(tstVfioKrnlGetDmaMappedBytes() == 0);
+
+        /* All guest RAM is available to the device at guest physical addresses, and nothing else is. */
+        uint32_t const offRamHoleEnd = TSTPDM_RAM_HOLE_START + TSTPDM_RAM_HOLE_SIZE;
+        RTTESTI_CHECK(tstVfioKrnlIsIovaRangeMapped(0, TSTPDM_RAM_HOLE_START));
+        RTTESTI_CHECK(tstVfioKrnlIsIovaRangeMapped(offRamHoleEnd, TST_RAM_SIZE - offRamHoleEnd));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == TST_RAM_SIZE - TSTPDM_RAM_HOLE_SIZE,
+                          ("%RU64 bytes mapped for DMA\n", tstVfioKrnlGetDmaMappedBytes()));
 
         /* Size BAR0, assign an address and enable memory decoding. */
         tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, UINT32_MAX, 4);
@@ -403,11 +426,15 @@ static void tstBasics(void)
             RTTESTI_CHECK_MSG(pau32Bar0[8] == UINT32_C(0x12345678), ("device sees %#RX32 in BAR0\n", pau32Bar0[8]));
         }
 
-        /* Enabling bus mastering makes all guest RAM available to the device, at guest physical addresses. */
+        /* The guest can enable bus mastering, which reaches the device. */
         tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
-        RTTESTI_CHECK(tstVfioKrnlIsIovaRangeMapped(0, TST_RAM_SIZE));
-        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == TST_RAM_SIZE,
-                          ("%RU64 bytes mapped for DMA\n", tstVfioKrnlGetDmaMappedBytes()));
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 2);
+        RTTESTI_CHECK_MSG(u32 & VBOX_PCI_COMMAND_MASTER, ("command register %#RX32\n", u32));
+        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+        RTTESTI_CHECK(pbCfg != NULL);
+        if (pbCfg)
+            RTTESTI_CHECK_MSG(pbCfg[VBOX_PCI_COMMAND] & VBOX_PCI_COMMAND_MASTER,
+                              ("command register of the device %#x\n", pbCfg[VBOX_PCI_COMMAND]));
     }
     tstFixtureTeardown();
 }
@@ -459,6 +486,83 @@ static void tstMsi(void)
         }
     }
     tstFixtureTeardown();
+}
+
+
+/**
+ * The device needs the guest memory to stay where it is, so it refuses to be
+ * part of a VM using an execution engine where that isn't the case.
+ */
+static void tstExecEngine(void)
+{
+    RTTestISub("Execution engines without fixed guest memory");
+
+    static const uint8_t s_abEngines[] = { VM_EXEC_ENGINE_HW_VIRT, VM_EXEC_ENGINE_IEM };
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_abEngines); i++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        g_bTstExecEngine = s_abEngines[i];
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_bTstExecEngine = VM_EXEC_ENGINE_NATIVE_API;
+        RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("engine %u: the VM construction succeeded: %Rrc\n", s_abEngines[i], rc));
+        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("engine %u: no VM error was set\n", s_abEngines[i]));
+        if (pDev)
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("engine %u: the device was opened\n", s_abEngines[i]));
+        RTTESTI_CHECK(tstVfioKrnlGetDmaMappedBytes() == 0);
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * The device gets all of the guest memory or the VM doesn't start: nothing is
+ * left mapped when a part can't be mapped, and bus mastering can't be enabled
+ * without the memory.
+ */
+static void tstDmaMapFailure(void)
+{
+    RTTestISub("Guest memory can't be made available to the device");
+
+    /* The guest RAM of the VM is in two pieces, so there are two requests to fail. */
+    for (uint32_t iFail = 0; iFail < 2; iFail++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        g_cTstFailIoasMapSkip = iFail;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_cTstFailIoasMapSkip = UINT32_MAX;
+        RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("request %u failing: the VM construction succeeded: %Rrc\n", iFail, rc));
+        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("request %u failing: no VM error was set\n", iFail));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == 0,
+                          ("request %u failing: %RU64 bytes left mapped for DMA\n", iFail, tstVfioKrnlGetDmaMappedBytes()));
+
+        /*
+         * Such a VM never runs.  If it did, the guest could not make the device do DMA:
+         * the bus master bit does not stick and does not reach the device, and there is
+         * no such thing as a part of the guest memory being mapped.
+         */
+        if (pDev && tstVfioKrnlDevGetOpenCount(pDev) == 1)
+        {
+            tstPdmPowerOn();
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            uint64_t const cbMapped = tstVfioKrnlGetDmaMappedBytes();
+            RTTESTI_CHECK_MSG(cbMapped == 0, ("request %u failing: %RU64 bytes mapped for DMA\n", iFail, cbMapped));
+            uint32_t const u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 2);
+            RTTESTI_CHECK_MSG((u32 & (VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER)) == VBOX_PCI_COMMAND_MEMORY,
+                              ("request %u failing: command register %#RX32\n", iFail, u32));
+            uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+            RTTESTI_CHECK(pbCfg != NULL);
+            if (pbCfg)
+                RTTESTI_CHECK_MSG(!(pbCfg[VBOX_PCI_COMMAND] & VBOX_PCI_COMMAND_MASTER),
+                                  ("request %u failing: command register of the device %#x\n", iFail, pbCfg[VBOX_PCI_COMMAND]));
+        }
+        else
+            RTTestIFailed("request %u failing: the device is not there to check bus mastering", iFail);
+        tstFixtureTeardown();
+    }
 }
 
 
@@ -1312,6 +1416,8 @@ int main()
     tstResetMsi();
     tstResetMsix();
     tstUnknownNode();
+    tstExecEngine();
+    tstDmaMapFailure();
 
     return RTTestSummaryAndDestroy(hTest);
 }
