@@ -958,6 +958,221 @@ static void tstHostAddress(void)
 }
 
 
+/** Number of times the device stopped decoding memory while the guest still had
+ * BAR0 mapped, counted by tstCmdRegOrderHook(). */
+static uint32_t g_cTstDecodeOffWhileMapped = 0;
+
+/**
+ * @callback_method_impl{FNTSTVFIOCFGWRITE, Checks the state of the guest
+ *      mapping of BAR0 whenever the command register of the device is written.}
+ */
+static DECLCALLBACK(void) tstCmdRegOrderHook(PTSTVFIODEV pDev, uint32_t offReg, size_t cb, void *pvUser)
+{
+    RT_NOREF(pvUser);
+    if (   offReg <= VBOX_PCI_COMMAND
+        && offReg + cb > VBOX_PCI_COMMAND)
+    {
+        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+        if (   pbCfg
+            && !(pbCfg[VBOX_PCI_COMMAND] & VBOX_PCI_COMMAND_MEMORY)
+            && tstPdmIsMmio2Mapped(TST_BAR0_ADDR))
+            g_cTstDecodeOffWhileMapped++;
+    }
+}
+
+
+/**
+ * The host kernel makes the mapping of a BAR unusable while the device doesn't
+ * decode memory, so the guest has to have lost its mapping by the time the
+ * device is told to stop decoding.
+ */
+static void tstCmdRegOrder(void)
+{
+    RTTestISub("Guest mappings are gone before the device stops decoding");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        g_cTstDecodeOffWhileMapped = 0;
+        tstVfioKrnlSetCfgWriteHook(tstCmdRegOrderHook, NULL);
+
+        /* Enable and disable memory decoding with a word write. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+        RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 0, 2);
+        RTTESTI_CHECK(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        RTTESTI_CHECK_MSG(g_cTstDecodeOffWhileMapped == 0,
+                          ("word write: the device stopped decoding %u time(s) with the BAR mapped\n", g_cTstDecodeOffWhileMapped));
+
+        /* The same with a byte write, and with other bits changing along. */
+        g_cTstDecodeOffWhileMapped = 0;
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 1);
+        RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MASTER, 1);
+        RTTESTI_CHECK(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        RTTESTI_CHECK_MSG(g_cTstDecodeOffWhileMapped == 0,
+                          ("byte write: the device stopped decoding %u time(s) with the BAR mapped\n", g_cTstDecodeOffWhileMapped));
+
+        /* A reset of the VM with the BAR mapped. */
+        g_cTstDecodeOffWhileMapped = 0;
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+        RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        tstPdmReset();
+        RTTESTI_CHECK(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        RTTESTI_CHECK_MSG(g_cTstDecodeOffWhileMapped == 0,
+                          ("reset: the device stopped decoding %u time(s) with the BAR mapped\n", g_cTstDecodeOffWhileMapped));
+
+        tstVfioKrnlSetCfgWriteHook(NULL, NULL);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A device with two functions which can't be reset on their own, like many
+ * graphics cards: a reset of the VM resets the bus they are on.  If that isn't
+ * possible either the functions are left disabled.
+ */
+static void tstResetFallback(void)
+{
+    RTTestISub("Reset of functions which can't be reset on their own");
+
+    for (uint32_t iVariant = 0; iVariant < 2; iVariant++)
+    {
+        bool const    fBusResetWorks = iVariant == 0;
+        uint16_t const fCmdActive    = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
+        TSTVFIODEVCFG aModels[2];
+        tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+        tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+        tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+        for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+        {
+            tstModelSetBar(&aModels[i], 0, _64K, PCI_ADDRESS_SPACE_MEM);
+            aModels[i].acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+            tstModelAddExpCap(&aModels[i], TST_EXP_CAP_OFF);
+            aModels[i].fNoFunctionReset = true;
+            aModels[i].fNoBusReset      = !fBusResetWorks;
+        }
+
+        PTSTVFIODEV apDevs[2] = { NULL, NULL };
+        int rc = tstFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("variant %u: pci-vfio: %Rrc - %s\n", iVariant, rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+
+            /* The guest sets both functions up. */
+            for (uint8_t i = 0; i < RT_ELEMENTS(aModels); i++)
+            {
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR + i * _1M, 4);
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+                RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR + i * _1M));
+            }
+
+            tstPdmReset();
+
+            for (uint8_t i = 0; i < RT_ELEMENTS(aModels); i++)
+            {
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(apDevs[i]) == 0,
+                                  ("variant %u, function %u: %u function reset(s)\n", iVariant, i,
+                                   tstVfioKrnlDevGetResetCount(apDevs[i])));
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetBusResetCount(apDevs[i]) == (fBusResetWorks ? 1U : 0U),
+                                  ("variant %u, function %u: %u bus reset(s)\n", iVariant, i,
+                                   tstVfioKrnlDevGetBusResetCount(apDevs[i])));
+
+                /* Reset or not, the function keeps quiet until the guest sets it up again. */
+                uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(apDevs[i], VFIO_PCI_CONFIG_REGION_INDEX);
+                RTTESTI_CHECK(pbCfg != NULL);
+                if (pbCfg)
+                    RTTESTI_CHECK_MSG(!(pbCfg[VBOX_PCI_COMMAND] & fCmdActive),
+                                      ("variant %u, function %u: command register of the device %#x\n", iVariant, i,
+                                       pbCfg[VBOX_PCI_COMMAND]));
+                uint32_t const u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN + i, VBOX_PCI_COMMAND, 2);
+                RTTESTI_CHECK_MSG(!(u32 & fCmdActive), ("variant %u, function %u: command register %#RX32\n", iVariant, i, u32));
+                RTTESTI_CHECK(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR + i * _1M));
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIrqCount(apDevs[i], VFIO_PCI_INTX_IRQ_INDEX) == 1,
+                                  ("variant %u, function %u: INTx is not set up after the reset\n", iVariant, i));
+            }
+
+            /* Which works. */
+            for (uint8_t i = 0; i < RT_ELEMENTS(aModels); i++)
+            {
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR + i * _1M, 4);
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+                RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR + i * _1M));
+            }
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * Accesses to the trapped part of a memory BAR work without the mapping of the
+ * BAR, which the host kernel takes away at times.
+ */
+static void tstTrappedAccessMappingGone(void)
+{
+    RTTestISub("Trapped BAR accesses don't need the mapping of the BAR");
+
+    /* MSI-X table and pending bits in the BAR: their pages are trapped, the rest is mapped. */
+    uint16_t const cVectors = 8;
+    uint32_t const offTable = _8K;
+    uint32_t const offPba   = _8K + _4K;
+    uint32_t const offReg   = offTable + 0x100;
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+    tstModelSetBar(&Model, 0, _16K, PCI_ADDRESS_SPACE_MEM);
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+    tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 0 /*iBar*/, offTable, offPba);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+        uint8_t *pbBar0 = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR0_REGION_INDEX);
+        RTTESTI_CHECK(pbBar0 != NULL);
+        if (pbBar0)
+        {
+            static const uint8_t s_abDevice[4]  = { 0x22, 0x22, 0x22, 0x22 };
+            static const uint8_t s_abWritten[4] = { 0x33, 0x33, 0x33, 0x33 };
+            memcpy(&pbBar0[offReg], s_abDevice, sizeof(s_abDevice));
+
+            tstVfioKrnlDevProtectMappings(pDev, true);
+
+            /* A device register in the page of the MSI-X table. */
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offReg, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0x22222222), ("read %#RX32 from the register behind the table\n", u32));
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offReg + 4, s_abWritten, sizeof(s_abWritten)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(!memcmp(&pbBar0[offReg + 4], s_abWritten, sizeof(s_abWritten)),
+                              ("the device sees %.4Rhxs in the register behind the table\n", &pbBar0[offReg + 4]));
+
+            /* The MSI-X table of the guest. */
+            u32 = UINT32_C(0xfee00000);
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offTable, &u32, sizeof(u32)), VINF_SUCCESS);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTable, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0xfee00000), ("read %#RX32 from the MSI-X table\n", u32));
+
+            tstVfioKrnlDevProtectMappings(pDev, false);
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
 /**
  * A device node which does not exist fails the VM construction cleanly.
  */
@@ -1818,6 +2033,9 @@ int main()
     tstInterceptMmio();
     tstUnsuitableDevices();
     tstHostAddress();
+    tstCmdRegOrder();
+    tstResetFallback();
+    tstTrappedAccessMappingGone();
 
     return RTTestSummaryAndDestroy(hTest);
 }

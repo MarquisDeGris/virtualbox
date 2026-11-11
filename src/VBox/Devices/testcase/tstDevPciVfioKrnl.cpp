@@ -50,6 +50,7 @@
 /*********************************************************************************************************************************
 *   Header Files                                                                                                                 *
 *********************************************************************************************************************************/
+#include <VBox/pci.h>
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/err.h>
 #include <iprt/assert.h>
@@ -122,6 +123,8 @@ typedef struct TSTVFIODEV
     uint32_t            cOpens;
     /** Number of resets requested. */
     uint32_t            cResets;
+    /** Number of resets of the bus the function is on. */
+    uint32_t            cBusResets;
     /** Number of interrupts triggered per interrupt index. */
     uint32_t            acIrqsTriggered[TSTVFIO_IRQ_INDEX_COUNT];
     /** The I/O address space the function is attached to, 0 if none. */
@@ -165,6 +168,19 @@ typedef struct TSTVFIODMA
 } TSTVFIODMA;
 
 /**
+ * A mapping of a region of a PCI function made by its user.
+ */
+typedef struct TSTVFIOMAP
+{
+    /** Where it is, NULL if the entry is unused. */
+    void               *pv;
+    /** Its size. */
+    size_t              cb;
+    /** The PCI function. */
+    struct TSTVFIODEV  *pDev;
+} TSTVFIOMAP;
+
+/**
  * The fake kernel state.
  */
 typedef struct TSTVFIOKRNL
@@ -181,6 +197,12 @@ typedef struct TSTVFIOKRNL
     TSTVFIOFD           aFds[TSTVFIO_MAX_FDS];
     /** The DMA mappings. */
     TSTVFIODMA          aDma[TSTVFIO_MAX_DMA];
+    /** The region mappings the users of the PCI functions have made. */
+    TSTVFIOMAP          aMaps[64];
+    /** Called after config space writes, optional. */
+    PFNTSTVFIOCFGWRITE  pfnCfgWriteHook;
+    /** The user argument for pfnCfgWriteHook. */
+    void               *pvCfgWriteHookUser;
     /** The I/O address spaces, 0 if the entry is unused. */
     uint32_t            aidIoas[TSTVFIO_MAX_IOAS];
     /** The next I/O address space ID. */
@@ -597,6 +619,21 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
 
 
 /**
+ * Brings the config space of a PCI function back to its power-on content, as a
+ * reset does.
+ *
+ * @returns true on success, false on failure.
+ * @param   pDev                The PCI function.
+ */
+static bool tstVfioKrnlDevResetCfg(PTSTVFIODEV pDev)
+{
+    ssize_t cbWritten = __real_pwrite(pDev->iFdBacking, pDev->Cfg.abCfg, pDev->Cfg.cbCfg,
+                                      (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX]);
+    return cbWritten == (ssize_t)pDev->Cfg.cbCfg;
+}
+
+
+/**
  * Handles an ioctl on a VFIO device.
  *
  * @returns 0 on success, -1 with errno set on failure.
@@ -691,12 +728,29 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
 
         case VFIO_DEVICE_RESET:
         {
-            /* A function level reset brings the config space back to its power-on content. */
-            ssize_t cbWritten = __real_pwrite(pDev->iFdBacking, pDev->Cfg.abCfg, pDev->Cfg.cbCfg,
-                                              (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX]);
-            if (cbWritten != (ssize_t)pDev->Cfg.cbCfg)
+            if (pDev->Cfg.fNoFunctionReset)
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlDevResetCfg(pDev))
                 return errno = EIO, -1;
             pDev->cResets++;
+            return 0;
+        }
+
+        case VFIO_DEVICE_PCI_HOT_RESET:
+        {
+            /* All functions are on one bus.  Ownership goes by the IOMMUFD context, so no group descriptors. */
+            struct vfio_pci_hot_reset *pReset = (struct vfio_pci_hot_reset *)pvArg;
+            if (pReset->argsz < sizeof(*pReset) || pReset->flags || pReset->count)
+                return errno = EINVAL, -1;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                if (g_Krnl.aDevs[i].Cfg.fNoBusReset)
+                    return errno = EPERM, -1;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+            {
+                if (!tstVfioKrnlDevResetCfg(&g_Krnl.aDevs[i]))
+                    return errno = EIO, -1;
+                g_Krnl.aDevs[i].cBusResets++;
+            }
             return 0;
         }
 
@@ -800,6 +854,16 @@ static int tstVfioKrnlCheckFdAccess(int iFd, off_t off, bool fWrite)
                      && !(  pDev->Cfg.aRegions[idxRegion].fFlags
                           & (fWrite ? VFIO_REGION_INFO_FLAG_WRITE : VFIO_REGION_INFO_FLAG_READ)))
                 iErrno = EINVAL;
+            else if (   idxRegion <= VFIO_PCI_BAR5_REGION_INDEX
+                     && !(pDev->Cfg.abCfg[VBOX_PCI_BASE_ADDRESS_0 + idxRegion * 4] & PCI_ADDRESS_SPACE_IO))
+            {
+                /* A memory BAR is out of reach while the function doesn't decode memory. */
+                uint16_t u16Cmd = 0;
+                if (   __real_pread(pDev->iFdBacking, &u16Cmd, sizeof(u16Cmd),
+                                    (off_t)(pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX] + VBOX_PCI_COMMAND)) != sizeof(u16Cmd)
+                    || !(u16Cmd & VBOX_PCI_COMMAND_MEMORY))
+                    iErrno = EIO;
+            }
         }
         RTCritSectLeave(&g_Krnl.CritSect);
     }
@@ -851,6 +915,9 @@ void tstVfioKrnlTerm(void)
     for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
         if (g_Krnl.aFds[i].enmType != TSTVFIOFDTYPE_FREE)
             __real_close(g_Krnl.aFds[i].iFd);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+        if (g_Krnl.aMaps[i].pv)
+            munmap(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb);
 
     for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
     {
@@ -1026,6 +1093,51 @@ uint32_t tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex)
 uint32_t tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev)
 {
     return pDev->cResets;
+}
+
+
+/**
+ * Returns the number of resets of the bus the PCI function is on.
+ *
+ * @returns Number of bus resets.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetBusResetCount(PTSTVFIODEV pDev)
+{
+    return pDev->cBusResets;
+}
+
+
+/**
+ * Makes the mappings the user of a PCI function has of its regions unusable, or
+ * usable again.  The kernel does that at times, touching such a mapping gets the
+ * process a signal.
+ *
+ * @param   pDev                The PCI function.
+ * @param   fProtect            Whether to make the mappings unusable (true) or usable (false).
+ */
+void tstVfioKrnlDevProtectMappings(PTSTVFIODEV pDev, bool fProtect)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+        if (g_Krnl.aMaps[i].pv && g_Krnl.aMaps[i].pDev == pDev)
+            mprotect(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb, fProtect ? PROT_NONE : PROT_READ | PROT_WRITE);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Sets the callback for writes to the config space of the PCI functions.
+ *
+ * @param   pfnHook             The callback, NULL for none.
+ * @param   pvUser              The user argument for the callback.
+ */
+void tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.pfnCfgWriteHook    = pfnHook;
+    g_Krnl.pvCfgWriteHookUser = pvUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
 }
 
 
@@ -1287,6 +1399,40 @@ int __wrap_ioctl(int iFd, unsigned long uReq, ...)
 }
 
 
+/**
+ * Tells the test about a write to the config space of a PCI function if it
+ * asked for that.
+ *
+ * @param   iFd                 The file descriptor written to.
+ * @param   off                 Offset of the write.
+ * @param   cb                  Number of bytes written.
+ */
+static void tstVfioKrnlCfgWriteNotify(int iFd, off_t off, size_t cb)
+{
+    if (!g_Krnl.fInitialized)
+        return;
+
+    PFNTSTVFIOCFGWRITE pfnHook = NULL;
+    void              *pvUser  = NULL;
+    PTSTVFIODEV        pDev    = NULL;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+    if (   pFd
+        && pFd->enmType == TSTVFIOFDTYPE_DEVICE
+        && ((uint64_t)off >> TSTVFIO_REGION_SHIFT) == VFIO_PCI_CONFIG_REGION_INDEX)
+    {
+        pfnHook = g_Krnl.pfnCfgWriteHook;
+        pvUser  = g_Krnl.pvCfgWriteHookUser;
+        pDev    = pFd->pDev;
+    }
+    RTCritSectLeave(&g_Krnl.CritSect);
+
+    /* Not while holding the lock, the callback gets to use this interface. */
+    if (pfnHook)
+        pfnHook(pDev, (uint32_t)((uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1)), cb, pvUser);
+}
+
+
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off)
 {
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
@@ -1310,7 +1456,10 @@ ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
-    return __real_pwrite(iFd, pvBuf, cbBuf, off);
+    ssize_t const cbWritten = __real_pwrite(iFd, pvBuf, cbBuf, off);
+    if (cbWritten > 0)
+        tstVfioKrnlCfgWriteNotify(iFd, off, (size_t)cbWritten);
+    return cbWritten;
 }
 
 
@@ -1319,7 +1468,10 @@ ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
-    return __real_pwrite64(iFd, pvBuf, cbBuf, off);
+    ssize_t const cbWritten = __real_pwrite64(iFd, pvBuf, cbBuf, off);
+    if (cbWritten > 0)
+        tstVfioKrnlCfgWriteNotify(iFd, off, (size_t)cbWritten);
+    return cbWritten;
 }
 
 
@@ -1365,6 +1517,35 @@ static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, int fProt, off_t off)
 }
 
 
+/**
+ * Remembers a mapping of a region of a PCI function.
+ *
+ * @returns pv.
+ * @param   iFd                 The file descriptor which was mapped.
+ * @param   pv                  The mapping, MAP_FAILED if it failed.
+ * @param   cb                  Size of the mapping.
+ */
+static void *tstVfioKrnlMmapRecord(int iFd, void *pv, size_t cb)
+{
+    if (pv != MAP_FAILED && g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd && pFd->enmType == TSTVFIOFDTYPE_DEVICE)
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+                if (!g_Krnl.aMaps[i].pv)
+                {
+                    g_Krnl.aMaps[i].pv   = pv;
+                    g_Krnl.aMaps[i].cb   = cb;
+                    g_Krnl.aMaps[i].pDev = pFd->pDev;
+                    break;
+                }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return pv;
+}
+
+
 void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
 {
     if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
@@ -1372,7 +1553,7 @@ void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t
         errno = EINVAL;
         return MAP_FAILED;
     }
-    return __real_mmap(pvAddr, cb, fProt, fFlags, iFd, off);
+    return tstVfioKrnlMmapRecord(iFd, __real_mmap(pvAddr, cb, fProt, fFlags, iFd, off), cb);
 }
 
 
@@ -1383,5 +1564,5 @@ void *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off
         errno = EINVAL;
         return MAP_FAILED;
     }
-    return __real_mmap64(pvAddr, cb, fProt, fFlags, iFd, off);
+    return tstVfioKrnlMmapRecord(iFd, __real_mmap64(pvAddr, cb, fProt, fFlags, iFd, off), cb);
 }
