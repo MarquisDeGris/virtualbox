@@ -2259,7 +2259,6 @@ static int pciVfioCfgSpaceParseExtCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun,
         uint16_t const u16CapId   = u32CapHdr & UINT16_C(0xffff);
         uint8_t  const bCapVers   = (u32CapHdr >> 16) & 0xf; RT_NOREF(bCapVers);
         uint16_t const offCapNext = (u32CapHdr >> 20) & 0xffc; /* The bottom two bits are reserved. */
-        uint16_t       cbCap      = sizeof(uint32_t);
         bool fSupported = false;
         switch (u16CapId)
         {
