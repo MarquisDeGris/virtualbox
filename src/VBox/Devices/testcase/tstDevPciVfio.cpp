@@ -852,6 +852,234 @@ static void tstExtCapsLoop(void)
 
 
 /**
+ * The smallest MSI capability there is, 32-bit address and no masking, with
+ * another capability right behind it: the guest gets MSI with that layout and
+ * the neighbour stays what it is.
+ */
+static void tstMsiSmallLayout(void)
+{
+    RTTestISub("32-bit MSI without masking, followed by another capability");
+
+    uint8_t const        offVendorCap      = TST_MSI_CAP_OFF + 12;
+    static const uint8_t s_abVendorBody[6] = { 8 /* length */, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5 };
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_NETWORK, 0x00 /* Ethernet */);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddMsiCap(&Model, TST_MSI_CAP_OFF, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
+    tstModelAddCap(&Model, offVendorCap, 0x09 /* vendor specific */, s_abVendorBody, sizeof(s_abVendorBody));
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* The guest sees the layout of the device. */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        RTTESTI_CHECK_MSG(!(fMsgCtrl & (VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT | VBOX_PCI_MSI_FLAGS_ENABLE)),
+                          ("message control %#RX32\n", fMsgCtrl));
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 1, 1) == offVendorCap);
+
+        /* The vendor capability behind it is the one of the device. */
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap, 1) == 0x09);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap + 1, 1) == TST_EXP_CAP_OFF);
+        uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap + 4, 4);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0xa5a4a3a2), ("read %#RX32 from the vendor capability\n", u32));
+
+        /* Reading through the whole config space with every access width works. */
+        for (uint32_t off = 0; off < 256; off++)
+        {
+            tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 1);
+            if (!(off & 1))
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 2);
+            if (!(off & 3))
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 4);
+        }
+
+        /* MSI works with this layout: address at +4, data at +8. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4, UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8, 0x4043, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+        uint32_t const cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
+        TSTPDMMSI Msi;
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+        {
+            RTTESTI_CHECK_MSG(Msi.uAddr == UINT64_C(0xfee00000), ("address %#RX64\n", Msi.uAddr));
+            RTTESTI_CHECK_MSG(Msi.uData == 0x4043, ("data %#RX32\n", Msi.uData));
+        }
+
+        /* None of this has changed the vendor capability of the device. */
+        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+        RTTESTI_CHECK(pbCfg != NULL);
+        if (pbCfg)
+            RTTESTI_CHECK_MSG(!memcmp(&pbCfg[offVendorCap + 2], s_abVendorBody, sizeof(s_abVendorBody)),
+                              ("the vendor capability of the device was changed: %.6Rhxs\n", &pbCfg[offVendorCap + 2]));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * MSI with per-vector masking and several vectors: the vector number ends up
+ * in the message data, masked vectors are held back, show up in the pending
+ * bits and get delivered when unmasked.
+ */
+static void tstMsiMasking(void)
+{
+    RTTestISub("MSI with several vectors and per-vector masking");
+
+    /* The default model has a 64-bit MSI capability with masking: mask bits at +16, pending bits at +20. */
+    uint32_t const offMask    = TST_MSI_CAP_OFF + 16;
+    uint32_t const offPending = TST_MSI_CAP_OFF + 20;
+    TSTVFIODEVCFG  Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* The guest is offered the four vectors of the device. */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        RTTESTI_CHECK_MSG(   (fMsgCtrl & (VBOX_PCI_MSI_FLAGS_QMASK | VBOX_PCI_MSI_FLAGS_QSIZE | VBOX_PCI_MSI_FLAGS_ENABLE))
+                          == (2 << 1), ("message control %#RX32\n", fMsgCtrl));
+
+        /* Program the message, mask vector 1 and enable MSI with all four vectors. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8,  0, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 0x4040, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offMask, RT_BIT_32(1), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | (2 << 4) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 4);
+
+        /* Unmasked vectors arrive with the vector number in the low bits of the message data. */
+        static const uint8_t s_aidxVectors[] = { 0, 3, 2 };
+        TSTPDMMSI Msi;
+        for (uint32_t i = 0; i < RT_ELEMENTS(s_aidxVectors); i++)
+        {
+            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, s_aidxVectors[i]), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("vector %u did not arrive\n", s_aidxVectors[i]));
+            if (tstPdmMsiGet(cMsisBefore, &Msi))
+                RTTESTI_CHECK_MSG(Msi.uData == UINT32_C(0x4040) + s_aidxVectors[i],
+                                  ("vector %u: data %#RX32\n", s_aidxVectors[i], Msi.uData));
+        }
+
+        /* The masked one is held back and shows up as pending, which the guest can't change. */
+        uint32_t cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 1), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(!tstPdmMsiWait(cMsisBefore + 1, 250 /*ms*/), ("vector 1 was delivered although it is masked\n"));
+        uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offPending, 4);
+        RTTESTI_CHECK_MSG(u32 == RT_BIT_32(1), ("pending bits %#RX32 with vector 1 pending\n", u32));
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offPending, 0, 4);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offPending, 4);
+        RTTESTI_CHECK_MSG(u32 == RT_BIT_32(1), ("pending bits %#RX32 after the guest wrote to them\n", u32));
+
+        /* Unmasking delivers it. */
+        cMsisBefore = tstPdmMsiGetCount();
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offMask, 0, 4);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("vector 1 was not delivered when unmasked\n"));
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+            RTTESTI_CHECK_MSG(Msi.uData == UINT32_C(0x4041), ("vector 1: data %#RX32\n", Msi.uData));
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offPending, 4);
+        RTTESTI_CHECK_MSG(u32 == 0, ("pending bits %#RX32 after the delivery\n", u32));
+
+        /* There are only mask bits for the vectors the device has. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offMask, UINT32_MAX, 4);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offMask, 4);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0xf), ("mask bits %#RX32\n", u32));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Config space writes of every width do what they should to the registers
+ * they cover, also when they cover several registers or only a part of one.
+ */
+static void tstCfgWriteWidths(void)
+{
+    RTTestISub("Config space writes of all widths");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* A dword write covering the command and the status register enables memory decoding. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 4);
+        uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 2);
+        RTTESTI_CHECK_MSG(u32 & VBOX_PCI_COMMAND_MEMORY, ("command register %#RX32\n", u32));
+        uint32_t *pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR0_REGION_INDEX);
+        RTTESTI_CHECK(pau32Bar0 != NULL);
+        if (pau32Bar0)
+        {
+            pau32Bar0[0] = UINT32_C(0x88888888);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0x88888888), ("read %#RX32 from BAR0\n", u32));
+        }
+
+        /* A byte write to the upper half of the command register disables INTx and leaves the lower half alone. */
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND + 1, VBOX_PCI_COMMAND_INTX_DISABLE >> 8, 1);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 2);
+        RTTESTI_CHECK_MSG(   (u32 & (VBOX_PCI_COMMAND_INTX_DISABLE | VBOX_PCI_COMMAND_MEMORY))
+                          == (VBOX_PCI_COMMAND_INTX_DISABLE | VBOX_PCI_COMMAND_MEMORY), ("command register %#RX32\n", u32));
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 0);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND + 1, 0, 1);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
+
+        /* A byte write to the lower half of the MSI message control register enables MSI. */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, (fMsgCtrl & 0xff) | VBOX_PCI_MSI_FLAGS_ENABLE, 1);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        RTTESTI_CHECK_MSG(u32 == (fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE), ("message control %#RX32\n", u32));
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 0);
+
+        /* A dword write covering the capability header and the message control register disables MSI
+           again and changes nothing else. */
+        uint32_t const u32CapHdr = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF, UINT32_MAX & ~((uint32_t)VBOX_PCI_MSI_FLAGS_ENABLE << 16), 4);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF, 4);
+        RTTESTI_CHECK_MSG(   (u32 & UINT32_C(0xffff)) == (u32CapHdr & UINT32_C(0xffff))
+                          && !(u32 & ((uint32_t)VBOX_PCI_MSI_FLAGS_ENABLE << 16))
+                          && ((u32 >> 16) & (VBOX_PCI_MSI_FLAGS_QMASK | VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT))
+                             == (fMsgCtrl & (VBOX_PCI_MSI_FLAGS_QMASK | VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT)),
+                          ("capability header and message control %#RX32, was %#RX32\n", u32, u32CapHdr));
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 0);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
+
+        /* A dword write covering the message data and the reserved word behind it sets the message data. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, UINT32_C(0xffff4044), 4);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 4);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x4044), ("message data and reserved word %#RX32\n", u32));
+
+        /* The interrupt line register can be written on its own and together with its read-only neighbours. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_INTERRUPT_LINE, 0x0b, 1);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_INTERRUPT_LINE, 1) == 0x0b);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_INTERRUPT_LINE, UINT32_C(0xffffff05), 4);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_INTERRUPT_LINE, 2);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x0105), ("interrupt line and pin %#RX32\n", u32));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
  * A device with two functions: both show up with their own identity and each
  * BAR belongs to the function which has it.
  */
@@ -1073,6 +1301,9 @@ int main()
     tstMsiVectorCount();
     tstMsixDedicatedBar();
     tstMsixSharedBar();
+    tstMsiSmallLayout();
+    tstMsiMasking();
+    tstCfgWriteWidths();
     tstCapsDescending();
     tstCapsLoop();
     tstExtCapsLoop();

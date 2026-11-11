@@ -1203,6 +1203,36 @@ static DECLCALLBACK(void) tstPdmHlp_PCISetIrq(PPDMDEVINS pDevIns, PPDMPCIDEV pPc
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnPCIConfigWrite} */
+static DECLCALLBACK(VBOXSTRICTRC) tstPdmHlp_PCIConfigWrite(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint32_t uAddress,
+                                                          unsigned cb, uint32_t u32Value)
+{
+    if (!pPciDev) /* NULL is an alias for the default PCI device. */
+        pPciDev = pDevIns->apPciDevs[0];
+    AssertReturn(pPciDev, VERR_PDM_NOT_PCI_DEVICE);
+
+    /* This is the default handling of the bus, the device interception is not involved. */
+    PTSTPDMPCIBUS pBus = tstPdmPciBusFromDev(pPciDev);
+    AssertReturn(pBus, VERR_INTERNAL_ERROR_2);
+    return pBus->Reg.pfnConfigWrite(pBus->pDevIns, pPciDev, uAddress, cb, u32Value);
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnPCIConfigRead} */
+static DECLCALLBACK(VBOXSTRICTRC) tstPdmHlp_PCIConfigRead(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint32_t uAddress,
+                                                         unsigned cb, uint32_t *pu32Value)
+{
+    if (!pPciDev) /* NULL is an alias for the default PCI device. */
+        pPciDev = pDevIns->apPciDevs[0];
+    AssertReturn(pPciDev, VERR_PDM_NOT_PCI_DEVICE);
+
+    /* This is the default handling of the bus, the device interception is not involved. */
+    PTSTPDMPCIBUS pBus = tstPdmPciBusFromDev(pPciDev);
+    AssertReturn(pBus, VERR_INTERNAL_ERROR_2);
+    return pBus->Reg.pfnConfigRead(pBus->pDevIns, pPciDev, uAddress, cb, pu32Value);
+}
+
+
 /** @interface_method_impl{PDMPCIHLPR3,pfnIsaSetIrq} */
 static DECLCALLBACK(void) tstPdmPciHlp_IsaSetIrq(PPDMDEVINS pDevIns, int iIrq, int iLevel, uint32_t uTagSrc)
 {
@@ -1524,6 +1554,8 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnPCIRegisterMsi                  = tstPdmHlp_PCIRegisterMsi;
     g_tstPdmDevHlpR3.pfnPCIIORegionRegister             = tstPdmHlp_PCIIORegionRegister;
     g_tstPdmDevHlpR3.pfnPCIInterceptConfigAccesses      = tstPdmHlp_PCIInterceptConfigAccesses;
+    g_tstPdmDevHlpR3.pfnPCIConfigWrite                  = tstPdmHlp_PCIConfigWrite;
+    g_tstPdmDevHlpR3.pfnPCIConfigRead                   = tstPdmHlp_PCIConfigRead;
     g_tstPdmDevHlpR3.pfnPCISetIrq                       = tstPdmHlp_PCISetIrq;
     g_tstPdmDevHlpR3.pfnPCISetIrqNoWait                 = tstPdmHlp_PCISetIrq;
     g_tstPdmDevHlpR3.pfnThreadCreate                    = tstPdmHlp_ThreadCreate;
