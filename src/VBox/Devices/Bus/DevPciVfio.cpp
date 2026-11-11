@@ -1954,7 +1954,7 @@ static int pciVfioIrqUpdate(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint16_t u16Cmd, u
          * get more than the device has.
          */
         uVfioIrq = VFIO_PCI_MSI_IRQ_INDEX;
-        cVectors = RT_MIN(RT_BIT_32((u16MsiCtrl & VBOX_PCI_MSI_FLAGS_QSIZE) >> 4), pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]);
+        cVectors = RT_BIT_32((u16MsiCtrl & VBOX_PCI_MSI_FLAGS_QSIZE) >> 4); /* deliberate defect: no limit */
     }
     else if (   pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]
              && !(u16Cmd & VBOX_PCI_COMMAND_INTX_DISABLE))
