@@ -29,9 +29,9 @@
  *
  * The VFIO passthrough device talks to the host kernel through open(),
  * close(), ioctl(), pread(), pwrite(), mmap(), poll() and eventfds.  The
- * testcase binary is linked with the GNU ld --wrap option for the first five,
- * which routes these calls from the device code to the wrappers at the end of
- * this file.  Calls concerning file descriptors or paths not owned by the fake
+ * testcase binary is linked with the GNU ld --wrap option for all but the last
+ * two, which routes these calls from the device code to the wrappers at the end
+ * of this file.  Calls concerning file descriptors or paths not owned by the fake
  * kernel are forwarded to the C library unchanged.
  *
  * A PCI function is modelled by a memory file (memfd).  Every VFIO region
@@ -209,6 +209,8 @@ ssize_t __real_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __real_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __real_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __real_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
+void   *__real_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
+void   *__real_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
 
 /* The wrappers. */
 int     __wrap_open(const char *pszPath, int fFlags, ...);
@@ -219,6 +221,8 @@ ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
+void   *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
+void   *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
 RT_C_DECLS_END
 
 
@@ -1220,4 +1224,63 @@ ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     if (tstVfioKrnlIsFdOfGoneDev(iFd))
         return errno = ENODEV, -1;
     return __real_pwrite64(iFd, pvBuf, cbBuf, off);
+}
+
+
+/**
+ * Checks whether the user may map the given part of a file of the fake kernel.
+ *
+ * Like vfio-pci this only allows mapping regions which are flagged as mappable.
+ *
+ * @returns true if the mapping can go ahead, false if it has to be refused.
+ * @param   iFd                 The file descriptor.
+ * @param   cb                  Size of the mapping.
+ * @param   off                 Offset of the mapping.
+ */
+static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, off_t off)
+{
+    bool fAllowed = true;
+    if (g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd)
+        {
+            fAllowed = false;
+            if (pFd->enmType == TSTVFIOFDTYPE_DEVICE && !pFd->pDev->fGone)
+            {
+                PTSTVFIODEV pDev      = pFd->pDev;
+                uint64_t    idxRegion = (uint64_t)off >> TSTVFIO_REGION_SHIFT;
+                uint64_t    offRegion = (uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1);
+                fAllowed =    idxRegion < TSTVFIO_REGION_COUNT
+                           && idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
+                           && (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_MMAP)
+                           && offRegion + cb <= RT_ALIGN_64(pDev->acbRegions[idxRegion], TSTVFIO_PAGE_SIZE);
+            }
+        }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return fAllowed;
+}
+
+
+void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
+{
+    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, off))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    return __real_mmap(pvAddr, cb, fProt, fFlags, iFd, off);
+}
+
+
+void *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
+{
+    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, off))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    return __real_mmap64(pvAddr, cb, fProt, fFlags, iFd, off);
 }

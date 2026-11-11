@@ -753,6 +753,122 @@ static void tstMsixSharedBar(void)
 
 
 /**
+ * A device with two functions: both show up with their own identity and each
+ * BAR belongs to the function which has it.
+ */
+static void tstMultiFunction(void)
+{
+    RTTestISub("Two functions, each with a memory BAR");
+
+    uint32_t const    acbBar0[2]      = { _64K, _16K };
+    uint32_t const    aGCPhysBar0[2]  = { TST_BAR0_ADDR, TST_BAR0_ADDR + _1M };
+    uint32_t const    au32Pattern[2]  = { UINT32_C(0xf00d0000), UINT32_C(0xf00d0001) };
+    TSTVFIODEVCFG     aModels[2];
+    tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+    tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+    tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+    for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+    {
+        tstModelSetBar(&aModels[i], 0, acbBar0[i], PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&aModels[i], TST_EXP_CAP_OFF);
+    }
+
+    PTSTVFIODEV apDevs[2] = { NULL, NULL };
+    int rc = tstFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* Both functions are there and function 0 tells the guest to look for more. */
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN,     VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN + 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN,     VBOX_PCI_HEADER_TYPE, 1) & 0x80);
+
+        for (uint8_t i = 0; i < RT_ELEMENTS(aModels); i++)
+        {
+            /* The BAR has the size it has on this function ... */
+            uint8_t const uDevFn = TST_PCI_DEVFN + i;
+            tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, UINT32_MAX, 4);
+            uint32_t u32 = tstPdmPciCfgRead(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, 4);
+            RTTESTI_CHECK_MSG(u32 == ~(acbBar0[i] - 1), ("function %u: BAR0 sizing returned %#RX32\n", i, u32));
+            tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, aGCPhysBar0[i], 4);
+            tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+            /* ... and shows the memory of this function. */
+            uint32_t *pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(apDevs[i], VFIO_PCI_BAR0_REGION_INDEX);
+            RTTESTI_CHECK(pau32Bar0 != NULL);
+            if (pau32Bar0)
+            {
+                pau32Bar0[1] = au32Pattern[i];
+                u32 = 0;
+                RTTESTI_CHECK_RC(tstPdmPhysRead(aGCPhysBar0[i] + 4, &u32, sizeof(u32)), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(u32 == au32Pattern[i], ("function %u: read %#RX32 from BAR0\n", i, u32));
+            }
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A BAR which VFIO does not allow to map, a small one at that: the guest
+ * reaches the device registers nevertheless, and nothing behind the BAR.
+ */
+static void tstUnmappableBar(void)
+{
+    RTTestISub("BAR which can't be mapped");
+
+    uint32_t const cbBar1     = 256;
+    uint32_t const GCPhysBar1 = TST_BAR0_ADDR + _1M;
+    TSTVFIODEVCFG  Model;
+    tstModelInitDefault(&Model);
+    tstModelSetBar(&Model, 1, cbBar1, PCI_ADDRESS_SPACE_MEM);
+    Model.aRegions[1].fFlags &= ~(uint32_t)VFIO_REGION_INFO_FLAG_MMAP;
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0 + 4, GCPhysBar1, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+        /* The test maps a whole page of the model, of which the first 256 bytes are the BAR. */
+        uint32_t *pau32Bar1 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR1_REGION_INDEX);
+        RTTESTI_CHECK(pau32Bar1 != NULL);
+        if (pau32Bar1)
+        {
+            /* Reads and writes reach the device with the width the guest uses. */
+            pau32Bar1[4] = UINT32_C(0x44444444);
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(GCPhysBar1 + 16, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0x44444444), ("read %#RX32 from BAR1\n", u32));
+            u32 = UINT32_C(0x55555555);
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysBar1 + 32, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar1[8] == UINT32_C(0x55555555), ("the device sees %#RX32 in BAR1\n", pau32Bar1[8]));
+            uint8_t b = 0x66;
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysBar1 + 37, &b, sizeof(b)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar1[9] == UINT32_C(0x00006600), ("the device sees %#RX32 after a byte write\n", pau32Bar1[9]));
+
+            /* The guest sees a page, but there is nothing behind the BAR and nothing it could change there. */
+            pau32Bar1[cbBar1 / 4] = UINT32_C(0x77777777);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(GCPhysBar1 + cbBar1, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_MAX, ("read %#RX32 from behind BAR1\n", u32));
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysBar1 + cbBar1, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar1[cbBar1 / 4] == UINT32_C(0x77777777),
+                              ("a guest write behind BAR1 changed the device memory to %#RX32\n", pau32Bar1[cbBar1 / 4]));
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
  * Reset with MSI enabled: the device gets reset, MSI is off afterwards on both
  * sides and works again when the guest enables it anew.
  */
@@ -858,6 +974,8 @@ int main()
     tstMsiVectorCount();
     tstMsixDedicatedBar();
     tstMsixSharedBar();
+    tstMultiFunction();
+    tstUnmappableBar();
     tstResetMsi();
     tstResetMsix();
     tstUnknownNode();
