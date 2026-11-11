@@ -83,6 +83,13 @@ jobs:
       - name: Configure
         run: |
           export KBUILD_PATH="$PWD/kBuild/kBuild"
+          # The runner image ships libstdc++ headers of several GCC versions and
+          # configure picks the first it finds; keep only those of the default g++.
+          gccmaj=$(g++ -dumpversion | cut -d. -f1)
+          for d in /usr/include/c++/* /usr/include/x86_64-linux-gnu/c++/*; do
+            [ "$(basename "$d")" = "$gccmaj" ] || sudo rm -rf "$d"
+          done
+          ls /usr/include/c++
           ./configure --help > configure-help.log 2>&1 || true
           ./configure --ose --build-headless --disable-docs --disable-additions \
             --disable-validationkit --disable-python --disable-hardening \
