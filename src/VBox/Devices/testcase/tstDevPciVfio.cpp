@@ -242,6 +242,23 @@ static void tstModelInitDefault(PTSTVFIODEVCFG pModel)
 
 
 /**
+ * Initializes a storage controller like device model without INTx and MSI,
+ * with an MSI-X table and pending bit array in BAR2, which holds nothing else.
+ *
+ * @param   pModel              The device model.
+ * @param   cVectors            The MSI-X table size.
+ */
+static void tstModelInitMsixDedicatedBar(PTSTVFIODEVCFG pModel, uint16_t cVectors)
+{
+    tstModelInit(pModel, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+    tstModelSetBar(pModel, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    tstModelSetBar(pModel, 2, _8K, PCI_ADDRESS_SPACE_MEM);
+    tstModelAddExpCap(pModel, TST_EXP_CAP_OFF);
+    tstModelAddMsixCap(pModel, TST_MSIX_CAP_OFF, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
+}
+
+
+/**
  * Sets up the fake kernel with the given PCI functions and a VM with the ICH9
  * PCI bus and one passthrough device using these functions.
  *
@@ -501,11 +518,7 @@ static void tstMsixDedicatedBar(void)
     uint16_t const        cVectors        = 64;
 
     TSTVFIODEVCFG Model;
-    tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
-    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
-    tstModelSetBar(&Model, 2, _8K, PCI_ADDRESS_SPACE_MEM);
-    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
-    tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
+    tstModelInitMsixDedicatedBar(&Model, cVectors);
 
     PTSTVFIODEV pDev = NULL;
     int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
@@ -556,6 +569,99 @@ static void tstMsixDedicatedBar(void)
 }
 
 
+/**
+ * Reset with MSI enabled: the device gets reset, MSI is off afterwards on both
+ * sides and works again when the guest enables it anew.
+ */
+static void tstResetMsi(void)
+{
+    RTTestISub("Reset with MSI enabled");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        uint32_t const fMsgCtrl =   tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2)
+                                  & ~(uint32_t)(VBOX_PCI_MSI_FLAGS_QSIZE | VBOX_PCI_MSI_FLAGS_ENABLE);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+
+        uint32_t const cResetsBefore = tstVfioKrnlDevGetResetCount(pDev);
+        tstPdmReset();
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore + 1,
+                          ("%u device reset(s)\n", tstVfioKrnlDevGetResetCount(pDev) - cResetsBefore));
+
+        /* The guest sees MSI disabled and the device does not have it set up any more. */
+        RTTESTI_CHECK(!(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2) & VBOX_PCI_MSI_FLAGS_ENABLE));
+        uint32_t const cEnabled = tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX);
+        RTTESTI_CHECK_MSG(cEnabled == 0, ("%u MSI vector(s) enabled on the device after the reset\n", cEnabled));
+
+        /* Enabling it again works and interrupts arrive. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8,  0, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 0x4042, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+        uint32_t const cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Reset with MSI-X enabled: MSI-X is off afterwards on both sides and all
+ * vectors are masked.
+ */
+static void tstResetMsix(void)
+{
+    RTTestISub("Reset with MSI-X enabled");
+
+    uint16_t const cVectors = 8;
+    TSTVFIODEVCFG  Model;
+    tstModelInitMsixDedicatedBar(&Model, cVectors);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* Map the table, unmask vector 0 and enable MSI-X. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0 + 2 * 4, TST_MSIX_BAR_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+        uint32_t u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_MSIX_BAR_ADDR + 12, &u32, sizeof(u32)), VINF_SUCCESS);
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSIX_IRQ_INDEX) == cVectors);
+
+        tstPdmReset();
+
+        /* The guest sees MSI-X disabled with the table size intact, and the device does not have it set up any more. */
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, 2);
+        RTTESTI_CHECK_MSG(u32 == (uint32_t)cVectors - 1, ("message control %#RX32 after the reset\n", u32));
+        uint32_t const cEnabled = tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSIX_IRQ_INDEX);
+        RTTESTI_CHECK_MSG(cEnabled == 0, ("%u MSI-X vector(s) enabled on the device after the reset\n", cEnabled));
+
+        /* The vector unmasked before the reset is masked again; map the table where the tests want it to look. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 0, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0 + 2 * 4, TST_MSIX_BAR_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+        u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_MSIX_BAR_ADDR + 12, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 & RT_BIT_32(0), ("vector control of entry 0 is %#RX32 after the reset\n", u32));
+    }
+    tstFixtureTeardown();
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -568,6 +674,8 @@ int main()
     tstMsi();
     tstMsiVectorCount();
     tstMsixDedicatedBar();
+    tstResetMsi();
+    tstResetMsix();
     tstUnknownNode();
 
     return RTTestSummaryAndDestroy(hTest);
