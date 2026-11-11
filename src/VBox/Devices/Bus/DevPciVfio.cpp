@@ -977,7 +977,7 @@ static void pciVfioBarSegAccess(PPDMDEVINS pDevIns, PCVFIOPCIBARSEG pSeg, RTGCPH
             cbChunk = RT_MIN(cbChunk, pBar->cbRegion - offBar);
             if (fMsix)
             {
-                if (offBar - pFun->offMsixTbl < pFun->cbMsixTbl)
+                if (offBar - pFun->offMsixTbl <= pFun->cbMsixTbl) /* deliberate defect: off by one */
                 {
                     enmWhat = kMsixTbl;
                     cbChunk = RT_MIN(cbChunk, (uint64_t)pFun->offMsixTbl + pFun->cbMsixTbl - offBar);
