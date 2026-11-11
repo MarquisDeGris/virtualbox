@@ -1426,6 +1426,38 @@ static void tstMsixSharedBar(void)
         RTTESTI_CHECK_MSG(*(uint32_t *)&pbBar0[offTable + 0x104] == UINT32_C(0x33333333),
                           ("the device sees %#RX32 in the register behind the table\n", *(uint32_t *)&pbBar0[offTable + 0x104]));
 
+        /*
+         * Right behind the table and the pending bits: the first byte there belongs to the
+         * device, and an access reaching across the end is split between the two.
+         */
+        uint32_t const offTableEnd = offTable + cVectors * 16;
+        uint32_t const offPbaEnd   = offPba + 8;
+        pbBar0[offTableEnd]     = 0x55;
+        pbBar0[offTableEnd + 1] = 0x66;
+        pbBar0[offPbaEnd]       = 0x77;
+        pbBar0[offPbaEnd + 1]   = 0x88;
+        uint8_t bEdge = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTableEnd, &bEdge, sizeof(bEdge)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(bEdge == 0x55, ("read %#x from the byte behind the table\n", bEdge));
+        u32 = UINT32_MAX;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTableEnd - 2, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x66550000), ("read %#RX32 across the end of the table\n", u32));
+        bEdge = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPbaEnd, &bEdge, sizeof(bEdge)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(bEdge == 0x77, ("read %#x from the byte behind the pending bits\n", bEdge));
+        u32 = UINT32_MAX;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPbaEnd - 2, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x88770000), ("read %#RX32 across the end of the pending bits\n", u32));
+        static const uint8_t s_abAcross[4] = { 0xff, 0xff, 0xee, 0xdd };
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offTableEnd - 2, s_abAcross, sizeof(s_abAcross)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(   pbBar0[offTableEnd - 2] == 0xa5 && pbBar0[offTableEnd - 1] == 0xa5
+                          && pbBar0[offTableEnd]     == 0xee && pbBar0[offTableEnd + 1] == 0xdd,
+                          ("the device has %.4Rhxs around the end of the table after a write across it\n",
+                           &pbBar0[offTableEnd - 2]));
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offPbaEnd - 2, s_abAcross, sizeof(s_abAcross)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(pbBar0[offPbaEnd] == 0xee && pbBar0[offPbaEnd + 1] == 0xdd,
+                          ("the device has %.2Rhxs behind the pending bits after a write across their end\n", &pbBar0[offPbaEnd]));
+
         /* All vectors start out masked.  Fill in the table, leaving vector 2 masked. */
         u32 = 0;
         RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTable + 12, &u32, sizeof(u32)), VINF_SUCCESS);
@@ -2012,6 +2044,24 @@ static void tstResetMsix(void)
 /** Where tstFuzz() makes the guest map an I/O port BAR. */
 #define TST_FUZZ_IO_PORT(a_iBar)    (UINT32_C(0xd000) + (a_iBar) * UINT32_C(0x100))
 
+/**
+ * What tstFuzzGuestOp() gets to know about a device model made up by
+ * tstFuzzModelInit().
+ */
+typedef struct TSTFUZZINFO
+{
+    /** Whether the device is configured to expose the legacy VGA ranges. */
+    bool        fExposeVga;
+    /** Offsets into the BARs where something starts or ends. */
+    uint32_t    aaoffEdges[6][8];
+    /** Number of such offsets per BAR. */
+    uint32_t    acEdges[6];
+} TSTFUZZINFO;
+/** Pointer to the information about a made up device model. */
+typedef TSTFUZZINFO *PTSTFUZZINFO;
+/** Pointer to const information about a made up device model. */
+typedef const TSTFUZZINFO *PCTSTFUZZINFO;
+
 /** The random number generator of tstFuzz(). */
 static RTRAND g_hTstRand = NIL_RTRAND;
 
@@ -2045,14 +2095,30 @@ static uint32_t tstRndValue(void)
 
 
 /**
+ * Notes down an offset into a BAR where something starts or ends.
+ *
+ * @param   pInfo               The information about the device model.
+ * @param   iBar                The BAR, ignored if there is no such BAR.
+ * @param   off                 The offset.
+ */
+static void tstFuzzAddEdge(PTSTFUZZINFO pInfo, uint32_t iBar, uint32_t off)
+{
+    if (   iBar < RT_ELEMENTS(pInfo->acEdges)
+        && pInfo->acEdges[iBar] < RT_ELEMENTS(pInfo->aaoffEdges[iBar]))
+        pInfo->aaoffEdges[iBar][pInfo->acEdges[iBar]++] = off;
+}
+
+
+/**
  * Makes up a device model: mostly something a real device could look like,
  * with a part of it being off limits now and then.
  *
- * @returns Whether the device is configured to expose the legacy VGA ranges.
  * @param   pModel              The device model to fill in.
+ * @param   pInfo               Where to return what the guest side of the test wants to know about it.
  */
-static bool tstFuzzModelInit(PTSTVFIODEVCFG pModel)
+static void tstFuzzModelInit(PTSTVFIODEVCFG pModel, PTSTFUZZINFO pInfo)
 {
+    RT_ZERO(*pInfo);
     static const uint8_t s_abClasses[] = { 0x01, 0x02, 0x03, 0x04, 0x0c };
     uint8_t const bClass = s_abClasses[tstRnd(0, RT_ELEMENTS(s_abClasses) - 1)];
     tstModelInit(pModel, TST_VFIO_NODE, bClass, bClass == 0x03 && tstRndChance(70) ? 0x00 : (uint8_t)tstRnd(0, 0x80));
@@ -2093,8 +2159,13 @@ static bool tstFuzzModelInit(PTSTVFIODEVCFG pModel)
             tstModelSetBar(pModel, iBar, s_acbIo[tstRnd(0, RT_ELEMENTS(s_acbIo) - 1)], PCI_ADDRESS_SPACE_IO);
     }
     for (uint32_t iBar = 0; iBar < 6; iBar++)
-        if (pModel->aRegions[iBar].cb && tstRndChance(15))
-            pModel->aRegions[iBar].fFlags &= ~RT_BIT_32(tstRnd(0, 2)); /* read, write or mmap */
+        if (pModel->aRegions[iBar].cb)
+        {
+            tstFuzzAddEdge(pInfo, iBar, 0);
+            tstFuzzAddEdge(pInfo, iBar, (uint32_t)pModel->aRegions[iBar].cb);
+            if (tstRndChance(15))
+                pModel->aRegions[iBar].fFlags &= ~RT_BIT_32(tstRnd(0, 2)); /* read, write or mmap */
+        }
 
     if (tstRndChance(15))
     {
@@ -2178,6 +2249,10 @@ static bool tstFuzzModelInit(PTSTVFIODEVCFG pModel)
                 abBody[9] = RT_BYTE4(u32Pba);
                 cbBody = 10;
                 pModel->acIrqs[VFIO_PCI_MSIX_IRQ_INDEX] = tstRndChance(85) ? cVectors : tstRnd(0, 4096);
+                tstFuzzAddEdge(pInfo, iBarTbl, offTbl);
+                tstFuzzAddEdge(pInfo, iBarTbl, offTbl + cVectors * 16);
+                tstFuzzAddEdge(pInfo, iBarPba, offPba);
+                tstFuzzAddEdge(pInfo, iBarPba, offPba + RT_ALIGN_32(cVectors, 64) / 8);
                 break;
             }
 
@@ -2287,7 +2362,7 @@ static bool tstFuzzModelInit(PTSTVFIODEVCFG pModel)
     pModel->fNotPci          = tstRndChance(2);
     pModel->fNoFunctionReset = tstRndChance(20);
     pModel->fNoBusReset      = tstRndChance(30);
-    return fExposeVga;
+    pInfo->fExposeVga        = fExposeVga;
 }
 
 
@@ -2296,9 +2371,9 @@ static bool tstFuzzModelInit(PTSTVFIODEVCFG pModel)
  *
  * @param   pModel              The device model.
  * @param   pDev                The PCI function of the fake kernel.
- * @param   fExposeVga          Whether the legacy VGA ranges may be there.
+ * @param   pInfo               What is known about the device model.
  */
-static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, bool fExposeVga)
+static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, PCTSTFUZZINFO pInfo)
 {
     static const uint8_t s_acbAccess[] = { 1, 2, 4 };
     uint32_t const       uOp           = tstRnd(0, 99);
@@ -2361,10 +2436,16 @@ static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, bool fExpos
     }
     else if (uOp < 82)
     {
-        /* An access to where a BAR might be mapped, around page boundaries more often than not. */
-        uint32_t const iBar = tstRnd(0, 5);
-        uint64_t const cbBar = RT_MAX(pModel->aRegions[iBar].cb, 16);
-        uint32_t const offBar = tstRndChance(50)
+        /*
+         * An access to where a BAR might be mapped: around where something starts or
+         * ends in it, around page boundaries or just anywhere.
+         */
+        uint32_t const iBar   = tstRnd(0, 5);
+        uint64_t const cbBar  = RT_MAX(pModel->aRegions[iBar].cb, 16);
+        bool const     fEdge  = pInfo->acEdges[iBar] && tstRndChance(45);
+        uint32_t const offBar = fEdge
+                              ? pInfo->aaoffEdges[iBar][tstRnd(0, pInfo->acEdges[iBar] - 1)] + tstRnd(0, 16) - 8
+                              : tstRndChance(50)
                               ? (uint32_t)(tstRnd(0, 16) * 0x1000 + tstRnd(0, 0x40) - 0x20) % (uint32_t)cbBar
                               : tstRnd(0, (uint32_t)cbBar - 1);
         if (pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBar * 4] & PCI_ADDRESS_SPACE_IO)
@@ -2381,7 +2462,8 @@ static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, bool fExpos
             static const uint8_t s_acbMmio[] = { 1, 2, 4, 8 };
             unsigned const cb = s_acbMmio[tstRnd(0, RT_ELEMENTS(s_acbMmio) - 1)];
             uint64_t       u64 = RT_MAKE_U64(tstRndValue(), tstRndValue());
-            RTGCPHYS const GCPhys = TST_FUZZ_MEM_ADDR(iBar) + (tstRndChance(90) ? (offBar & ~(uint32_t)(cb - 1)) : offBar);
+            RTGCPHYS const GCPhys = TST_FUZZ_MEM_ADDR(iBar)
+                                  + (tstRndChance(fEdge ? 40 : 90) ? (offBar & ~(uint32_t)(cb - 1)) : offBar);
             if (tstRndChance(50))
                 tstPdmPhysRead(GCPhys, &u64, cb);
             else
@@ -2397,7 +2479,7 @@ static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, bool fExpos
     }
     else if (uOp < 93)
     {
-        if (fExposeVga)
+        if (pInfo->fExposeVga)
         {
             /* The legacy VGA ranges. */
             uint64_t u64 = RT_MAKE_U64(tstRndValue(), tstRndValue());
@@ -2468,9 +2550,10 @@ static void tstFuzz(void)
         RTRandAdvSeed(g_hTstRand, uModelSeed);
 
         static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
-        bool const  fExposeVga = tstFuzzModelInit(&s_Model);
-        PTSTVFIODEV pDev       = NULL;
-        g_fTstExposeVga     = fExposeVga;
+        TSTFUZZINFO Info;
+        tstFuzzModelInit(&s_Model, &Info);
+        PTSTVFIODEV pDev = NULL;
+        g_fTstExposeVga     = Info.fExposeVga;
         g_fTstInterceptMmio = tstRndChance(10);
         rc = tstFixtureSetup(&s_Model, 1, &pDev, NULL);
         g_fTstExposeVga     = false;
@@ -2483,7 +2566,7 @@ static void tstFuzz(void)
             tstPdmPowerOn();
 
             for (uint32_t iOp = 0, cOps = tstRnd(20, 400); iOp < cOps; iOp++)
-                tstFuzzGuestOp(&s_Model, pDev, fExposeVga);
+                tstFuzzGuestOp(&s_Model, pDev, &Info);
 
             /* The guest never changes what is mapped for DMA, and the identity of the device stays what it is. */
             RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbMapped,
