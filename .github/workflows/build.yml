@@ -201,6 +201,8 @@ jobs:
             # reported and the run goes on, the reports are looked at below.
             export ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1
             export UBSAN_OPTIONS=print_stacktrace=1
+            # Make sure the testcase really got built with them.
+            ldd ./tstDevPciVfio | grep -E 'libasan|libubsan'
           fi
           ./tstDevPciVfio > "$log" 2>&1 &
           pid=$!

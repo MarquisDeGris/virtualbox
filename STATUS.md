@@ -7,18 +7,21 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `71037836` (11 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `f9f95548` (12 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 hardening, code changes done: interrupt setup; MSI-X table and pending
-bits; memory BARs in segments; capability lists; MSI capability; config
-space writes; DMA mapping; guest access paths; configuration validation and
-cleanup; reset and command register. Next: documentation block, sanitizer
-and fuzz runs, then WP3 (removal of the device on the host).
+WP2 hardening is done apart from the fuzz target: interrupt setup; MSI-X
+table and pending bits; memory BARs in segments; capability lists; MSI
+capability; config space writes; DMA mapping; guest access paths;
+configuration validation and cleanup; reset and command register;
+documentation block. The testcase also runs clean with AddressSanitizer,
+LeakSanitizer and UndefinedBehaviorSanitizer. Next: fuzz target, legacy
+group/container API in the harness, then WP3 (removal of the device on the
+host).
 
 ## Done
 
@@ -106,6 +109,12 @@ and fuzz runs, then WP3 (removal of the device on the host).
     decoding;
   - trapped accesses to a memory BAR go through the device file, never
     through the mapping of the BAR in the VM process.
+- WP2, part 9 (commit `f9f95548`): the documentation block of the device
+  describes what is there now.
+- CI has a `sanitize` flavor: the testcase, the device and the bus code
+  compiled into it are built with AddressSanitizer and
+  UndefinedBehaviorSanitizer; memory errors, leaks and undefined behaviour
+  fail the run. All 29 tests pass with it (run 46).
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
@@ -168,11 +177,11 @@ Linux only:
 Still to add to the harness: the root port (`ich9pcibridge`) in front of the
 device, saved-state stream, legacy group/container API.
 
-## Next (WP2 continued)
+## Next
 
-1. Documentation block of the device.
-2. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
-3. Harness: legacy group/container API, so those paths get covered too.
+1. Fuzz target for guest accesses (T2).
+2. Harness: legacy group/container API, so those paths get covered too.
+3. WP3: removal of the device on the host while the VM runs.
 
 ## Decisions
 
@@ -199,7 +208,7 @@ device, saved-state stream, legacy group/container API.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 29 tests | `71037836` | all pass (run 43) |
+| T1 unit | running in CI, 29 tests | `f9f95548` | all pass (run 45); clean with ASan, LSan and UBSan (run 46) |
 | T2 fuzz | not started | | |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
@@ -243,5 +252,7 @@ device, saved-state stream, legacy group/container API.
 | 42 | `scratch/red-evidence-9` | tests | failed as intended | configuration tests against the driver before the change, 12 failed checks |
 | 43 | code branch @ `71037836` (as `scratch/reset`) | tests | passed | 29 tests |
 | 44 | `scratch/red-evidence-10` | tests | failed as intended | reset and command register tests against the driver before the change |
+| 45 | code branch @ `f9f95548` (as `scratch/docs`) | tests | passed | 29 tests |
+| 46 | code branch @ `f9f95548` (as `scratch/docs`) | sanitize | passed | 29 tests, no reports from the sanitizers |
 
 Run numbers are those GitHub shows for the `build` workflow.
