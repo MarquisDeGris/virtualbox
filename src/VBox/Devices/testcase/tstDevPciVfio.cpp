@@ -72,6 +72,10 @@
 #define TST_BAR0_SIZE           _64K
 /** Where the tests map BAR0. */
 #define TST_BAR0_ADDR           UINT32_C(0xf0000000)
+/** Size of the I/O port BAR of device models which have one. */
+#define TST_IOBAR_SIZE          0x100
+/** The first I/O port the tests assign to an I/O port BAR. */
+#define TST_IOBAR_PORT          UINT16_C(0xd000)
 /** Config space offset of the MSI capability of the default device model. */
 #define TST_MSI_CAP_OFF         0x50
 /** Config space offset of the PCI Express capability of the default device model. */
@@ -288,6 +292,8 @@ static uint8_t  g_bTstExecEngine      = VM_EXEC_ENGINE_NATIVE_API;
 /** Number of requests for mapping guest memory tstFixtureSetup() lets pass
  * before it makes one fail, UINT32_MAX for not making any fail. */
 static uint32_t g_cTstFailIoasMapSkip = UINT32_MAX;
+/** Whether tstFixtureSetup() configures function 0 to expose the legacy VGA ranges. */
+static bool     g_fTstExposeVga       = false;
 
 
 /**
@@ -349,6 +355,8 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
         PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, szName);
         const char *pszVfioPath = i == 0 && pszVfioPathFun0 ? pszVfioPathFun0 : paModels[i].szNode;
         RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", pszVfioPath), VINF_SUCCESS);
+        if (i == 0 && g_fTstExposeVga)
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "ExposeVga", 1), VINF_SUCCESS);
     }
     rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, NULL);
     if (RT_SUCCESS(rc))
@@ -563,6 +571,249 @@ static void tstDmaMapFailure(void)
             RTTestIFailed("request %u failing: the device is not there to check bus mastering", iFail);
         tstFixtureTeardown();
     }
+}
+
+
+/**
+ * An I/O port BAR, and what the guest gets from a device which stops
+ * answering: all ones when reading, and no errors.
+ */
+static void tstIoBarAndSilentDevice(void)
+{
+    RTTestISub("I/O port BAR, device which stops answering");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    tstModelSetBar(&Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* Assign the ports and enable I/O port decoding. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_1, TST_IOBAR_PORT, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_IO, 2);
+
+        uint8_t *pbIoBar = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR1_REGION_INDEX);
+        RTTESTI_CHECK(pbIoBar != NULL);
+        if (pbIoBar)
+        {
+            /* The guest reads what the device has at its ports and the device gets what the guest writes. */
+            static const uint8_t s_abWritten[4] = { 0x44, 0x33, 0x22, 0x11 };
+            pbIoBar[0x10] = 0x5a;
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmIoPortRead(TST_IOBAR_PORT + 0x10, &u32, 1), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG((u32 & 0xff) == 0x5a, ("read %#RX32 from the port\n", u32));
+            RTTESTI_CHECK_RC(tstPdmIoPortWrite(TST_IOBAR_PORT + 0x20, UINT32_C(0x11223344), 4), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(!memcmp(&pbIoBar[0x20], s_abWritten, sizeof(s_abWritten)),
+                              ("the device sees %.4Rhxs at the port\n", &pbIoBar[0x20]));
+
+            /* The device stops answering: that is nothing the guest gets an error for. */
+            tstVfioKrnlDevSetGone(pDev, true);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmIoPortRead(TST_IOBAR_PORT + 0x10, &u32, 2), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG((u32 & 0xffff) == 0xffff, ("read %#RX32 from the port of the silent device\n", u32));
+            RTTESTI_CHECK_RC(tstPdmIoPortWrite(TST_IOBAR_PORT + 0x20, 0, 4), VINF_SUCCESS);
+            for (uint32_t off = 0; off < 256; off += 4)
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 4);
+            tstVfioKrnlDevSetGone(pDev, false);
+            RTTESTI_CHECK_MSG(!memcmp(&pbIoBar[0x20], s_abWritten, sizeof(s_abWritten)),
+                              ("the silent device got written to: %.4Rhxs\n", &pbIoBar[0x20]));
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * The legacy VGA ranges of a graphics device: I/O ports, video memory, and a
+ * memory fill which doesn't end where the video memory ends.
+ */
+static void tstVga(void)
+{
+    RTTestISub("Legacy VGA ranges of a graphics device");
+
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_DISPLAY, VBOX_PCI_SUB_DISPLAY_VGA);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddMsiCap(&Model, TST_MSI_CAP_OFF, 0 /*cVectorsLog2*/, true /*f64Bit*/, false /*fMaskable*/);
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+    /* The region is bigger than what the legacy ranges need, so that it shows when something goes beyond them. */
+    Model.aRegions[VFIO_PCI_VGA_REGION_INDEX].cb     = _1M;
+    Model.aRegions[VFIO_PCI_VGA_REGION_INDEX].fFlags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
+
+    PTSTVFIODEV pDev = NULL;
+    g_fTstExposeVga = true;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    g_fTstExposeVga = false;
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        uint8_t *pbVga = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_VGA_REGION_INDEX);
+        RTTESTI_CHECK(pbVga != NULL);
+        if (pbVga)
+        {
+            /* I/O ports: the port number is the offset into the VGA region. */
+            pbVga[0x3c5] = 0xa5;
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmIoPortRead(0x3c5, &u32, 1), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG((u32 & 0xff) == 0xa5, ("read %#RX32 from port 0x3c5\n", u32));
+            RTTESTI_CHECK_RC(tstPdmIoPortWrite(0x3d4, 0x1234, 2), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pbVga[0x3d4] == 0x34 && pbVga[0x3d5] == 0x12, ("the device sees %.2Rhxs at port 0x3d4\n", &pbVga[0x3d4]));
+
+            /* Video memory: the guest physical address is the offset into the VGA region. */
+            pbVga[0xb8000] = 0x41;
+            uint8_t b = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(0xb8000, &b, 1), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(b == 0x41, ("read %#x from the video memory\n", b));
+            static const uint8_t s_abWritten[4] = { 0x41, 0x0f, 0x42, 0x0f };
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(0xa0010, s_abWritten, sizeof(s_abWritten)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(!memcmp(&pbVga[0xa0010], s_abWritten, sizeof(s_abWritten)),
+                              ("the device sees %.4Rhxs in the video memory\n", &pbVga[0xa0010]));
+
+            /* A fill starting 16 bytes before the end of the video memory with 256 bytes to go ends with the video memory. */
+            RTTESTI_CHECK_RC(tstPdmPhysFill(0xbfff0, UINT32_C(0xc3c2c1c0), 4, 64), VINF_SUCCESS);
+            bool fFilled = true;
+            for (uint32_t i = 0; i < 16; i++)
+                if (pbVga[0xbfff0 + i] != 0xc0 + (i & 3))
+                    fFilled = false;
+            RTTESTI_CHECK_MSG(fFilled, ("the end of the video memory after the fill: %.16Rhxs\n", &pbVga[0xbfff0]));
+            bool fBeyond = false;
+            for (uint32_t i = 0; i < 256; i++)
+                if (pbVga[0xc0000 + i] != 0)
+                    fBeyond = true;
+            RTTESTI_CHECK_MSG(!fBeyond, ("the fill went beyond the video memory: %.16Rhxs\n", &pbVga[0xc0000]));
+
+            /* The device stops answering. */
+            tstVfioKrnlDevSetGone(pDev, true);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmIoPortRead(0x3c5, &u32, 1), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG((u32 & 0xff) == 0xff, ("read %#RX32 from port 0x3c5 of the silent device\n", u32));
+            RTTESTI_CHECK_RC(tstPdmIoPortWrite(0x3d4, 0, 2), VINF_SUCCESS);
+            b = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(0xb8000, &b, 1), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(b == 0xff, ("read %#x from the video memory of the silent device\n", b));
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(0xa0010, &b, 1), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstPdmPhysFill(0xa0000, 0, 1, 16), VINF_SUCCESS);
+            tstVfioKrnlDevSetGone(pDev, false);
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A device with a quirk making a config space range readable for the guest:
+ * the range is passed through where the device has nothing else, and a
+ * capability located there stays what it is.
+ */
+static void tstQuirkConfigRange(void)
+{
+    RTTestISub("Device quirk for a config space range, with and without a capability in it");
+
+    /* The range is 0x50 to 0x5f, read-only for the guest. */
+    for (uint32_t iVariant = 0; iVariant < 2; iVariant++)
+    {
+        bool const    fCapInRange = iVariant == 1;
+        TSTVFIODEVCFG Model;
+        tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_DISPLAY, 0x80 /* other */);
+        tstModelSetU16(&Model, VBOX_PCI_VENDOR_ID, 0x8086);
+        tstModelSetU16(&Model, VBOX_PCI_DEVICE_ID, 0xe223);
+        tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+        Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+        uint8_t const offMsiCap = fCapInRange ? 0x50 : 0x60;
+        tstModelAddMsiCap(&Model, offMsiCap, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
+        tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+        if (!fCapInRange)
+            Model.abCfg[0x52] = 0x77;
+
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("variant %u: pci-vfio: %Rrc - %s\n", iVariant, rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+
+            /* Reading through the config space works. */
+            for (uint32_t off = 0; off < 256; off++)
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 1);
+
+            uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+            RTTESTI_CHECK(pbCfg != NULL);
+            if (!fCapInRange)
+            {
+                /* The guest reads what the device has there and can't change it. */
+                uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0x52, 1);
+                RTTESTI_CHECK_MSG(u32 == 0x77, ("read %#RX32 from the range\n", u32));
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x52, 0x11, 1);
+                if (pbCfg)
+                    RTTESTI_CHECK_MSG(pbCfg[0x52] == 0x77, ("the device has %#x in the range after a guest write\n", pbCfg[0x52]));
+            }
+
+            /* MSI works wherever the capability is. */
+            RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offMsiCap, 1) == VBOX_PCI_CAP_ID_MSI);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offMsiCap + 4, UINT32_C(0xfee00000), 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offMsiCap + 8, 0x4045, 2);
+            uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offMsiCap + 2, 2);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, offMsiCap + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1,
+                              ("variant %u: %u MSI vector(s) enabled on the device\n", iVariant,
+                               tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX)));
+            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("variant %u: the MSI did not arrive\n", iVariant));
+            TSTPDMMSI Msi;
+            if (tstPdmMsiGet(cMsisBefore, &Msi))
+                RTTESTI_CHECK_MSG(Msi.uData == 0x4045, ("variant %u: data %#RX32\n", iVariant, Msi.uData));
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * A memory BAR which VFIO allows to read and to map but not to write: the
+ * guest can read it and what it writes is dropped.
+ */
+static void tstReadOnlyBar(void)
+{
+    RTTestISub("BAR which can't be written");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    tstModelSetBar(&Model, 2, _64K, PCI_ADDRESS_SPACE_MEM);
+    Model.aRegions[2].fFlags &= ~(uint32_t)VFIO_REGION_INFO_FLAG_WRITE;
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_2, TST_MSIX_BAR_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+        uint32_t *pau32Bar2 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR2_REGION_INDEX);
+        RTTESTI_CHECK(pau32Bar2 != NULL);
+        if (pau32Bar2)
+        {
+            pau32Bar2[1] = UINT32_C(0xcafe0001);
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_MSIX_BAR_ADDR + 4, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0xcafe0001), ("read %#RX32 from the BAR\n", u32));
+
+            u32 = UINT32_C(0x55aa55aa);
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_MSIX_BAR_ADDR + 8, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar2[2] == 0, ("the device sees %#RX32 in the BAR which can't be written\n", pau32Bar2[2]));
+        }
+    }
+    tstFixtureTeardown();
 }
 
 
@@ -1418,6 +1669,10 @@ int main()
     tstUnknownNode();
     tstExecEngine();
     tstDmaMapFailure();
+    tstIoBarAndSilentDevice();
+    tstVga();
+    tstQuirkConfigRange();
+    tstReadOnlyBar();
 
     return RTTestSummaryAndDestroy(hTest);
 }
