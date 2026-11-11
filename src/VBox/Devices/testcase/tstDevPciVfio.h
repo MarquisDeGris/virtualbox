@@ -88,6 +88,11 @@ typedef struct TSTVFIODEVCFG
     TSTVFIOREGION       aRegions[TSTVFIO_REGION_COUNT];
     /** Number of interrupts per VFIO_PCI_XXX_IRQ_INDEX. */
     uint32_t            acIrqs[TSTVFIO_IRQ_INDEX_COUNT];
+    /** Whether the function is one without an IOMMU behind it: it can be opened and
+     * bound, but there is no I/O address space it could be attached to. */
+    bool                fNoIommu;
+    /** Whether VFIO reports the function as something else than a PCI device. */
+    bool                fNotPci;
 } TSTVFIODEVCFG;
 /** Pointer to a device model description. */
 typedef TSTVFIODEVCFG *PTSTVFIODEVCFG;
@@ -107,6 +112,7 @@ uint32_t    tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone);
 uint32_t    tstVfioKrnlGetOpenFdCount(void);
+uint32_t    tstVfioKrnlGetInheritableFdCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
@@ -162,6 +168,7 @@ int             tstPdmIoPortWrite(RTIOPORT uPort, uint32_t u32, unsigned cb);
 int             tstPdmPhysRead(RTGCPHYS GCPhys, void *pv, unsigned cb);
 int             tstPdmPhysWrite(RTGCPHYS GCPhys, const void *pv, unsigned cb);
 int             tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned cItems);
+bool            tstPdmIsMmio2Mapped(RTGCPHYS GCPhys);
 uint32_t        tstPdmPciCfgRead(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, unsigned cb);
 void            tstPdmPciCfgWrite(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, uint32_t u32, unsigned cb);
 const char     *tstPdmGetLastError(void);

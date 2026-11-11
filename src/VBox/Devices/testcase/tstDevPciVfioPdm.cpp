@@ -2075,6 +2075,23 @@ int tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned 
 
 
 /**
+ * Checks whether a guest physical address is backed by a mapped MMIO2 range,
+ * which means the guest accesses it without the device being involved.
+ *
+ * @returns true if there is an MMIO2 range mapped at the address, false if not.
+ * @param   GCPhys              The guest physical address.
+ */
+bool tstPdmIsMmio2Mapped(RTGCPHYS GCPhys)
+{
+    for (uint32_t i = 0; i < g_Pdm.cMmio2; i++)
+        if (   g_Pdm.aMmio2[i].GCPhys != NIL_RTGCPHYS
+            && GCPhys - g_Pdm.aMmio2[i].GCPhys < g_Pdm.aMmio2[i].cbRegion)
+            return true;
+    return false;
+}
+
+
+/**
  * Reads from the config space of a PCI device through the ECAM window.
  *
  * @returns The value, all ones if the access failed.
