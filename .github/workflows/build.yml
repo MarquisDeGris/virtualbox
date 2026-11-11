@@ -185,13 +185,27 @@ jobs:
         run: |
           cd out/linux.amd64/release/bin/testcase
           ls -l tstDevPciVfio
-          if ! timeout 600 ./tstDevPciVfio > ../../../../../test-tstDevPciVfio.log 2>&1; then
-            cat ../../../../../test-tstDevPciVfio.log
-            echo "TEST FAILED, running it again in the debugger for a backtrace"
-            timeout 600 gdb -batch -ex run -ex "thread apply all bt" --args ./tstDevPciVfio 2>&1 | tail -150 || true
+          log="$GITHUB_WORKSPACE/test-tstDevPciVfio.log"
+          ./tstDevPciVfio > "$log" 2>&1 &
+          pid=$!
+          # A run takes a few seconds. A test which hangs is stopped after three
+          # minutes, with a backtrace of all its threads.
+          i=0
+          while kill -0 $pid 2>/dev/null && [ $i -lt 180 ]; do sleep 1; i=$((i + 1)); done
+          if kill -0 $pid 2>/dev/null; then
+            cat "$log"
+            echo "TEST HANGS, backtrace of all threads:"
+            sudo timeout -k 5 60 gdb -batch -p $pid -ex "thread apply all bt" 2>&1 | tail -150 || true
+            kill -9 $pid
             exit 1
           fi
-          cat ../../../../../test-tstDevPciVfio.log
+          if ! wait $pid; then
+            cat "$log"
+            echo "TEST FAILED, running it again in the debugger for a backtrace"
+            timeout -k 5 180 gdb -batch -ex run -ex "thread apply all bt" --args ./tstDevPciVfio 2>&1 | tail -150 || true
+            exit 1
+          fi
+          cat "$log"
 
       - name: Upload logs
         if: always()

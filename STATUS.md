@@ -7,7 +7,7 @@ Updated: 2026-11-11
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `f31b5dda` (5 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `05617ea1` (7 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -15,8 +15,8 @@ Updated: 2026-11-11
 ## Current step
 
 WP2 hardening, continued. Done so far: interrupt setup; MSI-X table and
-pending bits; memory BARs in segments. Next: capability lists, config space
-write semantics, DMA mapping, error paths.
+pending bits; memory BARs in segments; capability lists; MSI capability;
+config space writes. Next: DMA mapping, error paths, sanitizer and fuzz runs.
 
 ## Done
 
@@ -48,21 +48,43 @@ write semantics, DMA mapping, error paths.
   - BARs which cannot be mapped (VFIO flag, sub-page size) are accessed
     through the device file descriptor instead of failing the VM start;
   - memory BARs are registered for the function they belong to.
+- WP2, part 3 (commit `33ba49dc`):
+  - capability lists may come in any order; the config space bytes each
+    capability claims are tracked, so lists which loop and capabilities
+    which overlap are refused at VM start;
+  - the extended capability list is checked for loops and bad pointers;
+  - a PCI Express capability of an unknown version is hidden.
+- WP2, part 4 (commit `05617ea1`):
+  - the MSI capability is emulated in the device with the layout the
+    physical device has (32 or 64 bit address, with or without per-vector
+    masking), so it never covers more config space than on the device;
+  - per-vector masking with pending bits, delivery on unmask; the vector
+    number goes into the message data when several vectors are enabled;
+  - config space writes are taken apart by register: partial writes are
+    merged with the current content, writes covering several registers
+    reach each of them;
+  - reset clears the MSI state.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 22) |
+| Test | Before the fix | With fixes (run 28) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass | pass |
 | MSI delivery | pass | pass |
 | MSI vector count (all Multiple Message Enable encodings) | fails, then the process aborts (run 15) | pass |
 | MSI-X, 64 vectors, dedicated BAR | fails, 8 checks (run 15) | pass |
-| MSI-X, table and PBA inside a BAR with device registers | fails, 9 checks (run 21) | pass |
-| Two functions, each with a memory BAR | fails, 3 checks (run 21) | pass |
-| BAR which can not be mapped | VM construction fails (run 21) | pass |
+| MSI-X, table and PBA inside a BAR with device registers | fails, 9 checks (run 20) | pass |
+| Two functions, each with a memory BAR | fails, 3 checks (run 20) | pass |
+| BAR which can not be mapped | VM construction fails (run 20) | pass |
+| Capability list from high to low offsets | VM construction fails (run 26) | pass |
+| Capability list which loops | pass | pass |
+| Extended capability list which loops | never finishes (run 26) | pass |
+| 32-bit MSI without masking, followed by another capability | fails (runs 23, 29) | pass |
+| MSI with several vectors and per-vector masking | fails, 4 checks (run 29) | pass |
+| Config space writes of all widths | fails, 9 checks (run 29) | pass |
 | Reset with MSI enabled | fails, 1 check (run 15) | pass |
 | Reset with MSI-X enabled | fails, 3 checks (run 15) | pass |
 | Unknown device node | pass | pass |
@@ -82,26 +104,22 @@ Linux only:
   trap;
 - `tstDevPciVfioKrnl.cpp`: a fake VFIO/IOMMUFD kernel in the test process,
   reached through linker `--wrap` of `open`, `close`, `ioctl`, `pread`,
-  `pwrite`. Regions are backed by a memfd, interrupts by real eventfds, so
+  `pwrite`, `mmap`. Regions are backed by a memfd, interrupts by real eventfds, so
   the device's own poller thread and mappings run unmodified. Tracks open
   descriptors and DMA mappings for leak checks, can fail one ioctl on demand
   and can make a device "gone";
 - `tstDevPciVfio.cpp`: the tests.
 
 Still to add to the harness: the root port (`ich9pcibridge`) in front of the
-device, saved-state stream, legacy group/container API, config space write
-semantics in the device model.
+device, saved-state stream, legacy group/container API.
 
 ## Next (WP2 continued)
 
-1. Capability lists in any order, with loop detection.
-2. Config space writes which span registers with different handling, and
-   byte writes to registers handled as a whole.
-3. DMA mapping: fail closed, at a defined point, with explicit unmap.
-4. Error paths: descriptor and memory leaks, host I/O errors in guest access
+1. DMA mapping: fail closed, at a defined point, with explicit unmap.
+2. Error paths: descriptor and memory leaks, host I/O errors in guest access
    handlers, validation of configuration strings, explicit no-IOMMU check.
-5. Documentation block of the device.
-6. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
+3. Documentation block of the device.
+4. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
 
 ## Decisions
 
@@ -117,12 +135,13 @@ semantics in the device model.
 | 2026-11-11 | Every fix comes with a test that was seen failing against the unmodified device | Evidence that the test hits the defect |
 | 2026-11-11 | The code branch is only ever fast-forwarded; no history rewriting on published branches until the merge request is prepared | Keeps the public history stable |
 | 2026-11-11 | INTx stays armed as upstream does although it is not functional yet | Scope; handled in WP8 |
+| 2026-11-11 | The MSI capability is emulated in the device instead of using the MSI support of the PCI bus | The bus code knows one capability layout only; the guest has to see the layout of the device |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 10 tests | `f31b5dda` | all pass (run 22) |
+| T1 unit | running in CI, 16 tests | `05617ea1` | all pass (run 28) |
 | T2 fuzz | not started | | |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
@@ -143,6 +162,15 @@ semantics in the device model.
 | 15 | `scratch/red-evidence` | tests | failed as intended | all new tests against the unmodified device |
 | 16 | code branch @ `eb637e18` | tests | passed | 7 tests |
 | 17 | `scratch/msix-shared-bar` | tests | failed as intended | MSI-X shared BAR test before the fix |
-| 18 to 20 | `scratch/msix-shared-bar` | tests | passed | development of the MSI-X and BAR rework |
-| 21 | `scratch/red-evidence-2` | tests | failed as intended | three new tests against the driver before the rework, 13 failed checks |
-| 22 | code branch @ `f31b5dda` | tests | passed | 10 tests |
+| 18, 19 | `scratch/msix-shared-bar` | tests | passed | development of the MSI-X and BAR rework |
+| 20 | `scratch/red-evidence-2` | tests | failed as intended | three new tests against the driver before the rework, 13 failed checks |
+| 21 | code branch @ `f31b5dda` | tests | passed | 10 tests |
+| 22, 24 | `scratch/caps` | tests | failed | development of the capability list handling |
+| 23 | `scratch/red-evidence-3` | tests | failed as intended | small MSI capability test against the driver before the change |
+| 25 | `scratch/caps` | tests | passed | 13 tests |
+| 26 | `scratch/red-evidence-4` | tests | failed as intended | capability list tests against the driver before the change; ran into the time limit |
+| 27 | code branch @ `33ba49dc` | tests | passed | 13 tests |
+| 28 | code branch @ `05617ea1` (as `scratch/msi`) | tests | passed | 16 tests |
+| 29 | `scratch/red-evidence-5` | tests | failed as intended | three new tests against the driver before the MSI emulation, 14 failed checks |
+
+Run numbers are those GitHub shows for the `build` workflow.
