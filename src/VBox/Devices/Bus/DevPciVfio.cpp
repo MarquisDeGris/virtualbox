@@ -197,6 +197,11 @@
 /** Emulate the access using a special handler. */
 #define VFIO_PCI_CFG_SPACE_ACCESS_EMULATE     3
 
+/** Start of the legacy VGA memory range. */
+#define VFIO_PCI_VGA_MEM_START                UINT32_C(0x000a0000)
+/** Size of the legacy VGA memory range. */
+#define VFIO_PCI_VGA_MEM_SIZE                 UINT32_C(0x00020000)
+
 
 /*********************************************************************************************************************************
 *   Structures and Typedefs                                                                                                      *
@@ -578,6 +583,37 @@ DECLINLINE(int) pciVfioCfgSpaceWriteU64(PCVFIOPCIFUN pFun, uint32_t offReg, uint
 
 
 /**
+ * Reads from or writes to a region of the device through the device file
+ * descriptor on behalf of the guest.
+ *
+ * A device which doesn't answer is treated like one which isn't there: reads
+ * return all ones and writes are dropped.  There is no failure status, it is
+ * nothing the guest could be blamed for.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   offVfio     Offset into the device file.
+ * @param   pv          Where to store what was read, or what to write.
+ * @param   cb          Number of bytes to access.
+ * @param   fWrite      Flag whether this is a write (true) or a read (false).
+ */
+static void pciVfioFdAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, uint64_t offVfio, void *pv, size_t cb, bool fWrite)
+{
+    ssize_t const cbDone = fWrite
+                         ? pwrite(pFun->iFdVfio, pv, cb, offVfio)
+                         : pread(pFun->iFdVfio, pv, cb, offVfio);
+    if (cbDone != (ssize_t)cb)
+    {
+        int const iErrno = cbDone < 0 ? errno : 0;
+        if (!fWrite)
+            memset(pv, 0xff, cb);
+        LogRelMax(32, ("VFIO#%d.%u: %s %zu byte(s) at offset %#RX64 of the device file failed with %d\n", pThis->iInstance,
+                       pFun->uPciFun, fWrite ? "Writing" : "Reading", cb, offVfio, iErrno));
+    }
+}
+
+
+/**
  * @callback_method_impl{FNIOMIOPORTNEWOUT}
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioWrite(PPDMDEVINS pDevIns, void *pvUser, RTIOPORT offPort, uint32_t u32, unsigned cb)
@@ -585,10 +621,9 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioWrite(PPDMDEVINS pDevIns, void *pvUs
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[pBar->iPciFun];
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, &u32, cb, pBar->offVfio + offPort);
-    if (cbWritten != cb)
-        return RTErrConvertFromErrno(errno);
+    AssertReturn(cb <= sizeof(u32), VINF_SUCCESS);
 
+    pciVfioFdAccess(pThis, pFun, pBar->offVfio + offPort, &u32, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -601,10 +636,11 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioRead(PPDMDEVINS pDevIns, void *pvUse
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[pBar->iPciFun];
-    ssize_t cbRead = pread(pFun->iFdVfio, pu32, cb, pBar->offVfio + offPort);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
+    AssertReturn(cb <= sizeof(*pu32), VERR_IOM_IOPORT_UNUSED);
 
+    uint32_t u32 = UINT32_MAX;
+    pciVfioFdAccess(pThis, pFun, pBar->offVfio + offPort, &u32, cb, false /*fWrite*/);
+    *pu32 = u32;
     return VINF_SUCCESS;
 }
 
@@ -847,7 +883,6 @@ static void pciVfioMsixTblWrite(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDE
 static void pciVfioBarDevAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCVFIOPCIBAR pBar, uint64_t offBar, void *pv, size_t cb,
                                 bool fWrite)
 {
-    RT_NOREF(pThis);
     if (pBar->pvMmio)
     {
         /* Device registers have to be accessed with the width the guest uses. */
@@ -877,21 +912,8 @@ static void pciVfioBarDevAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCVFIOPCIBAR 
                     break;
             }
     }
-    else
-    {
-        /* The region is not mapped, go through the device file descriptor. */
-        ssize_t const cbDone = fWrite
-                             ? pwrite(pFun->iFdVfio, pv, cb, pBar->offVfio + offBar)
-                             : pread(pFun->iFdVfio, pv, cb, pBar->offVfio + offBar);
-        if (cbDone != (ssize_t)cb)
-        {
-            /* Behave like a device which doesn't respond: reads return all ones, writes get dropped. */
-            if (!fWrite)
-                memset(pv, 0xff, cb);
-            LogRelMax(32, ("VFIO#%d.%u: %s %zu byte(s) at offset %#RX64 of a BAR failed with %d\n", pThis->iInstance,
-                           pFun->uPciFun, fWrite ? "Writing" : "Reading", cb, offBar, errno));
-        }
-    }
+    else /* The region is not mapped, go through the device file descriptor. */
+        pciVfioFdAccess(pThis, pFun, pBar->offVfio + offBar, pv, cb, fWrite);
 }
 
 
@@ -1029,8 +1051,25 @@ DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_
 }
 
 
+/**
+ * Checks whether VFIO flags a region as one where the MSI-X table may be mapped.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   uRegion     The VFIO region.
+ * @param   cbInfo      Size of the region information including its capabilities, as VFIO reported it.
+ * @param   pfMsix      Where to return whether the region has the capability.
+ */
 static int pciVfioBarContainsMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRegion, uint32_t cbInfo, bool *pfMsix)
 {
+    *pfMsix = false;
+    if (   cbInfo < sizeof(struct vfio_region_info) + sizeof(struct vfio_info_cap_header)
+        || cbInfo > _64K)
+        return PDMDevHlpVMSetError(pThis->pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                   N_("The information for region %u of the VFIO device has an unexpected size of %u bytes"),
+                                   uRegion, cbInfo);
+
     struct vfio_region_info *pRegionInfo = (struct vfio_region_info *)RTMemTmpAllocZ(cbInfo);
     if (!pRegionInfo)
         return VERR_NO_TMP_MEMORY;
@@ -1038,28 +1077,38 @@ static int pciVfioBarContainsMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRe
     pRegionInfo->argsz = cbInfo;
     pRegionInfo->index = uRegion;
 
+    int rc = VINF_SUCCESS;
     int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_REGION_INFO, pRegionInfo);
-    if (rcLnx == -1)
-        return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, errno);
-
-    AssertReturnStmt(pRegionInfo->cap_offset != 0, RTMemTmpFree(pRegionInfo), VERR_INVALID_STATE);
-    uint32_t offCap = pRegionInfo->cap_offset;
-    *pfMsix = false;
-    while (offCap)
+    if (rcLnx != -1)
     {
-        struct vfio_info_cap_header *pHdr = (struct vfio_info_cap_header *)((uint8_t *)pRegionInfo + offCap);
-        if (pHdr->id == VFIO_REGION_INFO_CAP_MSIX_MAPPABLE)
+        /* Walk the capabilities, they form a list linked by offsets into the buffer. */
+        uint32_t offCap = pRegionInfo->cap_offset;
+        for (unsigned cCapsLeft = 64; offCap != 0; cCapsLeft--)
         {
-            *pfMsix = true;
-            break;
-        }
+            if (   !cCapsLeft
+                || offCap < sizeof(*pRegionInfo)
+                || offCap > cbInfo - sizeof(struct vfio_info_cap_header))
+            {
+                rc = PDMDevHlpVMSetError(pThis->pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                         N_("The capabilities of region %u of the VFIO device are malformed"), uRegion);
+                break;
+            }
 
-        offCap = pHdr->next;
+            struct vfio_info_cap_header const *pHdr = (struct vfio_info_cap_header const *)((uint8_t *)pRegionInfo + offCap);
+            if (pHdr->id == VFIO_REGION_INFO_CAP_MSIX_MAPPABLE)
+            {
+                *pfMsix = true;
+                break;
+            }
+            offCap = pHdr->next;
+        }
     }
+    else
+        rc = PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                 N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, errno);
 
     RTMemTmpFree(pRegionInfo);
-    return VINF_SUCCESS;
+    return rc;
 }
 
 
@@ -1108,20 +1157,20 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
             }
 
             /*
-             * Map the region if VFIO allows it and if it consists of whole pages.  A region
-             * which can't be mapped is accessed through the device file descriptor, which
-             * means trapping every access of the guest.
+             * Map the region if VFIO allows it, if it can be read and written and if it
+             * consists of whole pages.  A region which can't be mapped is accessed through
+             * the device file descriptor, which means trapping every access of the guest.
              */
-            PVFIOPCIBAR pBar = &pFun->aBars[uRegion];
+            PVFIOPCIBAR    pBar          = &pFun->aBars[uRegion];
+            uint32_t const fVfioMappable = VFIO_REGION_INFO_FLAG_MMAP | VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
             pBar->bType   = 2;
             pBar->offVfio = RegionInfo.offset;
             pBar->pvMmio  = NULL;
-            if (   (RegionInfo.flags & VFIO_REGION_INFO_FLAG_MMAP)
+            if (   (RegionInfo.flags & fVfioMappable) == fVfioMappable
                 && !(RegionInfo.size & GUEST_PAGE_OFFSET_MASK))
             {
-                int fProt =   ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_READ)  ? PROT_READ  : 0)
-                            | ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_WRITE) ? PROT_WRITE : 0);
-                void *pvMmio = mmap(NULL, RegionInfo.size, fProt, MAP_FILE | MAP_SHARED, pFun->iFdVfio, RegionInfo.offset);
+                void *pvMmio = mmap(NULL, RegionInfo.size, PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, pFun->iFdVfio,
+                                    RegionInfo.offset);
                 if (pvMmio == MAP_FAILED)
                     return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                                N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
@@ -1155,13 +1204,11 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioWrite(PPDMDEVINS pDevIns, void *pvUser, RTIOPORT offPort, uint32_t u32, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
+    AssertReturn(cb <= sizeof(u32), VINF_SUCCESS);
 
-    ssize_t cbRead = pwrite(pFun->iFdVfio, &u32, cb, pFun->offVga + offPort);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
-
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + offPort, &u32, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -1171,13 +1218,13 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioWrite(PPDMDEVINS pDevIns, void *p
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioRead(PPDMDEVINS pDevIns, void *pvUser, RTIOPORT offPort, uint32_t *pu32, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
+    AssertReturn(cb <= sizeof(*pu32), VERR_IOM_IOPORT_UNUSED);
 
-    ssize_t cbRead = pread(pFun->iFdVfio, pu32, cb, pFun->offVga + offPort);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
-
+    uint32_t u32 = UINT32_MAX;
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + offPort, &u32, cb, false /*fWrite*/);
+    *pu32 = u32;
     return VINF_SUCCESS;
 }
 
@@ -1187,13 +1234,10 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioRead(PPDMDEVINS pDevIns, void *pv
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
 
-    ssize_t cbRead = pread(pFun->iFdVfio, pv, cb, pFun->offVga + off);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
-
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + off, pv, cb, false /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -1203,13 +1247,10 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioRead(PPDMDEVINS pDevIns, void *p
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
 
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, pv, cb, pFun->offVga + off);
-    if (cbWritten != cb)
-        return RTErrConvertFromErrno(errno);
-
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + off, (void *)(uintptr_t)pv, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -1219,57 +1260,27 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioWrite(PPDMDEVINS pDevIns, void *
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioFill(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, uint32_t u32Item, unsigned cbItem, unsigned cItems)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
+    AssertReturn(cbItem == 1 || cbItem == 2 || cbItem == 4, VINF_SUCCESS);
 
-    uint8_t abVal[4] = { 0 };
-    for (uint8_t i = 0; i < RT_ELEMENTS(abVal); i++)
+    /* What is filled has to be inside the legacy video memory range, the offset is the absolute address. */
+    if (   off <  VFIO_PCI_VGA_MEM_START
+        || off >= VFIO_PCI_VGA_MEM_START + VFIO_PCI_VGA_MEM_SIZE)
+        return VINF_SUCCESS;
+    uint64_t cbLeft = RT_MIN((uint64_t)cbItem * cItems, VFIO_PCI_VGA_MEM_START + VFIO_PCI_VGA_MEM_SIZE - off);
+
+    /* Write it in pieces from a buffer full of items; the buffer size is a multiple of all item sizes. */
+    uint8_t abBuf[_1K];
+    for (unsigned i = 0; i < sizeof(abBuf); i++)
+        abBuf[i] = (uint8_t)(u32Item >> ((i % cbItem) * 8));
+    while (cbLeft > 0)
     {
-        abVal[i] = u32Item & 0xff;
-        u32Item >>= 8;
+        size_t const cbChunk = (size_t)RT_MIN(cbLeft, sizeof(abBuf));
+        pciVfioFdAccess(pThis, pFun, pFun->offVga + off, abBuf, cbChunk, true /*fWrite*/);
+        off    += cbChunk;
+        cbLeft -= cbChunk;
     }
-
-    ssize_t const cb = (ssize_t)cbItem * cItems;
-    uint8_t *pb = (uint8_t *)RTMemTmpAlloc(cb);
-    if (!pb)
-        return VERR_NO_MEMORY;
-
-    uint8_t *pbCur = pb;
-
-    switch (cbItem)
-    {
-        case 1:
-            for (uint32_t i = 0; i < cItems; i++)
-                *pbCur++ = abVal[0];
-            break;
-        case 2:
-            for (uint32_t i = 0; i < cItems; i++)
-            {
-                pbCur[0] = abVal[0];
-                pbCur[1] = abVal[1];
-                pbCur += 2;
-            }
-            break;
-        case 4:
-            for (uint32_t i = 0; i < cItems; i++)
-            {
-                pbCur[0] = abVal[0];
-                pbCur[1] = abVal[1];
-                pbCur[2] = abVal[2];
-                pbCur[3] = abVal[3];
-                pbCur += 4;
-            }
-            break;
-        default:
-            AssertFailedReturn(VERR_NOT_SUPPORTED);
-    }
-
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, pb, cb, pFun->offVga + off);
-    RTMemTmpFree(pb);
-
-    if (cbWritten != cb)
-        return RTErrConvertFromErrno(errno);
-
     return VINF_SUCCESS;
 }
 
@@ -1304,7 +1315,7 @@ static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
     /*
      * The MDA/CGA/EGA/VGA/whatever fixed MMIO area.
      */
-    rc = PDMDevHlpMmioCreateExAndMap(pDevIns, 0x000a0000, 0x00020000,
+    rc = PDMDevHlpMmioCreateExAndMap(pDevIns, VFIO_PCI_VGA_MEM_START, VFIO_PCI_VGA_MEM_SIZE,
                                      IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU | IOMMMIO_FLAGS_ABS,
                                      NULL /*pPciDev*/, UINT32_MAX /*iPciRegion*/,
                                      pciVfioVgaMmioWrite, pciVfioVgaMmioRead, pciVfioVgaMmioFill, pFun,
@@ -1936,13 +1947,23 @@ static int pciVfioIrqUpdate(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint16_t u16Cmd, u
 }
 
 
+/**
+ * Sets how reads and writes of a config space byte are handled, replacing what
+ * was set for it before.
+ *
+ * @param   pFun        The function.
+ * @param   off         The config space offset of the byte.
+ * @param   fRd         How to handle reads, VFIO_PCI_CFG_SPACE_ACCESS_XXX.
+ * @param   fWr         How to handle writes, VFIO_PCI_CFG_SPACE_ACCESS_XXX.
+ */
 DECLINLINE(void) pciVfioCfgSpaceSetInterceptU8(PVFIOPCIFUN pFun, uint32_t off, uint8_t fRd, uint8_t fWr)
 {
     AssertReturnVoid(off < sizeof(pFun->abPciCfgIntercept) * 8 / 4);
     uint32_t offByte = off >> 1;
     uint8_t  cShift  = (off & 0x1) ? 4 : 0;
 
-    pFun->abPciCfgIntercept[offByte] |= ((fWr << 2) | fRd) << cShift;
+    pFun->abPciCfgIntercept[offByte] = (uint8_t)(  (pFun->abPciCfgIntercept[offByte] & ~(0xf << cShift))
+                                                 | ((((fWr & 0x3) << 2) | (fRd & 0x3)) << cShift));
 }
 
 
@@ -2816,13 +2837,15 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
                         }
                         break;
                     }
-                    default:
-                        AssertReleaseFailed();
+                    default: /* Nothing else is emulated for reading, reads as zero. */
+                        AssertFailed();
+                        break;
                 }
                 break;
             }
             default:
-                AssertReleaseFailed();
+                AssertFailed();
+                break;
         }
 
         u32 |= (uint32_t)bRead << (i * 8);
@@ -3131,8 +3154,11 @@ static DECLCALLBACK(int) pciVfioQuirkIntelBattlemageApply(PVFIOPCI pThis, PVFIOP
 {
     RT_NOREF(pThis, pQuirk);
 
-    for (uint32_t i = 0x50; i < 0x50 + 16; i += 4)
-        pciVfioCfgSpaceSetInterceptRoU32(pFun, i, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
+    /* Only bytes which are not handled otherwise, like being part of a capability. */
+    for (uint32_t off = 0x50; off < 0x50 + 16; off++)
+        if (   pciVfioCfgSpaceGetInterceptRd(pFun, off) == VFIO_PCI_CFG_SPACE_ACCESS_INVALID
+            && pciVfioCfgSpaceGetInterceptWr(pFun, off) == VFIO_PCI_CFG_SPACE_ACCESS_INVALID)
+            pciVfioCfgSpaceSetInterceptRoU8(pFun, off, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
 
     return VINF_SUCCESS;
 }

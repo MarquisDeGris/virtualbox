@@ -209,6 +209,8 @@ typedef struct TSTPDMMMIO
     PFNIOMMMIONEWWRITE  pfnWrite;
     /** The read handler. */
     PFNIOMMMIONEWREAD   pfnRead;
+    /** The fill handler, optional. */
+    PFNIOMMMIONEWFILL   pfnFill;
     /** The user argument for the handlers. */
     void               *pvUser;
 } TSTPDMMMIO;
@@ -717,7 +719,7 @@ static DECLCALLBACK(int) tstPdmHlp_MmioCreateEx(PPDMDEVINS pDevIns, RTGCPHYS cbR
                                                 PFNIOMMMIONEWFILL pfnFill, void *pvUser, const char *pszDesc,
                                                 PIOMMMIOHANDLE phRegion)
 {
-    RT_NOREF(pPciDev, iPciRegion, pfnFill, pszDesc);
+    RT_NOREF(pPciDev, iPciRegion, pszDesc);
     *phRegion = NIL_IOMMMIOHANDLE;
     AssertReturn(g_Pdm.fCreating, VERR_VM_INVALID_VM_STATE); /* Same restrictions as IOMR3MmioCreate. */
     AssertReturn(cbRegion > 0, VERR_OUT_OF_RANGE);
@@ -731,6 +733,7 @@ static DECLCALLBACK(int) tstPdmHlp_MmioCreateEx(PPDMDEVINS pDevIns, RTGCPHYS cbR
     g_Pdm.aMmio[idx].fFlags   = fFlags;
     g_Pdm.aMmio[idx].pfnWrite = pfnWrite;
     g_Pdm.aMmio[idx].pfnRead  = pfnRead;
+    g_Pdm.aMmio[idx].pfnFill  = pfnFill;
     g_Pdm.aMmio[idx].pvUser   = pvUser;
     *phRegion = idx;
     return VINF_SUCCESS;
@@ -2040,6 +2043,34 @@ int tstPdmPhysWrite(RTGCPHYS GCPhys, const void *pv, unsigned cb)
 
     memcpy(pbDst, pv, cb);
     return VINF_SUCCESS;
+}
+
+
+/**
+ * Performs a guest memory fill hitting an MMIO range which has a fill handler.
+ *
+ * The handler gets what the guest asks for, it is up to it to stay inside its
+ * range.
+ *
+ * @returns VBox status code, VERR_NOT_FOUND if there is no range with a fill handler at the address.
+ * @param   GCPhys              Where to start filling.
+ * @param   u32Item             The item to fill with.
+ * @param   cbItem              Size of an item: 1, 2 or 4.
+ * @param   cItems              Number of items.
+ */
+int tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned cItems)
+{
+    for (uint32_t i = 0; i < g_Pdm.cMmio; i++)
+        if (   g_Pdm.aMmio[i].GCPhys != NIL_RTGCPHYS
+            && g_Pdm.aMmio[i].pfnFill
+            && GCPhys - g_Pdm.aMmio[i].GCPhys < g_Pdm.aMmio[i].cbRegion)
+        {
+            RTGCPHYS const off = g_Pdm.aMmio[i].fFlags & IOMMMIO_FLAGS_ABS ? GCPhys : GCPhys - g_Pdm.aMmio[i].GCPhys;
+            VBOXSTRICTRC rcStrict = g_Pdm.aMmio[i].pfnFill(g_Pdm.aMmio[i].pDevIns, g_Pdm.aMmio[i].pvUser, off, u32Item,
+                                                           cbItem, cItems);
+            return VBOXSTRICTRC_VAL(rcStrict);
+        }
+    return VERR_NOT_FOUND;
 }
 
 
