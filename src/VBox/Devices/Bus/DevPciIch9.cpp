@@ -979,8 +979,14 @@ static int devpciR3CommonRegisterDeviceOnBus(PPDMDEVINS pDevIns, PDEVPCIBUS pBus
 DECLCALLBACK(int) devpciR3CommonRegisterDevice(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint32_t fFlags,
                                                uint8_t uPciDevNo, uint8_t uPciFunNo, const char *pszName)
 {
-    PDEVPCIBUS pBus = PDMINS_2_DATA(pDevIns, PDEVPCIBUS);
+    PDEVPCIBUSCC pBusCC = PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC);
+    PDEVPCIBUS   pBus = PDMINS_2_DATA(pDevIns, PDEVPCIBUS);
     AssertCompileMemberOffset(DEVPCIROOT, PciBus, 0);
+
+    /** @todo Required for MSI-X support in DevPciVfio.cpp which ignores the current MSI-X implementation for passthrough;
+     *        a device on the root bus needs it just as much as one behind a bridge. */
+    pPciDev->Int.s.pvPciBusPtrR3 = pBusCC->CTX_SUFF(pPciHlp);
+
     return devpciR3CommonRegisterDeviceOnBus(pDevIns, pBus, pPciDev, fFlags, uPciDevNo, uPciFunNo, pszName);
 }
 
