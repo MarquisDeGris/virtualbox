@@ -1987,16 +1987,27 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                                    N_("Failed to read capabilities list pointer with %Rrc"), rc);
 
     pciVfioCfgSpaceSetInterceptRoU8(pFun, VBOX_PCI_CAPABILITY_LIST, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);
+    offCap &= 0xfc; /* The bottom two bits are reserved. */
     if (!offCap)
     {
         /* No capabilities, return early. */
         return VINF_SUCCESS;
     }
 
-    /* This ASSUMES that the cpabilities are not going backwards when pointing to the next one. */
+    /*
+     * The capabilities can come in any order.  Keep track of the config space
+     * bytes claimed by the capabilities seen so far, in order to catch lists
+     * which loop and capabilities which overlap.
+     */
+    uint64_t bmClaimed[256 / 64];
+    RT_ZERO(bmClaimed);
     uint8_t offCapNextPrev = VBOX_PCI_CAPABILITY_LIST;
     for (;;)
     {
+        if (offCap < 0x40)
+            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The capability pointer %#x points into the PCI header"), offCap);
+
         uint8_t bCapId = 0;
         rc = pciVfioCfgSpaceReadU8(pFun, offCap, &bCapId);
         if (RT_FAILURE(rc))
@@ -2008,6 +2019,7 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Failed to read next capability pointer at offset %#x with %Rrc"), offCap, rc);
+        offCapNext &= 0xfc; /* The bottom two bits are reserved. */
 
         uint8_t cbCap = 2;
         bool    fSupported = false;
@@ -2027,9 +2039,6 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
             case VBOX_PCI_CAP_ID_SLOTID: LogRel(("VFIO#%d.%u: Cap[%#x]: Slot Identification -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap)); break;
             case VBOX_PCI_CAP_ID_MSI:
             {
-                LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
-                fSupported = true;
-
                 /* Read the message control from the device. */
                 uint16_t u16Mmc = 0;
                 rc = pciVfioCfgSpaceReadU16(pFun, offCap + 2, &u16Mmc);
@@ -2037,38 +2046,56 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                     return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                                N_("Failed to read MSI message control register with %Rrc"), rc);
 
-                bool f64Bit = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
-                uint8_t cVectors = RT_BIT((u16Mmc & VBOX_PCI_MSI_FLAGS_QMASK) >> 1);
+                uint32_t const cVectors = pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX];
+                if (!cVectors)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> unsupported, VFIO has no vectors for it\n",
+                            pThis->iInstance, pFun->uPciFun, offCap));
+                    break;
+                }
+
+                LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
+                fSupported = true;
+
+                /*
+                 * The guest gets the capability with the layout it has on the device, so
+                 * it never extends into whatever comes behind it in the config space.
+                 */
+                bool const    f64Bit    = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
+                bool const    fMaskable = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_MASKBIT);
+                uint8_t const offData   = offCap + (f64Bit ? VBOX_MSI_CAP_MESSAGE_DATA_64 : VBOX_MSI_CAP_MESSAGE_DATA_32);
+                cbCap = (uint8_t)(offData - offCap) + (fMaskable ? 2 + 2 + 4 + 4 : 2);
+                if ((uint32_t)offCap + cbCap > 256)
+                    return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                               N_("The MSI capability at offset %#x doesn't fit into the PCI config space"), offCap);
 
                 /* Add capability. */
                 PDMMSIREG MsiReg;
                 RT_ZERO(MsiReg);
-                MsiReg.cMsiVectors     = cVectors;
+                MsiReg.cMsiVectors     = (uint16_t)cVectors;
                 MsiReg.iMsiCapOffset   = offCap;
                 MsiReg.iMsiNextOffset  = 0; /* Gets updated later. */
                 MsiReg.fMsi64bit       = f64Bit;
+                MsiReg.fMsiNoMasking   = !fMaskable;
                 rc = PDMDevHlpPCIRegisterMsiEx(pDevIns, pPciDev, &MsiReg);
                 if (RT_FAILURE(rc))
-                    AssertFailed();
+                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                               N_("Failed to register the MSI capability at offset %#x with %Rrc"), offCap, rc);
 
-                pciVfioCfgSpaceSetInterceptU16(pFun, offCap +  2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
-                pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address [Low] */
+                /* The message control register describes the device and starts out with MSI disabled. */
+                PDMPciDevSetWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,
+                                 u16Mmc & (VBOX_PCI_MSI_FLAGS_QMASK | VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT));
+
+                pciVfioCfgSpaceSetInterceptU16(pFun, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,    VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
+                pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address [Low] */
                 if (f64Bit)
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address High */
+                pciVfioCfgSpaceSetInterceptU16(pFun, offData, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);         /* Message Data */
+                if (fMaskable)
                 {
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address High */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
-
-                    /* We always implement MSI with per-vector masking support. */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 20, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
-                }
-                else
-                {
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
-
-                    /* We always implement MSI with per-vector masking support. */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
+                    pciVfioCfgSpaceSetInterceptU16(pFun, offData + 2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Reserved */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offData + 4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offData + 8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
                 }
 
                 pFun->offMsiCtrl = offCap + 2;
@@ -2123,6 +2150,17 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 else if (bVers == 2)
                     cbCap2 = 60;
 
+                if (!cbCap2)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: PCI Express capability version %u is unknown -> unsupported\n",
+                            pThis->iInstance, pFun->uPciFun, offCap, bVers));
+                    fSupported = false;
+                    break;
+                }
+                if ((uint32_t)offCap + cbCap2 > 256)
+                    return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                               N_("The PCI Express capability at offset %#x doesn't fit into the PCI config space"), offCap);
+
                 for (uint16_t i = offCap + 2; i < (uint16_t)offCap + cbCap2; i += 2)
                     pciVfioCfgSpaceSetInterceptU16(pFun, i, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
                 cbCap = cbCap2;
@@ -2148,6 +2186,21 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 break;
         }
 
+        /*
+         * Whatever the capability is, it has to be inside the config space and must
+         * not touch what a capability seen earlier has claimed.  The latter also
+         * catches a list which loops.
+         */
+        if ((uint32_t)offCap + cbCap > 256)
+            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The capability at offset %#x with %u bytes doesn't fit into the PCI config space"),
+                                       offCap, cbCap);
+        for (uint32_t off = offCap; off < (uint32_t)offCap + cbCap; off++)
+            if (ASMBitTestAndSet(&bmClaimed[0], (int32_t)off))
+                return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                           N_("The capability at offset %#x overlaps with another one or the capability list loops"),
+                                           offCap);
+
         if (fSupported)
         {
             /* Accesses to capability ID and pointer to the next capability are never passed through. */
@@ -2159,11 +2212,6 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
 
         if (!offCapNext)
             break;
-
-        if (   offCapNext < offCap
-            || offCapNext < offCap + cbCap)
-            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
-                                       N_("Next capability pointer points backwards or inside the current capability (next offset %#x )"), offCapNext);
 
         offCap = offCapNext;
     }
@@ -2182,21 +2230,35 @@ static int pciVfioCfgSpaceParseExtCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun,
 
     uint16_t offCap = 256;
 
-    /* This ASSUMES that the cpabilities are not going backwards when pointing to the next one. */
+    /*
+     * The capabilities can come in any order.  Keep track of the capability
+     * headers seen so far in order to catch lists which loop.
+     */
+    uint64_t bmVisited[4096 / sizeof(uint32_t) / 64];
+    RT_ZERO(bmVisited);
     for (;;)
     {
+        if (   offCap < 256
+            || offCap > 4096 - sizeof(uint32_t))
+            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The extended capability pointer %#x is invalid"), offCap);
+        if (ASMBitTestAndSet(&bmVisited[0], (int32_t)(offCap / sizeof(uint32_t))))
+            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The extended capability list loops at offset %#x"), offCap);
+
         uint32_t u32CapHdr = 0;
         int rc = pciVfioCfgSpaceReadU32(pFun, offCap, &u32CapHdr);
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Failed to read extended capabilitiy header at offset %#x with %Rrc"), offCap, rc);
 
-        if (!u32CapHdr)
+        if (   !u32CapHdr
+            || u32CapHdr == UINT32_MAX)
             break;
 
         uint16_t const u16CapId   = u32CapHdr & UINT16_C(0xffff);
         uint8_t  const bCapVers   = (u32CapHdr >> 16) & 0xf; RT_NOREF(bCapVers);
-        uint16_t const offCapNext = (u32CapHdr >> 20) & 0xfff;
+        uint16_t const offCapNext = (u32CapHdr >> 20) & 0xffc; /* The bottom two bits are reserved. */
         uint16_t       cbCap      = sizeof(uint32_t);
         bool fSupported = false;
         switch (u16CapId)
@@ -2242,17 +2304,6 @@ static int pciVfioCfgSpaceParseExtCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun,
 
         if (!offCapNext)
             break;
-
-        /*
-         * Don't allow pointing inside the current capability, pointing backwards is allowed as that was seen on
-         * an Intel ARC Pro B70 GPU and there is nothing in the PCIe specification prohibiting that.
-         */
-        /** @todo Maybe check whether the new capability was visited already to avoid endless loops, which would
-         * indicate a broken device. */
-        if (   offCapNext >= offCap
-            && offCapNext < offCap + cbCap)
-            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
-                                       N_("Next capability pointer points inside the current capability (next offset %#x, current [%#x:%#x[)"), offCapNext, offCap, cbCap);
 
         offCap = offCapNext;
     }
