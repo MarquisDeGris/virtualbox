@@ -152,6 +152,7 @@
 #include <VBox/vmm/vmapi.h>
 #include <iprt/asm.h>
 #include <iprt/assert.h>
+#include <iprt/ctype.h>
 #include <iprt/dir.h>
 #include <iprt/mem.h>
 #include <iprt/path.h>
@@ -187,6 +188,8 @@
 
 /** eventfd2() syscall for the interrupt handling. */
 #define LNX_SYSCALL_EVENTFD2          290
+/** Flag for eventfd2(): close the file descriptor on exec, same value as O_CLOEXEC. */
+#define LNX_EFD_CLOEXEC               O_CLOEXEC
 
 /** Invalid access. */
 #define VFIO_PCI_CFG_SPACE_ACCESS_INVALID     0
@@ -298,6 +301,8 @@ typedef struct VFIOPCIFUN
     uint32_t             uPciFun;
     /** The vfio cdev file descriptor .*/
     int                  iFdVfio;
+    /** Flag whether the function is attached to the I/O address space (IOMMUFD only). */
+    bool                 fIoasAttached;
 
     /** The start offset of the PCI config space. */
     uint64_t             offPciCfg;
@@ -438,6 +443,8 @@ typedef struct VFIOPCI
 
     /** Flag whether the guest RAM was mapped to the IOMMU. */
     bool                 fGuestRamMapped;
+    /** Flag whether the I/O address space was allocated (IOMMUFD only). */
+    bool                 fIoasAllocated;
 } VFIOPCI;
 /** Pointer to the raw PCI instance data. */
 typedef VFIOPCI *PVFIOPCI;
@@ -1292,10 +1299,10 @@ static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
     if (RT_FAILURE(rc))
         return rc;
 
-    AssertLogRelMsgReturn(   RegionInfo.flags
-                          && RegionInfo.size,
-                          ("VGA/GPU does not support VFIO_PCI_VGA_REGION_INDEX\n"),
-                          VERR_NOT_SUPPORTED);
+    if (   !RegionInfo.flags
+        || !RegionInfo.size)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("The device has no legacy VGA ranges which could be exposed to the guest"));
 
     pFun->offVga = RegionInfo.offset;
 
@@ -1310,7 +1317,7 @@ static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
                                        pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
                                        "VFIO VGA #2", NULL /*paExtDescs*/, &pFun->hVgaIoPort2);
     if (RT_FAILURE(rc))
-        return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3b0 - 0x3bb failed");
+        return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3c0 - 0x3df failed");
 
     /*
      * The MDA/CGA/EGA/VGA/whatever fixed MMIO area.
@@ -2983,7 +2990,7 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
         /* Now write to the device. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, (uint16_t)uValue);
         if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
+            LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
 
         /* The PCI bus does the rest, which includes updating the BAR mappings. */
         VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
@@ -3000,7 +3007,7 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
         /* Now write to the device. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsixCtrl);
         if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
+            LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
         PDMPciDevSetWord(pPciDev, offReg, u16MsixCtrl);
 
         /* Vectors held back by the function mask can go out now. */
@@ -3018,7 +3025,7 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
         /* Now write to the device. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsiCtrl);
         if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
+            LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
         PDMPciDevSetWord(pPciDev, offReg, u16MsiCtrl);
     }
     else
@@ -3208,6 +3215,40 @@ static int pciVfioQuirkApply(PVFIOPCI pThis, PVFIOPCIFUN pFun)
 }
 
 
+/**
+ * Checks that a string is the address of a PCI function the way the host
+ * kernel writes it: domain:bus:device.function, like 0000:0a:00.1.
+ *
+ * The address becomes a part of sysfs paths and of device names handed to the
+ * kernel, so nothing but this format is let through.
+ *
+ * @returns true if the string is a PCI function address, false if not.
+ * @param   pszAddress  The string to check.
+ */
+static bool pciVfioIsHostAddressValid(const char *pszAddress)
+{
+    static const char s_szFormat[] = "xxxx:xx:xx.f"; /* x: hex digit, f: function number */
+    size_t off = 0;
+    for (; off < sizeof(s_szFormat) - 1; off++)
+    {
+        char const ch = pszAddress[off];
+        if (s_szFormat[off] == 'x')
+        {
+            if (!RT_C_IS_XDIGIT(ch))
+                return false;
+        }
+        else if (s_szFormat[off] == 'f')
+        {
+            if (ch < '0' || ch > '7')
+                return false;
+        }
+        else if (ch != s_szFormat[off])
+            return false;
+    }
+    return pszAddress[off] == '\0';
+}
+
+
 static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHLPR3 pHlp, PCFGMNODE pCfg)
 {
     /* Query configuration, configuration using the IOMMUFD takes precedence over the legacy VFIO group style. */
@@ -3217,7 +3258,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
         return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                    N_("Configuration error: Querying \"IommuPath\" failed"));
 
-    pThis->IommuFd.iFdIommu = open(szPath, O_RDWR);
+    pThis->IommuFd.iFdIommu = open(szPath, O_RDWR | O_CLOEXEC);
     if (pThis->IommuFd.iFdIommu == -1)
     {
         pThis->fVfioLegacy = true;
@@ -3229,7 +3270,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"VfioPath\" failed, no access method configured"));
 
-        pThis->VfioGroup.iFdVfioContainer = open(szPath, O_RDWR);
+        pThis->VfioGroup.iFdVfioContainer = open(szPath, O_RDWR | O_CLOEXEC);
         if (pThis->VfioGroup.iFdVfioContainer == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Opening VFIO container path \"%s\" failed with %d"), szPath, errno);
@@ -3239,13 +3280,13 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Querying VFIO API version failed"));
         if (rcLnx != VFIO_API_VERSION)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Returned VFIO API version %d doesn't match expected version %d\n"),
+            return PDMDevHlpVMSetError(pDevIns, VERR_VERSION_MISMATCH, RT_SRC_POS,
+                                       N_("Returned VFIO API version %d doesn't match expected version %d"),
                                        rcLnx, VFIO_API_VERSION);
 
         rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU);
-        if (rcLnx == 0)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+        if (rcLnx <= 0)
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("VFIO_TYPE1_IOMMU extension not supported"));
 
         /* Open the group. */
@@ -3263,6 +3304,9 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Configuration error: Querying \"HostAddress\" failed, no access method configured"));
+            if (!pciVfioIsHostAddressValid(szHostAddress))
+                return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                           N_("Configuration error: \"HostAddress\" is not a PCI address of the form 0000:00:00.0"));
 
             char szIommuGroup[8];
             szIommuGroup[0] = '\0';
@@ -3272,14 +3316,20 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Configuration error: Resolving the IOMMU group of the PCI device failed"));
 
+            /* The group is a number, anything else isn't a group this can work with. */
+            for (size_t off = 0; off < cchIommuGroup || off == 0; off++)
+                if (!RT_C_IS_DIGIT(szIommuGroup[off]))
+                    return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                               N_("The IOMMU group of the PCI device is not usable for PCI passthrough"));
+
             rc = RTPathJoin(szPath, sizeof(szPath), "/dev/vfio", szIommuGroup);
-            AssertRC(rc);
+            AssertRCReturn(rc, rc);
         }
         else  if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"VfioGroupPath\" failed"));
 
-        pThis->VfioGroup.iFdVfioGroup = open(szPath, O_RDWR);
+        pThis->VfioGroup.iFdVfioGroup = open(szPath, O_RDWR | O_CLOEXEC);
         if (pThis->VfioGroup.iFdVfioGroup == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Opening VFIO group path \"%s\" failed with %d"), szPath, errno);
@@ -3294,7 +3344,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                                        N_("Querying VFIO status failed"));
 
         if (!(GroupStatus.flags & VFIO_GROUP_FLAGS_VIABLE))
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("The VFIO group is not usable for PCI passthrough (all devices in the group bound to VFIO?)"));
 
         rcLnx = ioctl(pThis->VfioGroup.iFdVfioGroup, VFIO_GROUP_SET_CONTAINER, &pThis->VfioGroup.iFdVfioContainer);
@@ -3319,6 +3369,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                                        N_("Allocating I/O address space for VFIO device failed with %d"), errno);
 
         pThis->IommuFd.idIommuHwpt = IoasAlloc.out_ioas_id;
+        pThis->fIoasAllocated      = true;
     }
 
     return VINF_SUCCESS;
@@ -3336,6 +3387,9 @@ static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPC
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"HostAddress\" failed, no access method configured"));
+        if (!pciVfioIsHostAddressValid(szPath))
+            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                       N_("Configuration error: \"HostAddress\" is not a PCI address of the form 0000:00:00.0"));
         fHostAddress = true;
     }
     else if (RT_FAILURE(rc))
@@ -3348,50 +3402,56 @@ static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPC
         if (pFun->iFdVfio == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Failed to get device for VFIO device \"%s\" -> %d"), szPath, errno);
+
+        /* Not for processes started by this one. */
+        int const fFdFlags = fcntl(pFun->iFdVfio, F_GETFD);
+        if (   fFdFlags == -1
+            || fcntl(pFun->iFdVfio, F_SETFD, fFdFlags | FD_CLOEXEC) == -1)
+            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                       N_("Failed to set up the file descriptor of VFIO device \"%s\" -> %d"), szPath, errno);
     }
     else
     {
         if (fHostAddress)
         {
-            /* Try determining the VFIO device from sysfs. */
+            /* Determine the VFIO device from sysfs. */
             char szSysfsPath[128];
             rc = RTPathJoin(szSysfsPath, sizeof(szSysfsPath), "/sys/bus/pci/devices", szPath);
-            AssertRC(rc);
+            AssertRCReturn(rc, rc);
             rc = RTPathAppend(szSysfsPath, sizeof(szSysfsPath), "vfio-dev");
-            AssertRC(rc);
+            AssertRCReturn(rc, rc);
 
             RTDIR hDir = NIL_RTDIR;
             rc = RTDirOpen(&hDir, szSysfsPath);
-            if (RT_SUCCESS(rc))
+            if (RT_FAILURE(rc))
+                return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                           N_("Configuration error: The PCI device %s is not bound to a VFIO driver"), szPath);
+            for (;;)
             {
-                for (;;)
-                {
-                    RTDIRENTRY Entry; /* The default name size is more than enough for the format xxxx:xx:xx.x */
-                    rc = RTDirRead(hDir, &Entry, NULL /*pcbDirEntry*/);
-                    if (RT_FAILURE(rc))
-                        break;
-
-                    if (RTDirEntryIsStdDotLink(&Entry))
-                        continue;
-
-                    if (!strncmp(Entry.szName, RT_STR_TUPLE("vfio")))
-                    {
-                        rc = RTPathJoin(szPath, sizeof(szPath), "/dev/vfio/devices", Entry.szName);
-                        AssertRC(rc);
-                        break;
-                    }
-                }
-
-                int rc2 = RTDirClose(hDir);
-                AssertRC(rc2); RT_NOREF(rc2);
-
+                RTDIRENTRY Entry; /* The default name size is more than enough for the format vfioN */
+                rc = RTDirRead(hDir, &Entry, NULL /*pcbDirEntry*/);
                 if (RT_FAILURE(rc))
-                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                               N_("Configuration error: Resolving the VFIO device failed"));
+                    break;
+
+                if (RTDirEntryIsStdDotLink(&Entry))
+                    continue;
+
+                if (!strncmp(Entry.szName, RT_STR_TUPLE("vfio")))
+                {
+                    rc = RTPathJoin(szPath, sizeof(szPath), "/dev/vfio/devices", Entry.szName);
+                    break;
+                }
             }
+
+            int rc2 = RTDirClose(hDir);
+            AssertRC(rc2); RT_NOREF(rc2);
+
+            if (RT_FAILURE(rc))
+                return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                           N_("Configuration error: Resolving the VFIO device failed"));
         }
 
-        pFun->iFdVfio = open(szPath, O_RDWR);
+        pFun->iFdVfio = open(szPath, O_RDWR | O_CLOEXEC);
         if (pFun->iFdVfio == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Opening VFIO device \"%s\" failed with %d"), szPath, errno);
@@ -3415,6 +3475,7 @@ static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPC
         if (rcLnx == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Attaching IO address space to opened VFIO device failed with %d"), errno);
+        pFun->fIoasAttached = true;
     }
 
     return VINF_SUCCESS;
@@ -3484,16 +3545,22 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
     {
         PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
 
-        /* Detach address space. */
         if (pFun->iFdVfio != -1)
         {
-            struct vfio_device_detach_iommufd_pt VfioDetach;
-            VfioDetach.argsz   = sizeof(VfioDetach);
-            VfioDetach.flags   = 0;
-            int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_DETACH_IOMMUFD_PT, &VfioDetach);
-            AssertLogRelMsg(!rcLnx, ("VFIO#%d.%u: Failed to detach IOMMU page table with %d\n", pThis->iInstance, pFun->uPciFun, errno));
+            /* Detach the address space if the function got attached to one. */
+            if (pFun->fIoasAttached)
+            {
+                struct vfio_device_detach_iommufd_pt VfioDetach;
+                VfioDetach.argsz   = sizeof(VfioDetach);
+                VfioDetach.flags   = 0;
+                int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_DETACH_IOMMUFD_PT, &VfioDetach);
+                if (rcLnx == -1)
+                    LogRel(("VFIO#%d.%u: Failed to detach IOMMU page table with %d\n", pThis->iInstance, pFun->uPciFun, errno));
+                pFun->fIoasAttached = false;
+            }
 
             close(pFun->iFdVfio);
+            pFun->iFdVfio = -1;
         }
 
         for (uint32_t i = 0; i < pFun->cFdEvts; i++)
@@ -3520,20 +3587,28 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
     {
         if (pThis->VfioGroup.iFdVfioContainer != -1)
             close(pThis->VfioGroup.iFdVfioContainer);
+        pThis->VfioGroup.iFdVfioContainer = -1;
         if (pThis->VfioGroup.iFdVfioGroup != -1)
             close(pThis->VfioGroup.iFdVfioGroup);
+        pThis->VfioGroup.iFdVfioGroup = -1;
     }
     else
     {
         if (pThis->IommuFd.iFdIommu != -1)
         {
-            struct iommu_destroy HwptDestroy;
-            HwptDestroy.size = sizeof(HwptDestroy);
-            HwptDestroy.id   = pThis->IommuFd.idIommuHwpt;
-            int rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_DESTROY, &HwptDestroy);
-            AssertLogRelMsg(!rcLnx, ("VFIO#%d: Failed to destroy I/O address space with %d\n", pThis->iInstance, errno));
+            if (pThis->fIoasAllocated)
+            {
+                struct iommu_destroy HwptDestroy;
+                HwptDestroy.size = sizeof(HwptDestroy);
+                HwptDestroy.id   = pThis->IommuFd.idIommuHwpt;
+                int rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_DESTROY, &HwptDestroy);
+                if (rcLnx == -1)
+                    LogRel(("VFIO#%d: Failed to destroy I/O address space with %d\n", pThis->iInstance, errno));
+                pThis->fIoasAllocated = false;
+            }
 
             close(pThis->IommuFd.iFdIommu);
+            pThis->IommuFd.iFdIommu = -1;
         }
     }
 
@@ -3577,6 +3652,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->IommuFd.iFdIommu = -1;
     pThis->fVfioLegacy      = false;
     pThis->fGuestRamMapped  = false;
+    pThis->fIoasAllocated   = false;
 
     for (uint8_t i = 0; i < RT_ELEMENTS(pThis->aPciFuns); i++)
     {
@@ -3584,6 +3660,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
 
         pFun->uPciFun        = UINT32_MAX;
         pFun->iFdVfio        = -1;
+        pFun->fIoasAttached  = false;
         pFun->iFdWakeup      = -1;
         pFun->fVga           = false;
         pFun->fInterceptMmio = false;
@@ -3655,7 +3732,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                         ))
             return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
 
-        rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "InterceptMmio", &pFun->fInterceptMmio, false);
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgFun, "InterceptMmio", &pFun->fInterceptMmio, false);
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"InterceptMmio\" failed"));
@@ -3687,7 +3764,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                 iInstance, iPciFun, DevInfo.cap_offset));
 
         if (!(DevInfo.flags & VFIO_DEVICE_FLAGS_PCI))
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("VFIO device is not a PCI/PCI Express device. This configuration is not supported"));
 
         /* Setup access to the PCI config space first. */
@@ -3802,7 +3879,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
 
         for (uint32_t i = 0; i < cMaxVectors; i++)
         {
-            rc = pciVfioLnxEventfd2(0 /*uValInit*/, 0 /*fFlags*/, &pFun->paFdEvts[i]);
+            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->paFdEvts[i]);
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Failed to create event file descriptor %u out of %u for interrupts"),
@@ -3834,7 +3911,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         }
 
         /* Create wakeup eventfd for IRQ poller. */
-        rc = pciVfioLnxEventfd2(0 /*uValInit*/, 0 /*fFlags*/, &pFun->iFdWakeup);
+        rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdWakeup);
         if (RT_FAILURE(rc))
             return rc;
 
