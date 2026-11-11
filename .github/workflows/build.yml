@@ -3,6 +3,9 @@ name: build
 # Builds a ref of this repository headless on Linux.
 #   flavor=baseline  plain release build, no testcases (reference result)
 #   flavor=tests     release build with testcases, runs the device testcases
+#   flavor=sanitize  like tests, with the device testcase and what is compiled
+#                    into it built with AddressSanitizer and
+#                    UndefinedBehaviorSanitizer
 # Started through the API (workflow_dispatch) because the code branches do
 # not carry workflow files.
 
@@ -14,7 +17,7 @@ on:
         required: true
         default: main
       flavor:
-        description: "baseline or tests"
+        description: "baseline, tests or sanitize"
         required: true
         default: baseline
       kmk_args:
@@ -22,7 +25,7 @@ on:
         required: false
         default: ""
       cache_ref:
-        description: "Branch whose baseline build output is reused (tests flavor)"
+        description: "Branch whose baseline build output is reused (tests and sanitize flavors)"
         required: false
         default: main
 
@@ -108,7 +111,7 @@ jobs:
 
       - name: Restore build output of the base
         id: outcache
-        if: inputs.flavor == 'tests'
+        if: inputs.flavor != 'baseline'
         uses: actions/cache/restore@v4
         with:
           path: out
@@ -172,20 +175,33 @@ jobs:
           df -h /
 
       - name: Build device testcases
-        if: inputs.flavor == 'tests'
+        if: inputs.flavor != 'baseline'
         run: |
           . ./env.sh
-          ( time kmk -C src/VBox/Devices -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 ) > build-tests.log 2>&1 \
+          # The sanitizers go in through properties of the target which the makefile
+          # doesn't set, so nothing has to be changed in the source tree for them.
+          extra=()
+          if [ "${{ inputs.flavor }}" = "sanitize" ]; then
+            san="-fsanitize=address,undefined -fno-omit-frame-pointer"
+            extra=("tstDevPciVfio_CXXFLAGS.linux=$san" "tstDevPciVfio_LDFLAGS.linux=$san")
+          fi
+          ( time kmk -C src/VBox/Devices -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 "${extra[@]}" ) > build-tests.log 2>&1 \
             || { echo "TESTCASE BUILD FAILED"; grep -n -E 'error:|undefined reference|multiple definition|ld returned|[*][*][*] ' build-tests.log | head -150; echo ----; tail -40 build-tests.log; exit 1; }
           tail -8 build-tests.log
           grep -E 'warning:' build-tests.log | grep -E 'tstDevPciVfio|DevPciVfio|DevPciIch9' | head -60 || true
 
       - name: Run device testcases
-        if: inputs.flavor == 'tests'
+        if: inputs.flavor != 'baseline'
         run: |
           cd out/linux.amd64/release/bin/testcase
           ls -l tstDevPciVfio
           log="$GITHUB_WORKSPACE/test-tstDevPciVfio.log"
+          if [ "${{ inputs.flavor }}" = "sanitize" ]; then
+            # Memory errors and leaks end the run with a failure.  Undefined behaviour is
+            # reported and the run goes on, the reports are looked at below.
+            export ASAN_OPTIONS=detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1
+            export UBSAN_OPTIONS=print_stacktrace=1
+          fi
           ./tstDevPciVfio > "$log" 2>&1 &
           pid=$!
           # A run takes a few seconds. A test which hangs is stopped after three
@@ -206,6 +222,13 @@ jobs:
             exit 1
           fi
           cat "$log"
+          if [ "${{ inputs.flavor }}" = "sanitize" ]; then
+            # Undefined behaviour in the device, the bus code it is tested with or in the
+            # test itself is a failure.
+            echo "---- undefined behaviour reports: $(grep -c 'runtime error:' "$log" || true)"
+            grep 'runtime error:' "$log" | sed -E 's/^.*\/src\/VBox\///' | sort | uniq -c | sort -rn | head -40 || true
+            if grep -q 'runtime error:' "$log"; then exit 1; fi
+          fi
 
       - name: Upload logs
         if: always()
