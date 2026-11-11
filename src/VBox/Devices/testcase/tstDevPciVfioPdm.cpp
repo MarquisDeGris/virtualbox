@@ -97,6 +97,8 @@ typedef struct PDMDEVINSINTRC
 *********************************************************************************************************************************/
 /** How long to wait for a PDM thread to change state. */
 #define TSTPDM_THREAD_TIMEOUT_MS    RT_MS_30SEC
+/** The number of MMIO2 ranges a VM can have (PGM_MAX_MMIO2_RANGES). */
+#define TSTPDM_MAX_MMIO2_RANGES     32
 
 
 /*********************************************************************************************************************************
@@ -217,6 +219,10 @@ typedef struct TSTPDMMMIO2
 {
     /** The owner. */
     PPDMDEVINS          pDevIns;
+    /** The PCI sub-device the range is registered for, 254 if none. */
+    uint32_t            iSubDev;
+    /** The region number, unique per owner and sub-device. */
+    uint32_t            iRegion;
     /** Size of the range. */
     RTGCPHYS            cbRegion;
     /** Where the range is mapped, NIL_RTGCPHYS if it is not. */
@@ -708,8 +714,9 @@ static DECLCALLBACK(int) tstPdmHlp_MmioCreateEx(PPDMDEVINS pDevIns, RTGCPHYS cbR
 {
     RT_NOREF(pPciDev, iPciRegion, pfnFill, pszDesc);
     *phRegion = NIL_IOMMMIOHANDLE;
-    AssertReturn(g_Pdm.fCreating, VERR_VM_INVALID_VM_STATE); /* Same restriction as IOMR3MmioCreate. */
+    AssertReturn(g_Pdm.fCreating, VERR_VM_INVALID_VM_STATE); /* Same restrictions as IOMR3MmioCreate. */
     AssertReturn(cbRegion > 0, VERR_OUT_OF_RANGE);
+    AssertReturn(!(cbRegion & GUEST_PAGE_OFFSET_MASK), VERR_UNSUPPORTED_ALIGNMENT);
     AssertReturn(g_Pdm.cMmio < RT_ELEMENTS(g_Pdm.aMmio), VERR_OUT_OF_RESOURCES);
 
     uint32_t const idx = g_Pdm.cMmio++;
@@ -752,21 +759,35 @@ static DECLCALLBACK(int) tstPdmHlp_MmioUnmap(PPDMDEVINS pDevIns, IOMMMIOHANDLE h
  *
  * @returns VBox status code.
  * @param   pDevIns             The owner.
+ * @param   pPciDev             The PCI device the range is associated with, can be NULL.
+ * @param   iPciRegion          The region number in the high word, the low word has to be zero.
  * @param   cbRegion            The size of the range.
  * @param   pvBacking           The existing backing memory, NULL to allocate it.
  * @param   ppvMapping          Where to return the backing memory, optional.
  * @param   phRegion            Where to return the handle.
  */
-static int tstPdmMmio2Register(PPDMDEVINS pDevIns, RTGCPHYS cbRegion, void *pvBacking, void **ppvMapping,
-                               PPGMMMIO2HANDLE phRegion)
+static int tstPdmMmio2Register(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint32_t iPciRegion, RTGCPHYS cbRegion,
+                               void *pvBacking, void **ppvMapping, PPGMMMIO2HANDLE phRegion)
 {
     *phRegion = NIL_PGMMMIO2HANDLE;
-    /* Same restriction as PGMR3PhysMmio2Register (the saved state loading exception does not apply here). */
-    AssertReturn(g_Pdm.fCreating, VERR_VM_INVALID_VM_STATE);
-    AssertReturn(cbRegion > 0, VERR_OUT_OF_RANGE);
-    AssertReturn(g_Pdm.cMmio2 < RT_ELEMENTS(g_Pdm.aMmio2), VERR_OUT_OF_RESOURCES);
 
-    cbRegion = RT_ALIGN_64(cbRegion, GUEST_PAGE_SIZE);
+    /* Same restrictions as pdmR3DevHlp_Mmio2Create and PGMR3PhysMmio2Register (the saved
+       state loading exception does not apply here). */
+    AssertReturn(!pPciDev || pPciDev->Int.s.pDevInsR3 == pDevIns, VERR_INVALID_PARAMETER);
+    AssertReturn(!(iPciRegion & UINT16_MAX), VERR_INVALID_PARAMETER);
+    uint32_t const iSubDev = pPciDev ? pPciDev->Int.s.idxDevCfg : 254;
+    uint32_t const iRegion = iPciRegion >> 16;
+    AssertReturn(iRegion <= UINT8_MAX, VERR_INVALID_PARAMETER);
+    AssertReturn(g_Pdm.fCreating, VERR_VM_INVALID_VM_STATE);
+    AssertReturn(cbRegion > 0, VERR_INVALID_PARAMETER);
+    AssertReturn(!(cbRegion & GUEST_PAGE_OFFSET_MASK), VERR_INVALID_PARAMETER);
+    for (uint32_t i = 0; i < g_Pdm.cMmio2; i++)
+        AssertReturn(   g_Pdm.aMmio2[i].pDevIns != pDevIns
+                     || g_Pdm.aMmio2[i].iSubDev != iSubDev
+                     || g_Pdm.aMmio2[i].iRegion != iRegion,
+                     VERR_ALREADY_EXISTS);
+    AssertReturn(g_Pdm.cMmio2 < TSTPDM_MAX_MMIO2_RANGES, VERR_PGM_TOO_MANY_MMIO2_RANGES);
+
     bool const fOwned = pvBacking == NULL;
     if (fOwned)
     {
@@ -777,6 +798,8 @@ static int tstPdmMmio2Register(PPDMDEVINS pDevIns, RTGCPHYS cbRegion, void *pvBa
 
     uint32_t const idx = g_Pdm.cMmio2++;
     g_Pdm.aMmio2[idx].pDevIns   = pDevIns;
+    g_Pdm.aMmio2[idx].iSubDev   = iSubDev;
+    g_Pdm.aMmio2[idx].iRegion   = iRegion;
     g_Pdm.aMmio2[idx].cbRegion  = cbRegion;
     g_Pdm.aMmio2[idx].GCPhys    = NIL_RTGCPHYS;
     g_Pdm.aMmio2[idx].pbBacking = (uint8_t *)pvBacking;
@@ -792,9 +815,9 @@ static int tstPdmMmio2Register(PPDMDEVINS pDevIns, RTGCPHYS cbRegion, void *pvBa
 static DECLCALLBACK(int) tstPdmHlp_Mmio2Create(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint32_t iPciRegion, RTGCPHYS cbRegion,
                                                uint32_t fFlags, const char *pszDesc, void **ppvMapping, PPGMMMIO2HANDLE phRegion)
 {
-    RT_NOREF(pPciDev, iPciRegion, pszDesc);
+    RT_NOREF(pszDesc);
     AssertReturn(!(fFlags & ~PGMPHYS_MMIO2_FLAGS_TRACK_DIRTY_PAGES), VERR_INVALID_FLAGS);
-    return tstPdmMmio2Register(pDevIns, cbRegion, NULL /*pvBacking*/, ppvMapping, phRegion);
+    return tstPdmMmio2Register(pDevIns, pPciDev, iPciRegion, cbRegion, NULL /*pvBacking*/, ppvMapping, phRegion);
 }
 
 
@@ -803,10 +826,10 @@ static DECLCALLBACK(int) tstPdmHlp_Mmio2CreateFromExisting(PPDMDEVINS pDevIns, P
                                                            RTGCPHYS cbRegion, uint32_t fFlags, const char *pszDesc,
                                                            void *pvBacking, PPGMMMIO2HANDLE phRegion)
 {
-    RT_NOREF(pPciDev, iPciRegion, pszDesc);
+    RT_NOREF(pszDesc);
     AssertReturn(!fFlags, VERR_INVALID_FLAGS);
     AssertPtrReturn(pvBacking, VERR_INVALID_POINTER);
-    return tstPdmMmio2Register(pDevIns, cbRegion, pvBacking, NULL /*ppvMapping*/, phRegion);
+    return tstPdmMmio2Register(pDevIns, pPciDev, iPciRegion, cbRegion, pvBacking, NULL /*ppvMapping*/, phRegion);
 }
 
 
