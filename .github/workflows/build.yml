@@ -21,6 +21,10 @@ on:
         description: "Extra arguments for kmk (optional)"
         required: false
         default: ""
+      cache_ref:
+        description: "Branch whose baseline build output is reused (tests flavor)"
+        required: false
+        default: main
 
 permissions:
   contents: read
@@ -51,13 +55,35 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           submodules: recursive
-          fetch-depth: 1
+          fetch-depth: 50
 
       - name: Source facts
         id: src
         run: |
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "kbuild=$(git -C kBuild rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # The build takes the product revision from a trailer in the commit message of
+          # HEAD, which commits made in this fork do not have; use the newest upstream one.
+          rev=$(git log -50 --format=%B | grep -m1 -o -E '^svn:sync-xref-src-repo-rev: r[0-9]+$' | grep -o -E '[0-9]+$')
+          test -n "$rev"
+          echo "VBOX_SVN_REV=$rev" >> "$GITHUB_ENV"
+          echo "revision $rev"
+          # The commit whose build output can be reused.
+          if [ "${{ inputs.flavor }}" = "baseline" ]; then
+            base=$(git rev-parse HEAD)
+          else
+            base=$(git ls-remote origin "refs/heads/${{ inputs.cache_ref }}" | cut -f1)
+            git fetch -q --depth=1 origin "$base"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "gcc=$(gcc -dumpfullversion)" >> "$GITHUB_OUTPUT"
+          # Give every source file the same old time stamp, then mark what differs
+          # from the base as new. Together with the cached output directory of the
+          # base this makes the build incremental.
+          find . '(' -path ./out -o -name .git ')' -prune -o -type f -print0 | xargs -0 touch -h -d @1577836800
+          if [ "$base" != "$(git rev-parse HEAD)" ]; then
+            git diff --name-only "$base" HEAD | tee changed-files.log | xargs -r touch
+          fi
           git log -1 --format='%H %s'
           ls kBuild/kBuild/bin/linux.amd64 | head -5
 
@@ -79,6 +105,14 @@ jobs:
             libgl-dev libglu1-mesa-dev mesa-common-dev libvulkan-dev \
             linux-headers-$(uname -r) || \
           sudo apt-get install -y -q --no-install-recommends linux-headers-generic
+
+      - name: Restore build output of the base
+        id: outcache
+        if: inputs.flavor == 'tests'
+        uses: actions/cache/restore@v4
+        with:
+          path: out
+          key: out-v1-gcc${{ steps.src.outputs.gcc }}-${{ steps.src.outputs.base }}
 
       - name: Configure
         run: |
@@ -110,6 +144,7 @@ jobs:
             echo "VBOX_WITH_TESTCASES :="
           } > LocalConfig.kmk
           cat LocalConfig.kmk
+          touch -d @1577836800 LocalConfig.kmk AutoConfig.kmk env.sh
 
       - name: Build
         run: |
@@ -121,6 +156,13 @@ jobs:
             || { echo "BUILD FAILED"; grep -n -E '(^|[^a-zA-Z])(error|Error|\*\*\*)[: ]' build.log | head -60; echo ----; tail -120 build.log; exit 1; }
           tail -15 build.log
           grep -c -E 'warning:' build.log || true
+
+      - name: Save build output
+        if: inputs.flavor == 'baseline'
+        uses: actions/cache/save@v4
+        with:
+          path: out
+          key: out-v1-gcc${{ steps.src.outputs.gcc }}-${{ steps.src.outputs.base }}
 
       - name: Build result facts
         if: always()
