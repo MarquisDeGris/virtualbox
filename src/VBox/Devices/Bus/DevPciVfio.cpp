@@ -207,6 +207,41 @@ typedef struct MSIXTBLENTRY
 typedef MSIXTBLENTRY *PMSIXTBLENTRY;
 
 
+/** Maximum number of segments a memory BAR gets split into: the two page
+ * ranges holding the MSI-X table and the pending bit array, and what is in
+ * front of, between and behind them. */
+#define VFIO_PCI_BAR_SEGS_MAX       5
+
+
+/**
+ * A part of a memory BAR which is either mapped into the guest or trapped.
+ */
+typedef struct VFIOPCIBARSEG
+{
+    /** The VFIO PCI function this segment belongs to. */
+    uint8_t             iPciFun;
+    /** The BAR this segment belongs to. */
+    uint8_t             iBar;
+    /** Flag whether accesses to the segment are trapped (true) or whether the
+     * device memory is mapped into the guest (false). */
+    bool                fTrapped;
+    /** Offset of the segment in the BAR. */
+    uint64_t            offBar;
+    /** Size of the segment, a multiple of the guest page size. */
+    uint64_t            cbSeg;
+    /** Type dependent handle. */
+    union
+    {
+        /** MMIO region of a trapped segment. */
+        IOMMMIOHANDLE   hMmio;
+        /** MMIO2 region of a mapped segment. */
+        PGMMMIO2HANDLE  hMmio2;
+    } hnd;
+} VFIOPCIBARSEG;
+typedef VFIOPCIBARSEG *PVFIOPCIBARSEG;
+typedef const VFIOPCIBARSEG *PCVFIOPCIBARSEG;
+
+
 /**
  * A single PCI BAR.
  */
@@ -216,30 +251,24 @@ typedef struct VFIOPCIBAR
     uint8_t             iPciFun;
     /** Region type, 0 - disabled, 1 - PIO, 2 - MMIO. */
     uint8_t             bType;
-    /** Flag whether MMIO region intercepts are enabled. */
+    /** Flag whether all of an MMIO region is trapped and handled through regular
+     * MMIO handlers, because it was configured that way or because the region
+     * can't be mapped. */
     bool                fInterceptMmio;
+    /** Number of segments of an MMIO region. */
+    uint8_t             cSegs;
     /** The address space flags for an MMIO region. */
     PCIADDRESSSPACE     enmAddrSpace;
     /** Size of the region. */
     uint64_t            cbRegion;
-    /** Type dependent data. */
-    union
-    {
-        /** Start offset of the PIO region. */
-        uint64_t        offPio;
-        /** Start of the MMIO mapping. */
-        volatile void   *pvMmio;
-    } u;
-    /** Type dependent handle. */
-    union
-    {
-        /** I/O port region. */
-        IOMIOPORTHANDLE hIoPort;
-        /** MMIO region. */
-        IOMMMIOHANDLE   hMmio;
-        /** MMIO2 region. */
-        PGMMMIO2HANDLE  hMmio2;
-    } hnd;
+    /** Start offset of the region in the VFIO device file. */
+    uint64_t            offVfio;
+    /** Start of the mapping of an MMIO region, NULL if the region is not mapped. */
+    volatile void       *pvMmio;
+    /** I/O port region handle of a PIO region. */
+    IOMIOPORTHANDLE     hIoPort;
+    /** The segments of an MMIO region, sorted by offset and without gaps. */
+    VFIOPCIBARSEG       aSegs[VFIO_PCI_BAR_SEGS_MAX];
 } VFIOPCIBAR;
 typedef VFIOPCIBAR *PVFIOPCIBAR;
 typedef const VFIOPCIBAR *PCVFIOPCIBAR;
@@ -333,25 +362,19 @@ typedef struct VFIOPCIFUN
 
     /** The MSI-X capability offset if enabled. */
     uint8_t              offMsixCtrl;
-    /** Size of the MSI-X region. */
-    size_t               cbMsix;
-    /** Pointer to the MSI-X region memory. */
-    uint8_t              *pbMsix;
-    /** Pointer to the MSI-X table entries. */
+    /** Offset of the MSI-X table in the BAR given by iBarMsix. */
+    uint32_t             offMsixTbl;
+    /** Size of the MSI-X table in bytes. */
+    uint32_t             cbMsixTbl;
+    /** Offset of the MSI-X pending bit array in the BAR given by iBarMsix. */
+    uint32_t             offMsixPba;
+    /** Size of the MSI-X pending bit array in bytes. */
+    uint32_t             cbMsixPba;
+    /** The MSI-X table the guest sees.  The table of the device is managed by
+     * the host kernel and never exposed to the guest. */
     PMSIXTBLENTRY        paMsixTbl;
-    /** Pointer to the PBA array. */
+    /** The MSI-X pending bit array the guest sees. */
     volatile uint64_t    *pbmMsixPba;
-    /** MSI-X region handle. */
-    PGMMMIO2HANDLE       hMsix;
-    /** MSI-X intercept handle for the non aligned case. */
-    IOMMMIOHANDLE        hMsixMmio;
-#if 0
-    /** The write protection layer for the MSI-X MMIO2 region. */
-    PGMPHYSHANDLERTYPE   hMsixWrHndType;
-    /** The physical guest address the MSI-X region is currently mapped at. */
-    RTGCPHYS             GCPhysMsix;
-#endif
-
 } VFIOPCIFUN;
 /** Pointer to the a VFIO PCI function. */
 typedef VFIOPCIFUN *PVFIOPCIFUN;
@@ -550,7 +573,7 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioWrite(PPDMDEVINS pDevIns, void *pvUs
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[pBar->iPciFun];
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, &u32, cb, pBar->u.offPio + offPort);
+    ssize_t cbWritten = pwrite(pFun->iFdVfio, &u32, cb, pBar->offVfio + offPort);
     if (cbWritten != cb)
         return RTErrConvertFromErrno(errno);
 
@@ -566,7 +589,7 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioRead(PPDMDEVINS pDevIns, void *pvUse
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[pBar->iPciFun];
-    ssize_t cbRead = pread(pFun->iFdVfio, pu32, cb, pBar->u.offPio + offPort);
+    ssize_t cbRead = pread(pFun->iFdVfio, pu32, cb, pBar->offVfio + offPort);
     if (cbRead != cb)
         return RTErrConvertFromErrno(errno);
 
@@ -575,26 +598,270 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioRead(PPDMDEVINS pDevIns, void *pvUse
 
 
 /**
+ * Sends the MSI-X message the guest has configured for a vector to the
+ * interrupt controller.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function raising the interrupt.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsixSend(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    /* Can't use PDMDevHlpPCISetIrqEx here as the PCI stuff is not aware of MSI-X support. */
+    /** @todo This isn't pretty as it accesses stuff internal to the PCI subsystem. */
+    PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
+    AssertPtrReturnVoid(pPciHlp);
+    PPDMDEVINS pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
+    AssertPtrReturnVoid(pDevInsBus);
+    PDEVPCIBUS pBus = PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS);
+    uint16_t const uBusDevFn = PCIBDF_MAKE(pBus->iBus, pPciDev->uDevFn);
+
+    PMSIXTBLENTRY pVec = &pFun->paMsixTbl[idxVector];
+    MSIMSG Msi;
+    Msi.Addr.u64 = ((uint64_t)pVec->u32MsgAddrUpper << 32) | pVec->u32MsgAddr;
+    Msi.Data.u32 = pVec->u32MsgData;
+
+    pPciHlp->pfnIoApicSendMsi(pDevIns, uBusDevFn, &Msi, 0 /*uTagSrc*/);
+}
+
+
+/**
+ * Checks whether an MSI-X vector can be delivered right now: MSI-X is enabled
+ * and neither the function nor the vector is masked.
+ *
+ * @returns true if the vector can be delivered, false if it has to be held back.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+DECLINLINE(bool) pciVfioMsixIsVectorOpen(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    uint16_t const fMsixCtrl = PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl);
+    return    (fMsixCtrl & (VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK)) == VBOX_PCI_MSIX_FLAGS_ENABLE
+           && !(pFun->paMsixTbl[idxVector].u32VecCtrl & RT_BIT_32(0));
+}
+
+
+/**
+ * Delivers an MSI-X vector if it is pending and can be delivered now.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsixDeliverPending(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    if (   pciVfioMsixIsVectorOpen(pFun, pPciDev, idxVector)
+        && ASMAtomicBitTestAndClear(pFun->pbmMsixPba, (int32_t)idxVector))
+        pciVfioMsixSend(pDevIns, pFun, pPciDev, idxVector);
+}
+
+
+/**
+ * Handles an MSI-X interrupt of the device: delivers it to the guest or
+ * records it as pending if the guest has it masked.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function raising the interrupt.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsixRaise(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    if (pciVfioMsixIsVectorOpen(pFun, pPciDev, idxVector))
+        pciVfioMsixSend(pDevIns, pFun, pPciDev, idxVector);
+    else
+    {
+        /* The guest might be unmasking the vector right now, so look again after recording it. */
+        ASMAtomicBitSet(pFun->pbmMsixPba, (int32_t)idxVector);
+        pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, idxVector);
+    }
+}
+
+
+/**
+ * Handles a guest write to the MSI-X table.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   offTbl      Offset into the table, the caller made sure the access is inside of it.
+ * @param   pv          What to write.
+ * @param   cb          Number of bytes to write.
+ */
+static void pciVfioMsixTblWrite(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t offTbl,
+                                void const *pv, size_t cb)
+{
+    memcpy((uint8_t *)pFun->paMsixTbl + offTbl, pv, cb);
+
+    /* Only the mask bit of the vector control is implemented.  A vector which just
+       got unmasked is sent what it has pending. */
+    uint32_t const idxFirst = offTbl / sizeof(MSIXTBLENTRY);
+    uint32_t const idxLast  = (uint32_t)((offTbl + cb - 1) / sizeof(MSIXTBLENTRY));
+    for (uint32_t idxVector = idxFirst; idxVector <= idxLast; idxVector++)
+    {
+        pFun->paMsixTbl[idxVector].u32VecCtrl &= RT_BIT_32(0);
+        pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, idxVector);
+    }
+}
+
+
+/**
+ * Reads from or writes to the device memory behind a memory BAR on behalf of
+ * the guest.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pBar        The BAR.
+ * @param   offBar      Offset into the BAR, the caller made sure the access is inside of it.
+ * @param   pv          Where to store what was read, or what to write.
+ * @param   cb          Number of bytes to access.
+ * @param   fWrite      Flag whether this is a write (true) or a read (false).
+ */
+static void pciVfioBarDevAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCVFIOPCIBAR pBar, uint64_t offBar, void *pv, size_t cb,
+                                bool fWrite)
+{
+    RT_NOREF(pThis);
+    if (pBar->pvMmio)
+    {
+        /* Device registers have to be accessed with the width the guest uses. */
+        volatile uint8_t *pb = (volatile uint8_t *)pBar->pvMmio + offBar;
+        if (fWrite)
+            switch (cb)
+            {
+                case 1: *pb                       = *(uint8_t const *)pv;  break;
+                case 2: *(volatile uint16_t *)pb  = *(uint16_t const *)pv; break;
+                case 4: *(volatile uint32_t *)pb  = *(uint32_t const *)pv; break;
+                case 8: *(volatile uint64_t *)pb  = *(uint64_t const *)pv; break;
+                default:
+                    for (size_t i = 0; i < cb; i++)
+                        pb[i] = ((uint8_t const *)pv)[i];
+                    break;
+            }
+        else
+            switch (cb)
+            {
+                case 1: *(uint8_t *)pv  = *pb;                      break;
+                case 2: *(uint16_t *)pv = *(volatile uint16_t *)pb; break;
+                case 4: *(uint32_t *)pv = *(volatile uint32_t *)pb; break;
+                case 8: *(uint64_t *)pv = *(volatile uint64_t *)pb; break;
+                default:
+                    for (size_t i = 0; i < cb; i++)
+                        ((uint8_t *)pv)[i] = pb[i];
+                    break;
+            }
+    }
+    else
+    {
+        /* The region is not mapped, go through the device file descriptor. */
+        ssize_t const cbDone = fWrite
+                             ? pwrite(pFun->iFdVfio, pv, cb, pBar->offVfio + offBar)
+                             : pread(pFun->iFdVfio, pv, cb, pBar->offVfio + offBar);
+        if (cbDone != (ssize_t)cb)
+        {
+            /* Behave like a device which doesn't respond: reads return all ones, writes get dropped. */
+            if (!fWrite)
+                memset(pv, 0xff, cb);
+            LogRelMax(32, ("VFIO#%d.%u: %s %zu byte(s) at offset %#RX64 of a BAR failed with %d\n", pThis->iInstance,
+                           pFun->uPciFun, fWrite ? "Writing" : "Reading", cb, offBar, errno));
+        }
+    }
+}
+
+
+/**
+ * Handles a guest access to a trapped segment of a memory BAR.
+ *
+ * The access is taken apart into what hits the MSI-X table, the MSI-X pending
+ * bit array and the device memory around them.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pSeg        The segment being accessed.
+ * @param   off         Offset into the segment.
+ * @param   pv          Where to store what was read, or what to write.
+ * @param   cb          Number of bytes to access.
+ * @param   fWrite      Flag whether this is a write (true) or a read (false).
+ */
+static void pciVfioBarSegAccess(PPDMDEVINS pDevIns, PCVFIOPCIBARSEG pSeg, RTGCPHYS off, void *pv, unsigned cb, bool fWrite)
+{
+    PVFIOPCI     pThis   = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun    = &pThis->aPciFuns[pSeg->iPciFun];
+    PCVFIOPCIBAR pBar    = &pFun->aBars[pSeg->iBar];
+    PPDMPCIDEV   pPciDev = pDevIns->apPciDevs[pSeg->iPciFun];
+    bool const   fMsix   = pFun->offMsixCtrl && pFun->iBarMsix == pSeg->iBar;
+    uint64_t     offBar  = pSeg->offBar + off;
+    uint8_t     *pb      = (uint8_t *)pv;
+
+    while (cb > 0)
+    {
+        /* Find out what the access hits first and how far that reaches. */
+        enum { kNothing, kDevice, kMsixTbl, kMsixPba } enmWhat;
+        uint64_t cbChunk = cb;
+        if (offBar >= pBar->cbRegion)
+            enmWhat = kNothing; /* The padding behind a BAR which doesn't end on a page boundary. */
+        else
+        {
+            enmWhat = kDevice;
+            cbChunk = RT_MIN(cbChunk, pBar->cbRegion - offBar);
+            if (fMsix)
+            {
+                if (offBar - pFun->offMsixTbl < pFun->cbMsixTbl)
+                {
+                    enmWhat = kMsixTbl;
+                    cbChunk = RT_MIN(cbChunk, (uint64_t)pFun->offMsixTbl + pFun->cbMsixTbl - offBar);
+                }
+                else if (offBar - pFun->offMsixPba < pFun->cbMsixPba)
+                {
+                    enmWhat = kMsixPba;
+                    cbChunk = RT_MIN(cbChunk, (uint64_t)pFun->offMsixPba + pFun->cbMsixPba - offBar);
+                }
+                else
+                {
+                    if (offBar < pFun->offMsixTbl)
+                        cbChunk = RT_MIN(cbChunk, pFun->offMsixTbl - offBar);
+                    if (offBar < pFun->offMsixPba)
+                        cbChunk = RT_MIN(cbChunk, pFun->offMsixPba - offBar);
+                }
+            }
+        }
+
+        switch (enmWhat)
+        {
+            case kDevice:
+                pciVfioBarDevAccess(pThis, pFun, pBar, offBar, pb, (size_t)cbChunk, fWrite);
+                break;
+            case kMsixTbl:
+                if (fWrite)
+                    pciVfioMsixTblWrite(pDevIns, pFun, pPciDev, (uint32_t)(offBar - pFun->offMsixTbl), pb, (size_t)cbChunk);
+                else
+                    memcpy(pb, (uint8_t const *)pFun->paMsixTbl + (offBar - pFun->offMsixTbl), (size_t)cbChunk);
+                break;
+            case kMsixPba:
+                /* Read-only for the guest. */
+                if (!fWrite)
+                    memcpy(pb, (uint8_t const *)pFun->pbmMsixPba + (offBar - pFun->offMsixPba), (size_t)cbChunk);
+                break;
+            default:
+                if (!fWrite)
+                    memset(pb, 0xff, (size_t)cbChunk);
+                break;
+        }
+
+        offBar += cbChunk;
+        pb     += cbChunk;
+        cb     -= (unsigned)cbChunk;
+    }
+}
+
+
+/**
  * @callback_method_impl{FNIOMMMIONEWREAD}
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
-
-    Assert(pBar->bType == 2);
-    volatile uint8_t *pb = (volatile uint8_t *)pBar->u.pvMmio + off;
-    switch (cb)
-    {
-        case 1: *(uint8_t *)pv = *pb; break;
-        case 2: *(uint16_t *)pv = *(volatile uint16_t *)pb; break;
-        case 4: *(uint32_t *)pv = *(volatile uint32_t *)pb; break;
-        case 8: *(uint64_t *)pv = *(volatile uint64_t *)pb; break;
-        default:
-            memcpy(pv, (const void *)pb, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
+    pciVfioBarSegAccess(pDevIns, (PCVFIOPCIBARSEG)pvUser, off, pv, cb, false /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -604,70 +871,7 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioRead(PPDMDEVINS pDevIns, void *pvUs
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
-
-    Assert(pBar->bType == 2);
-    volatile uint8_t *pb = (volatile uint8_t *)pBar->u.pvMmio + off;
-    switch (cb)
-    {
-        case 1: *(volatile uint8_t *)pb  = *(uint8_t const *)pv;  break;
-        case 2: *(volatile uint16_t *)pb = *(uint16_t const *)pv; break;
-        case 4: *(volatile uint32_t *)pb = *(uint32_t const *)pv; break;
-        case 8: *(volatile uint64_t *)pb = *(uint64_t const *)pv; break;
-        default:
-            memcpy((void *)pb, pv, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
-    return VINF_SUCCESS;
-}
-
-
-/**
- * @callback_method_impl{FNIOMMMIONEWREAD}
- */
-static DECLCALLBACK(VBOXSTRICTRC) pciVfioMsixMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
-{
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
-
-    volatile uint8_t *pb = (volatile uint8_t *)pFun->pbMsix + off;
-    switch (cb)
-    {
-        case 1: *(uint8_t *)pv = *pb; break;
-        case 2: *(uint16_t *)pv = *(volatile uint16_t *)pb; break;
-        case 4: *(uint32_t *)pv = *(volatile uint32_t *)pb; break;
-        case 8: *(uint64_t *)pv = *(volatile uint64_t *)pb; break;
-        default:
-            memcpy(pv, (const void *)pb, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
-    return VINF_SUCCESS;
-}
-
-
-/**
- * @callback_method_impl{FNIOMMMIONEWWRITE}
- */
-static DECLCALLBACK(VBOXSTRICTRC) pciVfioMsixMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
-{
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
-
-    volatile uint8_t *pb = (volatile uint8_t *)pFun->pbMsix + off;
-    switch (cb)
-    {
-        case 1: *(volatile uint8_t *)pb  = *(uint8_t const *)pv;  break;
-        case 2: *(volatile uint16_t *)pb = *(uint16_t const *)pv; break;
-        case 4: *(volatile uint32_t *)pb = *(uint32_t const *)pv; break;
-        case 8: *(volatile uint64_t *)pb = *(uint64_t const *)pv; break;
-        default:
-            memcpy((void *)pb, pv, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
+    pciVfioBarSegAccess(pDevIns, (PCVFIOPCIBARSEG)pvUser, off, (void *)(uintptr_t)pv, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -757,11 +961,11 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
         {
             /* PIO. */
             pFun->aBars[uRegion].bType    = 1;
-            pFun->aBars[uRegion].u.offPio = RegionInfo.offset;
+            pFun->aBars[uRegion].offVfio = RegionInfo.offset;
 
             rc = PDMDevHlpPCIIORegionCreateIoEx(pDevIns, pPciDev, uRegion, RegionInfo.size,
                                                 pciVfioPioWrite, pciVfioPioRead, &pFun->aBars[uRegion],
-                                                "PIO", NULL /*paExtDescs*/, &pFun->aBars[uRegion].hnd.hIoPort);
+                                                "PIO", NULL /*paExtDescs*/, &pFun->aBars[uRegion].hIoPort);
             AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Cannot register PCI I/O region")));
         }
         else
@@ -779,15 +983,30 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
                     pFun->iBarMsix = uRegion;
             }
 
-            Assert(RegionInfo.flags & VFIO_REGION_INFO_FLAG_MMAP);
-            int fProt =   ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_READ)  ? PROT_READ  : 0)
-                        | ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_WRITE) ? PROT_WRITE : 0);
-            pFun->aBars[uRegion].bType    = 2;
-            pFun->aBars[uRegion].u.pvMmio = mmap(NULL, RegionInfo.size, fProt, MAP_FILE | MAP_SHARED, pFun->iFdVfio, RegionInfo.offset);
-            if (pFun->aBars[uRegion].u.pvMmio == MAP_FAILED)
-                return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                           N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
-                                           uRegion, RegionInfo.offset, RegionInfo.size, errno);
+            /*
+             * Map the region if VFIO allows it and if it consists of whole pages.  A region
+             * which can't be mapped is accessed through the device file descriptor, which
+             * means trapping every access of the guest.
+             */
+            PVFIOPCIBAR pBar = &pFun->aBars[uRegion];
+            pBar->bType   = 2;
+            pBar->offVfio = RegionInfo.offset;
+            pBar->pvMmio  = NULL;
+            if (   (RegionInfo.flags & VFIO_REGION_INFO_FLAG_MMAP)
+                && !(RegionInfo.size & GUEST_PAGE_OFFSET_MASK))
+            {
+                int fProt =   ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_READ)  ? PROT_READ  : 0)
+                            | ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_WRITE) ? PROT_WRITE : 0);
+                void *pvMmio = mmap(NULL, RegionInfo.size, fProt, MAP_FILE | MAP_SHARED, pFun->iFdVfio, RegionInfo.offset);
+                if (pvMmio == MAP_FAILED)
+                    return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                               N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
+                                               uRegion, RegionInfo.offset, RegionInfo.size, errno);
+                pBar->pvMmio = pvMmio;
+            }
+            else
+                LogRel(("VFIO#%d.%u: BAR%u can't be mapped (flags %#RX32, size %#RX64), trapping all accesses to it\n",
+                        pThis->iInstance, pFun->uPciFun, uRegion, RegionInfo.flags, RegionInfo.size));
 
             uint32_t enmAddrSpace = PCI_ADDRESS_SPACE_MEM;
             if ((u32PciBar & (RT_BIT_32(2) | RT_BIT_32(1))) == PCI_ADDRESS_SPACE_BAR64)
@@ -795,9 +1014,9 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
             if (u32PciBar & PCI_ADDRESS_SPACE_MEM_PREFETCH)
                 enmAddrSpace |= PCI_ADDRESS_SPACE_MEM_PREFETCH;
 
-            pFun->aBars[uRegion].fInterceptMmio = pFun->fInterceptMmio;
-            pFun->aBars[uRegion].enmAddrSpace   = (PCIADDRESSSPACE)enmAddrSpace;
-            /* MMIO mapping happens at a later stage. */
+            pBar->fInterceptMmio = pFun->fInterceptMmio || !pBar->pvMmio;
+            pBar->enmAddrSpace   = (PCIADDRESSSPACE)enmAddrSpace;
+            /* The MMIO regions get created at a later stage. */
         }
     }
     else /* Not available. */
@@ -1089,72 +1308,146 @@ DECLCALLBACK(int) pciVfioMmioMapUnmap(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, ui
                                       RTGCPHYS GCPhysAddress, RTGCPHYS cb, PCIADDRESSSPACE enmType)
 {
     RT_NOREF(enmType, cb);
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
-    int      rc;
-    Assert(pPciDev == pDevIns->apPciDevs[pPciDev->uDevFn & 0x7]);
-    PVFIOPCIFUN pFun = &pThis->aPciFuns[pPciDev->uDevFn & 0x7];
-    PCVFIOPCIBAR pBar = &pFun->aBars[iRegion];
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    Assert(pPciDev == pDevIns->apPciDevs[pPciDev->idxSubDev]);
+    PVFIOPCIFUN  pFun  = &pThis->aPciFuns[pPciDev->idxSubDev];
+    PCVFIOPCIBAR pBar  = &pFun->aBars[iRegion];
 
     Log(("pciVfioMmioMapUnmap: iRegion=%d GCPhysAddress=%RGp cb=%RGp enmType=%d\n", iRegion, GCPhysAddress, cb, enmType));
 
-    if (pBar->fInterceptMmio)
+    /* The segments of the BAR follow each other without gaps. */
+    for (uint8_t iSeg = 0; iSeg < pBar->cSegs; iSeg++)
     {
+        PCVFIOPCIBARSEG pSeg = &pBar->aSegs[iSeg];
+        int             rc;
         if (GCPhysAddress != NIL_RTGCPHYS)
         {
-            /* Map the region. */
-            rc = PDMDevHlpMmioMap(pDevIns, pBar->hnd.hMmio, GCPhysAddress);
-            AssertRC(rc);
-
-            /* Map the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmioMap(pDevIns, pFun->hMsixMmio, GCPhysAddress + pBar->cbRegion);
-                AssertRC(rc);
-            }
+            if (pSeg->fTrapped)
+                rc = PDMDevHlpMmioMap(pDevIns, pSeg->hnd.hMmio, GCPhysAddress + pSeg->offBar);
+            else
+                rc = PDMDevHlpMmio2Map(pDevIns, pSeg->hnd.hMmio2, GCPhysAddress + pSeg->offBar);
         }
+        else if (pSeg->fTrapped)
+            rc = PDMDevHlpMmioUnmap(pDevIns, pSeg->hnd.hMmio);
         else
-        {
-            rc = PDMDevHlpMmioUnmap(pDevIns, pBar->hnd.hMmio);
-            AssertRC(rc);
-
-            /* Unmap the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmioUnmap(pDevIns, pFun->hMsixMmio);
-                AssertRC(rc);
-            }
-        }
-    }
-    else
-    {
-        if (GCPhysAddress != NIL_RTGCPHYS)
-        {
-            /* Map the region. */
-            rc = PDMDevHlpMmio2Map(pDevIns, pBar->hnd.hMmio2, GCPhysAddress);
-            AssertRC(rc);
-
-            /* Map the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmio2Map(pDevIns, pFun->hMsix, GCPhysAddress + pBar->cbRegion);
-                AssertRC(rc);
-            }
-        }
-        else
-        {
-            rc = PDMDevHlpMmio2Unmap(pDevIns, pBar->hnd.hMmio2);
-            AssertRC(rc);
-
-            /* Unmap the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmio2Unmap(pDevIns, pFun->hMsix);
-                AssertRC(rc);
-            }
-        }
+            rc = PDMDevHlpMmio2Unmap(pDevIns, pSeg->hnd.hMmio2);
+        AssertRC(rc);
     }
 
     return VINF_PCI_MAPPING_DONE;
+}
+
+
+/**
+ * Creates the MMIO and MMIO2 regions for a memory BAR and registers the BAR
+ * with the PCI bus.
+ *
+ * The guest gets to see the BAR with the size it has on the device.  The device
+ * memory is mapped into the guest, except for the pages holding the MSI-X table
+ * and the MSI-X pending bit array, which are trapped.  All of the BAR is
+ * trapped if it can't be mapped or if this was requested in the configuration.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function the BAR belongs to.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   iBar        The BAR.
+ */
+static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint8_t iBar)
+{
+    PPDMDEVINS     pDevIns      = pThis->pDevIns;
+    PVFIOPCIBAR    pBar         = &pFun->aBars[iBar];
+    uint64_t const cbBarAligned = RT_ALIGN_64(pBar->cbRegion, GUEST_PAGE_SIZE);
+
+    /*
+     * Work out the page ranges to trap, sorted by offset.
+     */
+    struct
+    {
+        uint64_t offStart;
+        uint64_t offEnd;
+    }        aTraps[2];
+    unsigned cTraps = 0;
+    RT_ZERO(aTraps);
+    if (pBar->fInterceptMmio)
+    {
+        aTraps[0].offStart = 0;
+        aTraps[0].offEnd   = cbBarAligned;
+        cTraps = 1;
+    }
+    else if (   pFun->offMsixCtrl
+             && pFun->iBarMsix == iBar)
+    {
+        uint64_t const offTblStart = pFun->offMsixTbl & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
+        uint64_t const offPbaStart = pFun->offMsixPba & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
+        unsigned const iTbl        = offTblStart <= offPbaStart ? 0 : 1;
+        aTraps[iTbl].offStart     = offTblStart;
+        aTraps[iTbl].offEnd       = RT_ALIGN_64((uint64_t)pFun->offMsixTbl + pFun->cbMsixTbl, GUEST_PAGE_SIZE);
+        aTraps[iTbl ^ 1].offStart = offPbaStart;
+        aTraps[iTbl ^ 1].offEnd   = RT_ALIGN_64((uint64_t)pFun->offMsixPba + pFun->cbMsixPba, GUEST_PAGE_SIZE);
+        cTraps = 2;
+        if (aTraps[1].offStart <= aTraps[0].offEnd)
+        {
+            /* The same or neighbouring pages, make it one range. */
+            aTraps[0].offEnd = RT_MAX(aTraps[0].offEnd, aTraps[1].offEnd);
+            cTraps = 1;
+        }
+    }
+
+    /*
+     * Split the BAR into segments accordingly.
+     */
+    uint64_t offBar = 0;
+    pBar->cSegs = 0;
+    for (unsigned i = 0; i <= cTraps; i++)
+    {
+        uint64_t const offEndMapped = i < cTraps ? aTraps[i].offStart : cbBarAligned;
+        if (offEndMapped > offBar)
+        {
+            AssertReturn(pBar->cSegs < RT_ELEMENTS(pBar->aSegs), VERR_INTERNAL_ERROR_3);
+            PVFIOPCIBARSEG pSeg = &pBar->aSegs[pBar->cSegs++];
+            pSeg->iPciFun  = (uint8_t)pFun->uPciFun;
+            pSeg->iBar     = iBar;
+            pSeg->fTrapped = false;
+            pSeg->offBar   = offBar;
+            pSeg->cbSeg    = offEndMapped - offBar;
+        }
+        if (i < cTraps)
+        {
+            AssertReturn(pBar->cSegs < RT_ELEMENTS(pBar->aSegs), VERR_INTERNAL_ERROR_3);
+            PVFIOPCIBARSEG pSeg = &pBar->aSegs[pBar->cSegs++];
+            pSeg->iPciFun  = (uint8_t)pFun->uPciFun;
+            pSeg->iBar     = iBar;
+            pSeg->fTrapped = true;
+            pSeg->offBar   = aTraps[i].offStart;
+            pSeg->cbSeg    = aTraps[i].offEnd - aTraps[i].offStart;
+            offBar = aTraps[i].offEnd;
+        }
+    }
+
+    /*
+     * Create the regions.
+     */
+    for (uint8_t iSeg = 0; iSeg < pBar->cSegs; iSeg++)
+    {
+        PVFIOPCIBARSEG pSeg = &pBar->aSegs[iSeg];
+        int            rc;
+        if (pSeg->fTrapped)
+            rc = PDMDevHlpMmioCreate(pDevIns, pSeg->cbSeg, pPciDev, iBar /*iPciRegion*/,
+                                     pciVfioMmioWrite, pciVfioMmioRead, pSeg,
+                                     IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU, "MMIO",
+                                     &pSeg->hnd.hMmio);
+        else
+            rc = PDMDevHlpMmio2CreateFromExisting(pDevIns, pPciDev, iBar + iSeg * 0x10 /* has to be unique for the PCI device */,
+                                                  pSeg->cbSeg, 0 /*fFlags*/, "MMIO",
+                                                  (uint8_t *)pBar->pvMmio + pSeg->offBar, &pSeg->hnd.hMmio2);
+        AssertLogRelRCReturn(rc, rc);
+    }
+
+    /* The mapping is done by us as it depends on the segments. */
+    return pDevIns->pHlpR3->pfnPCIIORegionRegister(pDevIns, pPciDev, iBar, pBar->cbRegion, pBar->enmAddrSpace,
+                                                   PDMPCIDEV_IORGN_F_NO_HANDLE | PDMPCIDEV_IORGN_F_NEW_STYLE,
+                                                   UINT64_MAX, pciVfioMmioMapUnmap);
 }
 
 
@@ -1242,37 +1535,7 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
 
                     uint16_t const uVec = i - 1;
                     if (pFun->uIrqModeCur == VFIO_PCI_MSIX_IRQ_INDEX)
-                    {
-                        /* Can't use PDMDevHlpPCISetIrqEx here as the PCI stuff is not aware of MSI-X support. */
-                        PMSIXTBLENTRY pVec = &pFun->paMsixTbl[uVec];
-
-                        uint16_t uMmc = PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl);
-
-                        /* Mark as pending if vector is disabled. */
-                        if (   uMmc & RT_BIT(14)
-                            || pVec->u32VecCtrl & RT_BIT_32(0))
-                        {
-                            uint16_t offPba = uVec / 64;
-                            uint8_t  idxBit = uVec & 0x3f;
-                            volatile uint64_t *pbmPba = &pFun->pbmMsixPba[offPba];
-                            ASMAtomicBitSet(pbmPba, idxBit);
-                        }
-                        else
-                        {
-                            /** @todo This isn't pretty as it accesses stuff internal to the PCI subsystem. */
-                            PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
-                            MSIMSG Msi;
-                            Msi.Addr.u64 = ((uint64_t)pVec->u32MsgAddrUpper << 32) | pVec->u32MsgAddr;
-                            Msi.Data.u32 = pVec->u32MsgData;
-
-                            PPDMDEVINS pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
-                            Assert(pDevInsBus);
-                            PDEVPCIBUS pBus = PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS);
-                            uint16_t const uBusDevFn = PCIBDF_MAKE(pBus->iBus, pPciDev->uDevFn);
-
-                            pPciHlp->pfnIoApicSendMsi(pDevIns, uBusDevFn, &Msi, 0 /*uTagSrc*/);
-                        }
-                    }
+                        pciVfioMsixRaise(pDevIns, pFun, pPciDev, uVec);
                     else
                         PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, uVec, 1);
 
@@ -1618,15 +1881,12 @@ static int pciVfioTrySetupMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
     PPDMDEVINS pDevIns = pThis->pDevIns;
 
     /*
-     * For now we will only support MSI-X if the Table and PBA are on a dedicated BAR and are separated by
-     * a page size alignment.
+     * The MSI-X table and the pending bit array of the device belong to the host
+     * kernel, which programs the table for delivering the interrupts to our
+     * eventfds.  The guest gets a table and a pending bit array of its own at the
+     * place where the device has them, see pciVfioBarSetupMmio() and
+     * pciVfioBarSegAccess().
      */
-    /** @todo Our own MSI-X support is not very efficient as the Table and PBA are standard MMIO regions
-     * causing page faults and emulation when the guest accesses it, even for reads. They could be made
-     * MMIO2 regions with a write protection layer on top, so only write accesses are faulting.
-     * However I don't feel like fixing that just now and deal with saved states compatibility and testing
-     * each and every device emulation supporting MSI-X, so we will do everything on our own here and maybe
-     * port that over later. */
 
     /* First get at the information from the capability. */
     uint16_t u16Mmc = 0;
@@ -1647,91 +1907,58 @@ static int pciVfioTrySetupMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
         return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                    N_("Failed to read MSI-X PBA config register with %Rrc"), rc);
 
-    uint16_t cVectors = (u16Mmc & 0x7ff) + 1;
-    uint8_t  uTblBir  = u32TblCfg & 0x7;
-    uint8_t  uPbaBir  = u32PbaCfg & 0x7;
-    uint32_t offTbl   = u32TblCfg & UINT32_C(0xfffffff8);
-    uint32_t offPba   = u32PbaCfg & UINT32_C(0xfffffff8);
+    uint32_t const cVectors = (u16Mmc & 0x7ff) + 1;
+    uint8_t  const uTblBir  = u32TblCfg & 0x7;
+    uint8_t  const uPbaBir  = u32PbaCfg & 0x7;
+    uint32_t const offTbl   = u32TblCfg & UINT32_C(0xfffffff8);
+    uint32_t const offPba   = u32PbaCfg & UINT32_C(0xfffffff8);
+    uint32_t const cbTbl    = cVectors * sizeof(MSIXTBLENTRY);
+    uint32_t const cbPba    = RT_ALIGN_32(cVectors, 64) / 8;
+    uint64_t const cbBar    = uTblBir < 6 ? pFun->aBars[uTblBir].cbRegion : 0;
 
     if (   uTblBir >= 6                                            /* 6 and 7 are reserved, indicates a broken device. */
         || uTblBir != uPbaBir                                      /* Same region */
         || uTblBir != pFun->iBarMsix                               /* BAR doesn't match what VFIO presented to us. */
-        || offPba <= offTbl                                        /* PBA must not intersect table. */
+        || pFun->aBars[uTblBir].bType != 2                         /* Has to be a memory BAR. */
         || cVectors != pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] /* The indicated table size must match what VFIO reported as number of IRQ vectors. */
+        || (uint64_t)offTbl + cbTbl > cbBar                        /* The table has to be inside the BAR ... */
+        || (uint64_t)offPba + cbPba > cbBar                        /* ... and so does the PBA. */
+        || (   offTbl < (uint64_t)offPba + cbPba                   /* PBA must not intersect table. */
+            && offPba < (uint64_t)offTbl + cbTbl)
        )
     {
         /* Just log and don't set an error. */
-        LogRel(("VFIO#%d.%u: MSI-X not supported for this device as it doesn't meet the requirements: uTblBir=%u uPbaBir=%u offTbl=%#x offPba=%#x cVectors=%u cVfioVectors=%u\n",
-                pThis->iInstance, pFun->uPciFun, uTblBir, uPbaBir, offTbl, offPba, cVectors, pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]));
+        LogRel(("VFIO#%d.%u: MSI-X not supported for this device as it doesn't meet the requirements: uTblBir=%u uPbaBir=%u offTbl=%#x offPba=%#x cVectors=%u cVfioVectors=%u cbBar=%#RX64\n",
+                pThis->iInstance, pFun->uPciFun, uTblBir, uPbaBir, offTbl, offPba, cVectors,
+                pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX], cbBar));
         return VERR_NOT_SUPPORTED;
     }
 
-    uint32_t const cbMsix = RT_ALIGN_32((offPba - offTbl) + RT_MAX(8, cVectors / 8), GUEST_PAGE_SIZE);
-    if (!(offTbl & ~GUEST_PAGE_OFFSET_MASK))
+    pFun->paMsixTbl  = (PMSIXTBLENTRY)RTMemAllocZ(cbTbl);
+    pFun->pbmMsixPba = (volatile uint64_t *)RTMemAllocZ(cbPba);
+    if (!pFun->paMsixTbl || !pFun->pbmMsixPba)
     {
-        /* Dedicated MSI-X BARs get handled differently. */
-        if (offTbl == 0)
-        {
-            /* Clear the BAR containing the MSI-X region so it doesn't get mapped later on. */
-            Assert(pFun->aBars[uTblBir].bType == 2);
-            pFun->aBars[uTblBir].bType = 0;
-
-            rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pPciDev, uTblBir, cbMsix,
-                                                   PCI_ADDRESS_SPACE_MEM_PREFETCH, 0 /*fFlags*/,
-                                                   /*pciVfioMsixMapUnmap*/ NULL, "MSI-X", (void **)&pFun->pbMsix, &pFun->hMsix);
-        }
-        else
-        {
-            /*
-             * MSI-X state is part of an MMIO region but page aligned so just allocate the MMIO2 memory without setting up
-             * the PCI region.
-             */
-            rc = PDMDevHlpMmio2Create(pDevIns, pPciDev, uTblBir + 0x10, cbMsix,
-                                      0 /*fFlags*/, "MSI-X State", (void **)&pFun->pbMsix, &pFun->hMsix);
-        }
-
-        AssertLogRelRCReturn(rc, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                                     N_("Failed to allocate %zu bytes of MSI-X state"), cbMsix));
-
-#if 0
-        rc = PDMDevHlpPGMHandlerPhysicalTypeRegister(pThis->pDevIns, PGMPHYSHANDLERKIND_WRITE,
-                                                     pciVfioMsixWriteHandler, "VFIO MSI-X", &pFun->hMsixWrHndType);
-        AssertRCReturn(rc, rc);
-#endif
+        LogRel(("VFIO#%d.%u: Failed to allocate the MSI-X state for %u vectors, MSI-X not supported for this device\n",
+                pThis->iInstance, pFun->uPciFun, cVectors));
+        RTMemFree(pFun->paMsixTbl);
+        RTMemFree((void *)pFun->pbmMsixPba);
+        pFun->paMsixTbl  = NULL;
+        pFun->pbmMsixPba = NULL;
+        return VERR_NO_MEMORY;
     }
-    else
-    {
-        /*
-         * The MSI-X region is not page aligned so we have to intercept accesses to the whole BAR,
-         * which can be quite inefficient depending on the device when the guest accesses the MMIO
-         * region extensively.
-         */
-        /** @todo Maybe it would be better performance wise to just mask MSI-X support and let the guest
-         *        resort to MSI or INTX style interrupts. */
-        pFun->aBars[uTblBir].fInterceptMmio = true;
-        LogRel(("VFIO#%d.%u: Intercepting accesses to MMIO region %u because MSI-X state is not page aligned\n",
-                pThis->iInstance, pFun->uPciFun, uTblBir));
-
-        pFun->pbMsix = (uint8_t *)PDMDevHlpMMHeapAllocZ(pDevIns, cbMsix);
-        AssertLogRelReturn(pFun->pbMsix, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                                             N_("Failed to allocate %zu bytes of MSI-X state"), cbMsix));
-    }
-
-    pFun->paMsixTbl  = (PMSIXTBLENTRY)pFun->pbMsix;
-    pFun->pbmMsixPba = (volatile uint64_t *)pFun->pbMsix;
-    pFun->cbMsix     = cbMsix;
 
     /* Each vector is masked by default. */
-    PMSIXTBLENTRY pMsixEntry = (PMSIXTBLENTRY)pFun->paMsixTbl;
-    for (uint16_t i = 0; i < cVectors; i++)
-    {
-        pMsixEntry->u32VecCtrl = RT_BIT(0);
-        pMsixEntry++;
-    }
+    for (uint32_t i = 0; i < cVectors; i++)
+        pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
 
-    /* Configure the capability if everything succeeded. */
+    pFun->offMsixTbl = offTbl;
+    pFun->cbMsixTbl  = cbTbl;
+    pFun->offMsixPba = offPba;
+    pFun->cbMsixPba  = cbPba;
+
+    /* Configure the capability if everything succeeded.  MSI-X starts out disabled for the guest. */
     pFun->offMsixCtrl = offCap + 2;
-    PDMPciDevSetWord( pPciDev, offCap + 2, u16Mmc);           /* Message control */
+    PDMPciDevSetWord( pPciDev, offCap + 2, u16Mmc & ~(VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK)); /* Message control */
     PDMPciDevSetDWord(pPciDev, offCap + 4, offTbl | uTblBir); /* Table config */
     PDMPciDevSetDWord(pPciDev, offCap + 8, offPba | uPbaBir); /* PBA config   */
     pciVfioCfgSpaceSetInterceptU16(  pFun, offCap + 2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
@@ -2504,6 +2731,10 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigWrite(PPDMDEVINS pDevIns, PPDMPCI
                 if (RT_FAILURE(rc))
                     LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
                 PDMPciDevSetWord(pPciDev, uAddress, u16MsixCtrl);
+
+                /* Vectors held back by the function mask can go out now. */
+                for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
+                    pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, i);
                 rc = VINF_SUCCESS;
             }
             else
@@ -2824,6 +3055,7 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
                                  & ~(VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK));
                 for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
                     pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
+                RT_BZERO((void *)pFun->pbmMsixPba, pFun->cbMsixPba);
             }
 
             /* Bring the interrupt setup of the device in line with that. */
@@ -2863,6 +3095,11 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
         RTMemFree(pFun->paFdEvts);
         pFun->paFdEvts = NULL;
         pFun->cFdEvts  = 0;
+
+        RTMemFree(pFun->paMsixTbl);
+        pFun->paMsixTbl = NULL;
+        RTMemFree((void *)pFun->pbmMsixPba);
+        pFun->pbmMsixPba = NULL;
 
         if (pFun->iFdWakeup != -1)
             close(pFun->iFdWakeup);
@@ -3146,38 +3383,9 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             /* PIO regions were created before. */
             if (pFun->aBars[i].bType == 2)
             {
-                uint64_t const cbRegion = pFun->aBars[i].cbRegion +
-                                          (  i == pFun->iBarMsix
-                                           ? pFun->cbMsix
-                                           : 0);
-
-                rc = PDMDevHlpPCIIORegionRegisterMmioCustom(pDevIns, i, cbRegion, pFun->aBars[i].enmAddrSpace, pciVfioMmioMapUnmap);
-                AssertLogRelRCReturn(rc, rc);
-
-                if (pFun->aBars[i].fInterceptMmio)
-                {
-                    rc = PDMDevHlpMmioCreate(pDevIns, pFun->aBars[i].cbRegion, pPciDev, i /*iPciRegion*/,
-                                             pciVfioMmioWrite, pciVfioMmioRead, &pFun->aBars[i],
-                                             IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU, "MMIO",
-                                             &pFun->aBars[i].hnd.hMmio);
-                    AssertLogRelRCReturn(rc, rc);
-
-                    if (i == pFun->iBarMsix)
-                    {
-                        rc = PDMDevHlpMmioCreate(pDevIns, pFun->cbMsix, pPciDev, i /*iPciRegion*/,
-                                                 pciVfioMsixMmioWrite, pciVfioMsixMmioRead, pFun,
-                                                 IOMMMIO_FLAGS_READ_DWORD_QWORD | IOMMMIO_FLAGS_WRITE_DWORD_QWORD_READ_MISSING,
-                                                 "MSI-X MMIO", &pFun->hMsixMmio);
-                        AssertLogRelRCReturn(rc, rc);
-                    }
-                }
-                else
-                {
-                    rc = PDMDevHlpMmio2CreateFromExisting(pDevIns, pPciDev, i, pFun->aBars[i].cbRegion,
-                                                          0 /*fFlags*/, "MMIO", (void *)pFun->aBars[i].u.pvMmio,
-                                                          &pFun->aBars[i].hnd.hMmio2);
-                    AssertLogRelRCReturn(rc, rc);
-                }
+                rc = pciVfioBarSetupMmio(pThis, pFun, pPciDev, i);
+                if (RT_FAILURE(rc))
+                    return rc;
             }
         }
 
