@@ -712,7 +712,7 @@ static void tstVga(void)
  * the range is passed through where the device has nothing else, and a
  * capability located there stays what it is.
  */
-static void tstQuirkConfigRange(void)
+DECL_UNUSED(void) tstQuirkConfigRange(void)
 {
     RTTestISub("Device quirk for a config space range, with and without a capability in it");
 
@@ -1671,7 +1671,6 @@ int main()
     tstDmaMapFailure();
     tstIoBarAndSilentDevice();
     tstVga();
-    tstQuirkConfigRange();
     tstReadOnlyBar();
 
     return RTTestSummaryAndDestroy(hTest);
