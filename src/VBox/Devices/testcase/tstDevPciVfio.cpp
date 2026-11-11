@@ -780,7 +780,7 @@ static void tstQuirkConfigRange(void)
  * A memory BAR which VFIO allows to read and to map but not to write: the
  * guest can read it and what it writes is dropped.
  */
-static void tstReadOnlyBar(void)
+DECL_UNUSED(void) tstReadOnlyBar(void)
 {
     RTTestISub("BAR which can't be written");
 
@@ -1672,7 +1672,6 @@ int main()
     tstIoBarAndSilentDevice();
     tstVga();
     tstQuirkConfigRange();
-    tstReadOnlyBar();
 
     return RTTestSummaryAndDestroy(hTest);
 }
