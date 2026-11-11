@@ -73,6 +73,10 @@
 #define TST_MSI_CAP_OFF         0x50
 /** Config space offset of the PCI Express capability of the default device model. */
 #define TST_EXP_CAP_OFF         0x70
+/** Config space offset of the MSI-X capability of the device models which have one. */
+#define TST_MSIX_CAP_OFF        0xb0
+/** Where the tests map the BAR holding the MSI-X table. */
+#define TST_MSIX_BAR_ADDR       UINT32_C(0xf1000000)
 /** The node of the first function of the device model. */
 #define TST_VFIO_NODE           "/dev/vfio/devices/vfio0"
 
@@ -174,6 +178,34 @@ static void tstModelAddMsiCap(PTSTVFIODEVCFG pModel, uint8_t offCap, uint8_t cVe
     abBody[1] = RT_HI_U8(fMsgCtrl);
     tstModelAddCap(pModel, offCap, VBOX_PCI_CAP_ID_MSI, abBody, sizeof(abBody));
     pModel->acIrqs[VFIO_PCI_MSI_IRQ_INDEX] = RT_BIT_32(cVectorsLog2);
+}
+
+
+/**
+ * Adds an MSI-X capability and marks the BAR holding the table as such.
+ *
+ * @param   pModel              The device model.
+ * @param   offCap              Where to place the capability.
+ * @param   cVectors            The table size.
+ * @param   iBar                The BAR holding both the table and the pending bit array.
+ * @param   offTable            Offset of the table in the BAR.
+ * @param   offPba              Offset of the pending bit array in the BAR.
+ */
+static void tstModelAddMsixCap(PTSTVFIODEVCFG pModel, uint8_t offCap, uint16_t cVectors, uint8_t iBar,
+                               uint32_t offTable, uint32_t offPba)
+{
+    uint16_t const fMsgCtrl = (uint16_t)(cVectors - 1);
+    uint32_t const u32Table = offTable | iBar;
+    uint32_t const u32Pba   = offPba   | iBar;
+    uint8_t const  abBody[10] =
+    {
+        RT_LO_U8(fMsgCtrl), RT_HI_U8(fMsgCtrl),
+        RT_BYTE1(u32Table), RT_BYTE2(u32Table), RT_BYTE3(u32Table), RT_BYTE4(u32Table),
+        RT_BYTE1(u32Pba),   RT_BYTE2(u32Pba),   RT_BYTE3(u32Pba),   RT_BYTE4(u32Pba)
+    };
+    tstModelAddCap(pModel, offCap, VBOX_PCI_CAP_ID_MSIX, abBody, sizeof(abBody));
+    pModel->acIrqs[VFIO_PCI_MSIX_IRQ_INDEX] = cVectors;
+    pModel->aRegions[iBar].fMsixMappable    = true;
 }
 
 
@@ -410,6 +442,120 @@ static void tstUnknownNode(void)
 }
 
 
+/**
+ * MSI: the guest can ask for any number of vectors, the device only ever gets
+ * as many as it has.
+ */
+static void tstMsiVectorCount(void)
+{
+    RTTestISub("MSI vector count");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        uint32_t const cDevVectors = Model.acIrqs[VFIO_PCI_MSI_IRQ_INDEX];
+        uint32_t const fMsgCtrl    =   tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2)
+                                     & ~(uint32_t)(VBOX_PCI_MSI_FLAGS_QSIZE | VBOX_PCI_MSI_FLAGS_ENABLE);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8,  0, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 0x4040, 2);
+
+        /* Go through all encodings of the Multiple Message Enable field, including the reserved ones. */
+        for (uint32_t uMme = 0; uMme < 8; uMme++)
+        {
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl, 2);
+            uint32_t cEnabled = tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX);
+            RTTESTI_CHECK_MSG(cEnabled == 0, ("uMme=%u: %u vector(s) enabled after disabling MSI\n", uMme, cEnabled));
+
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | (uMme << 4) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+            uint32_t const cExpected = RT_MIN(RT_BIT_32(uMme), cDevVectors);
+            cEnabled = tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX);
+            RTTESTI_CHECK_MSG(cEnabled == cExpected, ("uMme=%u: %u vector(s) enabled, expected %u\n", uMme, cEnabled, cExpected));
+        }
+
+        /* Interrupts still arrive. */
+        uint32_t const cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * MSI-X: a device with more vectors than MSI allows, table and PBA in a BAR
+ * of their own.  Every vector reaches the interrupt controller with the
+ * address and data the guest has put into the table.
+ */
+static void tstMsixDedicatedBar(void)
+{
+    RTTestISub("MSI-X, 64 vectors, dedicated BAR");
+
+    static const uint16_t s_aidxVectors[] = { 0, 1, 31, 32, 33, 40, 63 };
+    uint16_t const        cVectors        = 64;
+
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    tstModelSetBar(&Model, 2, _8K, PCI_ADDRESS_SPACE_MEM);
+    tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* The capability is presented to the guest with the table size of the device. */
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF, 1) == VBOX_PCI_CAP_ID_MSIX);
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, 2);
+        RTTESTI_CHECK_MSG((fMsgCtrl & 0x7ff) == (uint32_t)cVectors - 1, ("message control %#RX32\n", fMsgCtrl));
+
+        /* Map the BAR with the table and fill in all entries, unmasked. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0 + 2 * 4, TST_MSIX_BAR_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+        for (uint32_t i = 0; i < cVectors; i++)
+        {
+            uint32_t const au32Entry[4] = { UINT32_C(0xfee00000), 0, UINT32_C(0x4000) + i, 0 };
+            for (uint32_t j = 0; j < RT_ELEMENTS(au32Entry); j++)
+                RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_MSIX_BAR_ADDR + i * 16 + j * 4, &au32Entry[j], 4), VINF_SUCCESS);
+        }
+
+        /* Enable MSI-X. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, fMsgCtrl | RT_BIT_32(15), 2);
+        uint32_t const cEnabled = tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSIX_IRQ_INDEX);
+        RTTESTI_CHECK_MSG(cEnabled == cVectors, ("%u vector(s) enabled on the device\n", cEnabled));
+
+        /* Raise a few of them, on both sides of the MSI vector limit. */
+        for (uint32_t i = 0; i < RT_ELEMENTS(s_aidxVectors); i++)
+        {
+            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            rc = tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSIX_IRQ_INDEX, s_aidxVectors[i]);
+            RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("vector %u: trigger failed with %Rrc\n", s_aidxVectors[i], rc));
+            if (RT_FAILURE(rc))
+                continue;
+            RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("vector %u did not arrive\n", s_aidxVectors[i]));
+            TSTPDMMSI Msi;
+            if (tstPdmMsiGet(cMsisBefore, &Msi))
+            {
+                RTTESTI_CHECK_MSG(Msi.uAddr == UINT64_C(0xfee00000), ("vector %u: address %#RX64\n", s_aidxVectors[i], Msi.uAddr));
+                RTTESTI_CHECK_MSG(Msi.uData == UINT32_C(0x4000) + s_aidxVectors[i],
+                                  ("vector %u: data %#RX32\n", s_aidxVectors[i], Msi.uData));
+            }
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -420,6 +566,8 @@ int main()
 
     tstBasics();
     tstMsi();
+    tstMsiVectorCount();
+    tstMsixDedicatedBar();
     tstUnknownNode();
 
     return RTTestSummaryAndDestroy(hTest);
