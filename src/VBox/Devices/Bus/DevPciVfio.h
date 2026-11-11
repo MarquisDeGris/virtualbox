@@ -78,6 +78,17 @@ AssertCompileSize(struct iommu_ioas_map, 4 * sizeof(uint32_t) + 3 * sizeof(uint6
 #define IOMMU_IOAS_MAP_READABLE         RT_BIT_32(2)
 
 
+struct iommu_ioas_unmap
+{
+    uint32_t size;
+    uint32_t ioas_id;
+    uint64_t iova;
+    uint64_t length;
+};
+AssertCompileSize(struct iommu_ioas_unmap, 2 * sizeof(uint32_t) + 2 * sizeof(uint64_t));
+#define IOMMU_IOAS_UNMAP                _IO(IOMMUFD_TYPE, 0x86)
+
+
 #define VFIO_API_VERSION                0
 #define VFIO_TYPE1_IOMMU                1
 
@@ -203,6 +214,18 @@ AssertCompileSize(struct vfio_iommu_type1_dma_map, 2 * sizeof(uint32_t) + 3 * si
 #define VFIO_DMA_MAP_FLAG_READ          RT_BIT_32(0)
 #define VFIO_DMA_MAP_FLAG_WRITE         RT_BIT_32(1)
 #define VFIO_DMA_MAP_FLAG_VADDR         RT_BIT_32(2)
+
+struct vfio_iommu_type1_dma_unmap
+{
+    uint32_t argsz;
+    uint32_t flags;
+    uint64_t iova;
+    uint64_t size;
+};
+AssertCompileSize(struct vfio_iommu_type1_dma_unmap, 2 * sizeof(uint32_t) + 2 * sizeof(uint64_t));
+#define VFIO_IOMMU_UNMAP_DMA            _IO(VFIO_TYPE, VFIO_BASE + 14)
+
+#define VFIO_DMA_UNMAP_FLAG_ALL         RT_BIT_32(1)
 
 
 #define VFIO_PCI_BAR0_REGION_INDEX      0

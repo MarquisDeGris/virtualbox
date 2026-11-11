@@ -54,6 +54,10 @@
  *     - Linux host with at least kernel 6.12
  *     - The VM needs to have ICH9 configured
  *     - The VM needs to have UEFI configured
+ *     - The VM needs to use the native execution engine (KVM), as the guest memory has to stay
+ *       at a fixed place in the VM process while a device can access it
+ *     - The user running the VM needs to be allowed to lock all of the guest memory (RLIMIT_MEMLOCK),
+ *       it is made available to the device when the VM starts
  *
  * @section sec_dev_vfio_configuration
  *
@@ -105,7 +109,10 @@
  *
  * Make /dev/vfio/devices/vfio0, /dev/vfio/devices/vfio1 and /dev/iommu read/write accessible to the user running the VM.
  *
- * Create a VM and configure it to make use of the ICH9 chipset and enable EFI. Then add the following extradata to the VM
+ * Create a VM and configure it to make use of the ICH9 chipset and enable EFI. Select the native execution engine with
+ *    VBoxManage modifyvm vmname --vm-execution-engine native-api
+ *
+ * Then add the following extradata to the VM
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/ich9pcibridge/0/Config/ExpressEnabled" 1
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/ich9pcibridge/0/Config/ExpressPortType" "RootCmplxRootPort"
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/ExposeVga" 1
@@ -142,6 +149,7 @@
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/vmm/stam.h>
 #include <VBox/vmm/pdmpcidev.h>
+#include <VBox/vmm/vmapi.h>
 #include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/dir.h>
@@ -2523,8 +2531,18 @@ static int pciVfioCfgSpaceSetup(PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
 }
 
 
+/**
+ * Maps a piece of guest memory for DMA by the device.
+ *
+ * @returns VBox status code.
+ * @param   pThis           The VFIO PCI device instance.
+ * @param   GCPhysStart     The guest physical address of the memory, which is the address the device uses for it.
+ * @param   uPtrMapping     Where the memory is in this process.
+ * @param   cbMapping       Size of the piece.
+ */
 static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtrMapping, size_t cbMapping)
 {
+    int rcLnx;
     if (pThis->fVfioLegacy)
     {
         struct vfio_iommu_type1_dma_map Map;
@@ -2534,12 +2552,7 @@ static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtr
         Map.size       = cbMapping;
         Map.iova       = GCPhysStart;
 
-        int rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_IOMMU_MAP_DMA, &Map);
-        if (rcLnx == -1)
-        {
-            LogRel(("errno=%d\n", errno));
-            return RTErrConvertFromErrno(errno);
-        }
+        rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_IOMMU_MAP_DMA, &Map);
     }
     else
     {
@@ -2552,19 +2565,64 @@ static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtr
         Map.length     = cbMapping;
         Map.iova       = GCPhysStart;
 
-        int rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_IOAS_MAP, &Map);
-        if (rcLnx == -1)
-        {
-            LogRel(("errno=%d\n", errno));
-            return RTErrConvertFromErrno(errno);
-        }
+        rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_IOAS_MAP, &Map);
+    }
+    if (rcLnx == -1)
+    {
+        int const iErrno = errno;
+        LogRel(("VFIO#%d: Mapping %zu bytes of guest memory at %RGp for the device failed with %d\n",
+                pThis->iInstance, cbMapping, GCPhysStart, iErrno));
+        return RTErrConvertFromErrno(iErrno);
     }
 
     return VINF_SUCCESS;
 }
 
 
-static void pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTGCPHYS GCPhysStart, RTGCPHYS cbMap)
+/**
+ * Removes everything which is mapped for DMA by the device.
+ *
+ * @param   pThis           The VFIO PCI device instance.
+ */
+static void pciVfioIommuUnmapAll(PVFIOPCI pThis)
+{
+    int rcLnx;
+    if (pThis->fVfioLegacy)
+    {
+        struct vfio_iommu_type1_dma_unmap Unmap;
+        Unmap.argsz   = sizeof(Unmap);
+        Unmap.flags   = VFIO_DMA_UNMAP_FLAG_ALL;
+        Unmap.iova    = 0;
+        Unmap.size    = 0;
+
+        rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_IOMMU_UNMAP_DMA, &Unmap);
+    }
+    else
+    {
+        struct iommu_ioas_unmap Unmap;
+        Unmap.size    = sizeof(Unmap);
+        Unmap.ioas_id = pThis->IommuFd.idIommuHwpt;
+        Unmap.iova    = 0;
+        Unmap.length  = UINT64_MAX; /* Everything. */
+
+        rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_IOAS_UNMAP, &Unmap);
+    }
+    if (rcLnx == -1)
+        LogRel(("VFIO#%d: Removing the guest memory mappings of the device failed with %d\n", pThis->iInstance, errno));
+    pThis->fGuestRamMapped = false;
+}
+
+
+/**
+ * Maps the guest RAM in a guest physical address range for DMA by the device.
+ *
+ * @returns VBox status code.  A part of the range may be mapped on failure.
+ * @param   pThis           The VFIO PCI device instance.
+ * @param   pDevIns         The device instance.
+ * @param   GCPhysStart     Start of the range.
+ * @param   cbMap           Size of the range.
+ */
+static int pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTGCPHYS GCPhysStart, RTGCPHYS cbMap)
 {
     /** @todo This is a really gross hack because we currently lack
      * a dedicated interface to get knowledge about guest RAM mappings.
@@ -2572,76 +2630,68 @@ static void pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTG
      * Also this will allocate all guest RAM instantly but there is no way
      * around that anyway in order for the IOMMU to work correctly.
      */
+    int       rc          = VINF_SUCCESS;
+    RTGCPHYS  GCPhysRun   = GCPhysStart;
     uintptr_t uPtrMapping = 0;
     size_t    cbMapping   = 0;
-    for (RTGCPHYS GCPhys = GCPhysStart; GCPhys < GCPhysStart + cbMap; GCPhys += _4K)
+    for (RTGCPHYS GCPhys = GCPhysStart; GCPhys < GCPhysStart + cbMap && RT_SUCCESS(rc); GCPhys += GUEST_PAGE_SIZE)
     {
-        void *pv = NULL;
+        void          *pv = NULL;
         PGMPAGEMAPLOCK Lock;
-        int rc = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pv, &Lock);
-        if (RT_SUCCESS(rc))
+        int rc2 = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pv, &Lock);
+        if (RT_SUCCESS(rc2))
         {
-            if (cbMapping)
-            {
-                if (uPtrMapping + cbMapping == (uintptr_t)pv)
-                    cbMapping += _4K;
-                else
-                {
-                    rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-                    if (RT_FAILURE(rc))
-                        LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-
-                    GCPhysStart = GCPhys;
-                    uPtrMapping = (uintptr_t)pv;
-                    cbMapping = _4K;
-                }
-            }
+            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &Lock);
+            if (   cbMapping
+                && uPtrMapping + cbMapping == (uintptr_t)pv)
+                cbMapping += GUEST_PAGE_SIZE;
             else
             {
-                Assert(!uPtrMapping);
-                GCPhysStart = GCPhys;
+                /* The memory continues elsewhere in this process: map what we have and start over. */
+                if (cbMapping)
+                    rc = pciVfioMapRegion(pThis, GCPhysRun, uPtrMapping, cbMapping);
+                GCPhysRun   = GCPhys;
                 uPtrMapping = (uintptr_t)pv;
-                cbMapping = _4K;
+                cbMapping   = GUEST_PAGE_SIZE;
             }
-            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &Lock);
         }
         else if (cbMapping)
         {
-            LogRel(("PDMDevHlpPhysGCPhys2CCPtr(,%RGp) -> %Rrc\n", GCPhys, rc));
-            /* Map what we currently have. */
-            Assert(uPtrMapping);
-            rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-            if (RT_FAILURE(rc))
-                LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-            cbMapping   = 0;
-            uPtrMapping = 0;
-            GCPhysStart = GCPhys;
+            /* Not RAM: map what we have. */
+            rc = pciVfioMapRegion(pThis, GCPhysRun, uPtrMapping, cbMapping);
+            cbMapping = 0;
         }
     }
 
-    if (cbMapping)
-    {
-        /* Map what we currently have. */
-        Assert(uPtrMapping);
-        int rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-        if (RT_FAILURE(rc))
-            LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-        cbMapping   = 0;
-        uPtrMapping = 0;
-    }
+    if (   RT_SUCCESS(rc)
+        && cbMapping)
+        rc = pciVfioMapRegion(pThis, GCPhysRun, uPtrMapping, cbMapping);
+    return rc;
 }
 
 
+/**
+ * Maps all of the guest RAM for DMA by the device.
+ *
+ * Nothing is left mapped if this fails.
+ *
+ * @returns VBox status code.
+ * @param   pThis           The VFIO PCI device instance.
+ * @param   pDevIns         The device instance.
+ */
 static int pciVfioIommuGuestRamMap(PVFIOPCI pThis, PPDMDEVINS pDevIns)
 {
-    if (!pThis->fGuestRamMapped)
-    {
-        pciVfioIommuGuestRamMapRange(pThis, pDevIns,   0 /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeBelow4GB(pDevIns));
-        pciVfioIommuGuestRamMapRange(pThis, pDevIns, _4G /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeAbove4GB(pDevIns));
-        pThis->fGuestRamMapped = true;
-    }
+    if (pThis->fGuestRamMapped)
+        return VINF_SUCCESS;
 
-    return VINF_SUCCESS;
+    int rc = pciVfioIommuGuestRamMapRange(pThis, pDevIns,   0 /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeBelow4GB(pDevIns));
+    if (RT_SUCCESS(rc))
+        rc = pciVfioIommuGuestRamMapRange(pThis, pDevIns, _4G /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeAbove4GB(pDevIns));
+    if (RT_SUCCESS(rc))
+        pThis->fGuestRamMapped = true;
+    else
+        pciVfioIommuUnmapAll(pThis);
+    return rc;
 }
 
 
@@ -2892,13 +2942,16 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
 
     if (offReg == VBOX_PCI_COMMAND)
     {
-        /* Map all the guest memory into the IOMMU as soon as the BUSMASTER bit is enabled. */
-        if (uValue & VBOX_PCI_COMMAND_MASTER)
+        /*
+         * The device gets to do DMA only with the guest memory mapped for it, which
+         * is done before the VM starts running, see pciVfioInitComplete().
+         */
+        if (   (uValue & VBOX_PCI_COMMAND_MASTER)
+            && !pThis->fGuestRamMapped)
         {
-            int rc = pciVfioIommuGuestRamMap(pThis, pDevIns);
-            if (RT_FAILURE(rc))
-                LogRel(("VFIO#%d.%u: Failed to map guest RAM into IOMMU for device, expect broken device (%Rrc)\n",
-                        pThis->iInstance, pFun->uPciFun, rc));
+            LogRelMax(8, ("VFIO#%d.%u: Not enabling bus mastering, the guest memory is not mapped for the device\n",
+                          pThis->iInstance, pFun->uPciFun));
+            uValue &= ~(uint32_t)VBOX_PCI_COMMAND_MASTER;
         }
 
         /* The INTx disable bit decides whether INTx gets used when neither MSI nor MSI-X is enabled. */
@@ -3433,6 +3486,10 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
             close(pFun->iFdWakeup);
     }
 
+    /* No device is left which could use the guest memory. */
+    if (pThis->fGuestRamMapped)
+        pciVfioIommuUnmapAll(pThis);
+
     if (pThis->fVfioLegacy)
     {
         if (pThis->VfioGroup.iFdVfioContainer != -1)
@@ -3459,6 +3516,27 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
 
 
 /**
+ * @interface_method_impl{PDMDEVREG,pfnInitComplete}
+ */
+static DECLCALLBACK(int) pciVfioInitComplete(PPDMDEVINS pDevIns)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+
+    /*
+     * Make the guest memory available to the device.  This is done once and before
+     * the guest runs: all of it or the VM doesn't start.  The guest can't enable
+     * bus mastering without it, see pciVfioCfgEmulatedRegWrite().
+     */
+    int rc = pciVfioIommuGuestRamMap(pThis, pDevIns);
+    if (RT_FAILURE(rc))
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                   N_("Failed to make the guest memory available to the passed through PCI device. "
+                                      "The amount of memory the user running the VM may lock might be too low"));
+    return VINF_SUCCESS;
+}
+
+
+/**
  * @interface_method_impl{PDMDEVREG,pfnConstruct}
  */
 static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCFGMNODE pCfg)
@@ -3472,6 +3550,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->iInstance        = iInstance;
     pThis->IommuFd.iFdIommu = -1;
     pThis->fVfioLegacy      = false;
+    pThis->fGuestRamMapped  = false;
 
     for (uint8_t i = 0; i < RT_ELEMENTS(pThis->aPciFuns); i++)
     {
@@ -3503,6 +3582,17 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                      "Fun*\0"
                                     ))
         return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
+
+    /*
+     * The guest memory gets mapped for the device once and has to stay where it is
+     * for as long as the VM exists.  This is the case with the native execution
+     * engine (KVM), where each RAM range is allocated in one piece and kept, and it
+     * is not with the others, where pages are allocated and freed as the VM runs.
+     */
+    if (PDMDevHlpGetMainExecutionEngine(pDevIns) != VM_EXEC_ENGINE_NATIVE_API)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("PCI passthrough requires the native execution engine (KVM), which this VM doesn't use. "
+                                      "Select it with 'VBoxManage modifyvm --vm-execution-engine native-api'"));
 
     rc = pciVfioConfigureAccess(pDevIns, pThis, pHlp, pCfg);
     if (RT_FAILURE(rc))
@@ -3800,7 +3890,7 @@ const PDMDEVREG g_DevicePciVfio =
     /* .pfnAttach = */              NULL,
     /* .pfnDetach = */              NULL,
     /* .pfnQueryInterface = */      NULL,
-    /* .pfnInitComplete = */        NULL,
+    /* .pfnInitComplete = */        pciVfioInitComplete,
     /* .pfnPowerOff = */            NULL,
     /* .pfnSoftReset = */           NULL,
     /* .pfnReserved0 = */           NULL,

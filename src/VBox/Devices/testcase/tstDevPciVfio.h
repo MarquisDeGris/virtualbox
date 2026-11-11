@@ -129,6 +129,10 @@ int         tstCfgSetString(PCFGMNODE pNode, const char *pszName, const char *ps
 #define TSTPDM_MCFG_BASE            UINT64_C(0xe0000000)
 /** Size of the PCI ECAM (MCFG) window used by the tests (64 buses). */
 #define TSTPDM_MCFG_SIZE            UINT64_C(0x04000000)
+/** Start of the hole in the guest RAM: legacy video memory and ROMs, like in a PC. */
+#define TSTPDM_RAM_HOLE_START       UINT32_C(0x000a0000)
+/** Size of the hole in the guest RAM. */
+#define TSTPDM_RAM_HOLE_SIZE        UINT32_C(0x00060000)
 
 /**
  * A message signalled interrupt seen by the interrupt controller mock.
@@ -148,6 +152,8 @@ typedef TSTPDMMSI *PTSTPDMMSI;
 int             tstPdmInit(uint32_t cbRam);
 void            tstPdmTerm(void);
 int             tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PPDMDEVINS *ppDevIns);
+void            tstPdmSetExecutionEngine(uint8_t bExecEngine);
+int             tstPdmInitComplete(void);
 void            tstPdmPowerOn(void);
 void            tstPdmPowerOff(void);
 void            tstPdmReset(void);
