@@ -163,20 +163,42 @@ static void tstModelAddCap(PTSTVFIODEVCFG pModel, uint8_t offCap, uint8_t bCapId
 
 
 /**
- * Adds an MSI capability with 64-bit addressing and per-vector masking.
+ * Stores a 32-bit value in the config space of a device model.
+ *
+ * @param   pModel              The device model.
+ * @param   offReg              The register offset.
+ * @param   u32Value            The value.
+ */
+static void tstModelSetU32(PTSTVFIODEVCFG pModel, uint32_t offReg, uint32_t u32Value)
+{
+    pModel->abCfg[offReg]     = RT_BYTE1(u32Value);
+    pModel->abCfg[offReg + 1] = RT_BYTE2(u32Value);
+    pModel->abCfg[offReg + 2] = RT_BYTE3(u32Value);
+    pModel->abCfg[offReg + 3] = RT_BYTE4(u32Value);
+}
+
+
+/**
+ * Adds an MSI capability.
  *
  * @param   pModel              The device model.
  * @param   offCap              Where to place the capability.
  * @param   cVectorsLog2        Number of vectors the device supports as a power of two.
+ * @param   f64Bit              Whether the capability has a 64-bit message address.
+ * @param   fMaskable           Whether the capability has per-vector masking.
  */
-static void tstModelAddMsiCap(PTSTVFIODEVCFG pModel, uint8_t offCap, uint8_t cVectorsLog2)
+static void tstModelAddMsiCap(PTSTVFIODEVCFG pModel, uint8_t offCap, uint8_t cVectorsLog2, bool f64Bit, bool fMaskable)
 {
     uint8_t abBody[22];
     RT_ZERO(abBody);
-    uint16_t const fMsgCtrl = VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT | (uint16_t)(cVectorsLog2 << 1);
+    uint16_t const fMsgCtrl = (uint16_t)(  (f64Bit    ? VBOX_PCI_MSI_FLAGS_64BIT   : 0)
+                                         | (fMaskable ? VBOX_PCI_MSI_FLAGS_MASKBIT : 0)
+                                         | (cVectorsLog2 << 1));
     abBody[0] = RT_LO_U8(fMsgCtrl);
     abBody[1] = RT_HI_U8(fMsgCtrl);
-    tstModelAddCap(pModel, offCap, VBOX_PCI_CAP_ID_MSI, abBody, sizeof(abBody));
+    size_t const cbBody = 2 /* control */ + 4 /* address */ + (f64Bit ? 4 : 0) + 2 /* data */
+                        + (fMaskable ? 2 /* reserved */ + 4 /* mask */ + 4 /* pending */ : 0);
+    tstModelAddCap(pModel, offCap, VBOX_PCI_CAP_ID_MSI, abBody, cbBody);
     pModel->acIrqs[VFIO_PCI_MSI_IRQ_INDEX] = RT_BIT_32(cVectorsLog2);
 }
 
@@ -236,7 +258,7 @@ static void tstModelInitDefault(PTSTVFIODEVCFG pModel)
     tstModelInit(pModel, TST_VFIO_NODE, VBOX_PCI_CLASS_NETWORK, 0x00 /* Ethernet */);
     tstModelSetBar(pModel, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
     pModel->acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
-    tstModelAddMsiCap(pModel, TST_MSI_CAP_OFF, 2 /*cVectorsLog2*/);
+    tstModelAddMsiCap(pModel, TST_MSI_CAP_OFF, 2 /*cVectorsLog2*/, true /*f64Bit*/, true /*fMaskable*/);
     tstModelAddExpCap(pModel, TST_EXP_CAP_OFF);
 }
 
@@ -753,6 +775,157 @@ static void tstMsixSharedBar(void)
 
 
 /**
+ * Capabilities chained from high to low offsets: the guest sees them in the
+ * order the device has them.
+ */
+static void tstCapsDescending(void)
+{
+    RTTestISub("Capability list from high to low offsets");
+
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_NETWORK, 0x00 /* Ethernet */);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddExpCap(&Model, 0xb0);
+    tstModelAddMsiCap(&Model, TST_MSI_CAP_OFF, 0 /*cVectorsLog2*/, true /*f64Bit*/, false /*fMaskable*/);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_CAPABILITY_LIST, 1) == 0xb0);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0xb0, 1) == VBOX_PCI_CAP_ID_EXP);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0xb1, 1) == TST_MSI_CAP_OFF);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF, 1) == VBOX_PCI_CAP_ID_MSI);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 1, 1) == 0);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A capability list which loops fails the VM construction instead of hanging it.
+ */
+static void tstCapsLoop(void)
+{
+    RTTestISub("Capability list which loops");
+
+    static const uint8_t s_abPmBody[6] = { 0x03, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_NETWORK, 0x00 /* Ethernet */);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddCap(&Model, 0x40, 0x01 /* power management */, s_abPmBody, sizeof(s_abPmBody));
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+    Model.abCfg[TST_EXP_CAP_OFF + 1] = 0x40; /* back to the first one */
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("the constructor succeeded: %Rrc\n", rc));
+    RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("no VM error was set\n"));
+    tstFixtureTeardown();
+}
+
+
+/**
+ * An extended capability list which loops fails the VM construction instead
+ * of hanging it.
+ */
+static void tstExtCapsLoop(void)
+{
+    RTTestISub("Extended capability list which loops");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    Model.cbCfg = 4096;
+    tstModelSetU32(&Model, 0x100, UINT32_C(0x0001) | RT_BIT_32(16) | (UINT32_C(0x140) << 20)); /* advanced error reporting */
+    tstModelSetU32(&Model, 0x140, UINT32_C(0x0003) | RT_BIT_32(16) | (UINT32_C(0x100) << 20)); /* device serial number */
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("the constructor succeeded: %Rrc\n", rc));
+    RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("no VM error was set\n"));
+    tstFixtureTeardown();
+}
+
+
+/**
+ * The smallest MSI capability there is, 32-bit address and no masking, with
+ * another capability right behind it: the guest gets MSI with that layout and
+ * the neighbour stays what it is.
+ */
+static void tstMsiSmallLayout(void)
+{
+    RTTestISub("32-bit MSI without masking, followed by another capability");
+
+    uint8_t const        offVendorCap      = TST_MSI_CAP_OFF + 12;
+    static const uint8_t s_abVendorBody[6] = { 8 /* length */, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5 };
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, VBOX_PCI_CLASS_NETWORK, 0x00 /* Ethernet */);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddMsiCap(&Model, TST_MSI_CAP_OFF, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
+    tstModelAddCap(&Model, offVendorCap, 0x09 /* vendor specific */, s_abVendorBody, sizeof(s_abVendorBody));
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* The guest sees the layout of the device. */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        RTTESTI_CHECK_MSG(!(fMsgCtrl & (VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT | VBOX_PCI_MSI_FLAGS_ENABLE)),
+                          ("message control %#RX32\n", fMsgCtrl));
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 1, 1) == offVendorCap);
+
+        /* The vendor capability behind it is the one of the device. */
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap, 1) == 0x09);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap + 1, 1) == TST_EXP_CAP_OFF);
+        uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offVendorCap + 4, 4);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0xa5a4a3a2), ("read %#RX32 from the vendor capability\n", u32));
+
+        /* Reading through the whole config space with every access width works. */
+        for (uint32_t off = 0; off < 256; off++)
+        {
+            tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 1);
+            if (!(off & 1))
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 2);
+            if (!(off & 3))
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, 4);
+        }
+
+        /* MSI works with this layout: address at +4, data at +8. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4, UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8, 0x4043, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+        uint32_t const cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
+        TSTPDMMSI Msi;
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+        {
+            RTTESTI_CHECK_MSG(Msi.uAddr == UINT64_C(0xfee00000), ("address %#RX64\n", Msi.uAddr));
+            RTTESTI_CHECK_MSG(Msi.uData == 0x4043, ("data %#RX32\n", Msi.uData));
+        }
+
+        /* None of this has changed the vendor capability of the device. */
+        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+        RTTESTI_CHECK(pbCfg != NULL);
+        if (pbCfg)
+            RTTESTI_CHECK_MSG(!memcmp(&pbCfg[offVendorCap + 2], s_abVendorBody, sizeof(s_abVendorBody)),
+                              ("the vendor capability of the device was changed: %.6Rhxs\n", &pbCfg[offVendorCap + 2]));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
  * A device with two functions: both show up with their own identity and each
  * BAR belongs to the function which has it.
  */
@@ -974,11 +1147,15 @@ int main()
     tstMsiVectorCount();
     tstMsixDedicatedBar();
     tstMsixSharedBar();
+    tstMsiSmallLayout();
+    tstCapsDescending();
+    tstCapsLoop();
     tstMultiFunction();
     tstUnmappableBar();
     tstResetMsi();
     tstResetMsix();
     tstUnknownNode();
+    tstExtCapsLoop();
 
     return RTTestSummaryAndDestroy(hTest);
 }
