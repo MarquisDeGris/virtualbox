@@ -1464,7 +1464,9 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
   	-Wl,--wrap=pread \
   	-Wl,--wrap=pread64 \
   	-Wl,--wrap=pwrite \
-  	-Wl,--wrap=pwrite64
+  	-Wl,--wrap=pwrite64 \
+  	-Wl,--wrap=mmap \
+  	-Wl,--wrap=mmap64
  endif
 
  #
