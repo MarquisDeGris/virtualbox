@@ -570,6 +570,305 @@ static void tstMsixDedicatedBar(void)
 
 
 /**
+ * Writes an MSI-X table entry the way a guest does, with four 32-bit accesses.
+ *
+ * @param   GCPhysTable         Where the table is mapped.
+ * @param   idxVector           The entry to write.
+ * @param   uData               The message data.
+ * @param   fMasked             Whether the vector is masked.
+ */
+static void tstGuestWriteMsixEntry(RTGCPHYS GCPhysTable, uint32_t idxVector, uint32_t uData, bool fMasked)
+{
+    uint32_t const au32Entry[4] = { UINT32_C(0xfee00000), 0, uData, fMasked ? UINT32_C(1) : UINT32_C(0) };
+    for (uint32_t i = 0; i < RT_ELEMENTS(au32Entry); i++)
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysTable + idxVector * 16 + i * 4, &au32Entry[i], sizeof(uint32_t)), VINF_SUCCESS);
+}
+
+
+/**
+ * Lets the device raise an MSI-X interrupt and checks that it arrives with the
+ * expected message data.
+ *
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   idxVector           The vector to raise.
+ * @param   uDataExpected       The message data expected.
+ */
+static void tstMsixTriggerAndCheck(PTSTVFIODEV pDev, uint32_t idxVector, uint32_t uDataExpected)
+{
+    uint32_t const cMsisBefore = tstPdmMsiGetCount();
+    int rc = tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSIX_IRQ_INDEX, idxVector);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("vector %u: trigger failed with %Rrc\n", idxVector, rc));
+    if (RT_FAILURE(rc))
+        return;
+    RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("vector %u did not arrive\n", idxVector));
+    TSTPDMMSI Msi;
+    if (tstPdmMsiGet(cMsisBefore, &Msi))
+    {
+        RTTESTI_CHECK_MSG(Msi.uAddr == UINT64_C(0xfee00000), ("vector %u: address %#RX64\n", idxVector, Msi.uAddr));
+        RTTESTI_CHECK_MSG(Msi.uData == uDataExpected, ("vector %u: data %#RX32, expected %#RX32\n", idxVector, Msi.uData, uDataExpected));
+    }
+}
+
+
+/**
+ * Lets the device raise an MSI-X interrupt which must not reach the guest now.
+ *
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   idxVector           The vector to raise.
+ */
+static void tstMsixTriggerAndCheckHeldBack(PTSTVFIODEV pDev, uint32_t idxVector)
+{
+    uint32_t const cMsisBefore = tstPdmMsiGetCount();
+    RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSIX_IRQ_INDEX, idxVector), VINF_SUCCESS);
+    RTTESTI_CHECK_MSG(!tstPdmMsiWait(cMsisBefore + 1, 250 /*ms*/), ("vector %u was delivered although it is masked\n", idxVector));
+}
+
+
+/**
+ * MSI-X with the table and the pending bit array inside a BAR which also holds
+ * device registers, as most devices have it:
+ *      - The guest sees the BAR with the size and the layout of the device.
+ *      - The table the guest writes is not the one of the physical device.
+ *      - Interrupts arrive with what the guest has put into its table.
+ *      - Device registers next to the table and elsewhere in the BAR work.
+ *      - Masked vectors are held back, show up in the pending bit array and
+ *        get delivered when unmasked; same for the function mask.
+ */
+static void tstMsixSharedBar(void)
+{
+    RTTestISub("MSI-X, table and PBA inside a BAR with device registers");
+
+    uint16_t const cVectors = 8;
+    uint32_t const cbBar    = _16K;
+    uint32_t const offTable = _8K;
+    uint32_t const offPba   = _8K + _4K;
+
+    TSTVFIODEVCFG Model;
+    tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+    tstModelSetBar(&Model, 0, cbBar, PCI_ADDRESS_SPACE_MEM);
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+    tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 0 /*iBar*/, offTable, offPba);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* What the physical device has in its table and next to it. */
+        uint8_t *pbBar0 = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR0_REGION_INDEX);
+        if (!pbBar0)
+        {
+            RTTestIFailed("no access to BAR0 of the device model");
+            tstFixtureTeardown();
+            return;
+        }
+        memset(&pbBar0[offTable], 0xa5, cVectors * 16);
+        *(uint32_t *)&pbBar0[0x10]             = UINT32_C(0x11111111);
+        *(uint32_t *)&pbBar0[offTable + 0x100] = UINT32_C(0x22222222);
+
+        /* The capability and the BAR look like on the physical device. */
+        uint32_t u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 4, 4);
+        RTTESTI_CHECK_MSG(u32 == offTable, ("table offset/BIR %#RX32\n", u32));
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 8, 4);
+        RTTESTI_CHECK_MSG(u32 == offPba, ("PBA offset/BIR %#RX32\n", u32));
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, UINT32_MAX, 4);
+        u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, 4);
+        RTTESTI_CHECK_MSG(u32 == ~(cbBar - 1), ("BAR0 sizing returned %#RX32\n", u32));
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+        /* Device registers: far away from the table and in the same page as the table. */
+        u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + 0x10, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x11111111), ("read %#RX32 from the register at 0x10\n", u32));
+        u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTable + 0x100, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x22222222), ("read %#RX32 from the register behind the table\n", u32));
+        u32 = UINT32_C(0x33333333);
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offTable + 0x104, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(*(uint32_t *)&pbBar0[offTable + 0x104] == UINT32_C(0x33333333),
+                          ("the device sees %#RX32 in the register behind the table\n", *(uint32_t *)&pbBar0[offTable + 0x104]));
+
+        /* All vectors start out masked.  Fill in the table, leaving vector 2 masked. */
+        u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTable + 12, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 == 1, ("vector control of entry 0 is %#RX32 initially\n", u32));
+        for (uint32_t i = 0; i < cVectors; i++)
+            tstGuestWriteMsixEntry(TST_BAR0_ADDR + offTable, i, UINT32_C(0x4000) + i, i == 2 /*fMasked*/);
+
+        /* The guest reads back what it wrote, and the table of the physical device is untouched. */
+        u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTable + 3 * 16 + 8, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x4003), ("read %#RX32 as message data of entry 3\n", u32));
+        bool fTouched = false;
+        for (uint32_t off = 0; off < (uint32_t)cVectors * 16; off++)
+            fTouched |= pbBar0[offTable + off] != 0xa5;
+        RTTESTI_CHECK_MSG(!fTouched, ("the guest wrote to the MSI-X table of the physical device\n"));
+
+        /* Enable MSI-X; unmasked vectors arrive with the guest's message. */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSIX_IRQ_INDEX) == cVectors);
+        tstMsixTriggerAndCheck(pDev, 0, UINT32_C(0x4000));
+        tstMsixTriggerAndCheck(pDev, 7, UINT32_C(0x4007));
+
+        /* The masked vector is held back, shows up as pending and gets delivered when the guest unmasks it. */
+        uint64_t u64Pba = UINT64_MAX;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPba, &u64Pba, sizeof(u64Pba)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u64Pba == 0, ("pending bits %#RX64 before anything is pending\n", u64Pba));
+        tstMsixTriggerAndCheckHeldBack(pDev, 2);
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPba, &u64Pba, sizeof(u64Pba)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u64Pba == RT_BIT_64(2), ("pending bits %#RX64 with vector 2 pending\n", u64Pba));
+        uint32_t cMsisBefore = tstPdmMsiGetCount();
+        u32 = 0;
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offTable + 2 * 16 + 12, &u32, sizeof(u32)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("vector 2 was not delivered when unmasked\n"));
+        TSTPDMMSI Msi;
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+            RTTESTI_CHECK_MSG(Msi.uData == UINT32_C(0x4002), ("vector 2: data %#RX32\n", Msi.uData));
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPba, &u64Pba, sizeof(u64Pba)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u64Pba == 0, ("pending bits %#RX64 after the delivery\n", u64Pba));
+
+        /* Same with the function mask. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2,
+                          fMsgCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK, 2);
+        tstMsixTriggerAndCheckHeldBack(pDev, 5);
+        cMsisBefore = tstPdmMsiGetCount();
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("vector 5 was not delivered when the function got unmasked\n"));
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+            RTTESTI_CHECK_MSG(Msi.uData == UINT32_C(0x4005), ("vector 5: data %#RX32\n", Msi.uData));
+
+        /* The guest can't change the pending bits. */
+        u64Pba = UINT64_MAX;
+        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offPba, &u64Pba, sizeof(u64Pba)), VINF_SUCCESS);
+        u64Pba = UINT64_MAX;
+        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPba, &u64Pba, sizeof(u64Pba)), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(u64Pba == 0, ("pending bits %#RX64 after the guest wrote to them\n", u64Pba));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A device with two functions: both show up with their own identity and each
+ * BAR belongs to the function which has it.
+ */
+static void tstMultiFunction(void)
+{
+    RTTestISub("Two functions, each with a memory BAR");
+
+    uint32_t const    acbBar0[2]      = { _64K, _16K };
+    uint32_t const    aGCPhysBar0[2]  = { TST_BAR0_ADDR, TST_BAR0_ADDR + _1M };
+    uint32_t const    au32Pattern[2]  = { UINT32_C(0xf00d0000), UINT32_C(0xf00d0001) };
+    TSTVFIODEVCFG     aModels[2];
+    tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+    tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+    tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+    for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+    {
+        tstModelSetBar(&aModels[i], 0, acbBar0[i], PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&aModels[i], TST_EXP_CAP_OFF);
+    }
+
+    PTSTVFIODEV apDevs[2] = { NULL, NULL };
+    int rc = tstFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* Both functions are there and function 0 tells the guest to look for more. */
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN,     VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN + 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN,     VBOX_PCI_HEADER_TYPE, 1) & 0x80);
+
+        for (uint8_t i = 0; i < RT_ELEMENTS(aModels); i++)
+        {
+            /* The BAR has the size it has on this function ... */
+            uint8_t const uDevFn = TST_PCI_DEVFN + i;
+            tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, UINT32_MAX, 4);
+            uint32_t u32 = tstPdmPciCfgRead(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, 4);
+            RTTESTI_CHECK_MSG(u32 == ~(acbBar0[i] - 1), ("function %u: BAR0 sizing returned %#RX32\n", i, u32));
+            tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, aGCPhysBar0[i], 4);
+            tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+            /* ... and shows the memory of this function. */
+            uint32_t *pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(apDevs[i], VFIO_PCI_BAR0_REGION_INDEX);
+            RTTESTI_CHECK(pau32Bar0 != NULL);
+            if (pau32Bar0)
+            {
+                pau32Bar0[1] = au32Pattern[i];
+                u32 = 0;
+                RTTESTI_CHECK_RC(tstPdmPhysRead(aGCPhysBar0[i] + 4, &u32, sizeof(u32)), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(u32 == au32Pattern[i], ("function %u: read %#RX32 from BAR0\n", i, u32));
+            }
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A BAR which VFIO does not allow to map, a small one at that: the guest
+ * reaches the device registers nevertheless, and nothing behind the BAR.
+ */
+static void tstUnmappableBar(void)
+{
+    RTTestISub("BAR which can't be mapped");
+
+    uint32_t const cbBar1     = 256;
+    uint32_t const GCPhysBar1 = TST_BAR0_ADDR + _1M;
+    TSTVFIODEVCFG  Model;
+    tstModelInitDefault(&Model);
+    tstModelSetBar(&Model, 1, cbBar1, PCI_ADDRESS_SPACE_MEM);
+    Model.aRegions[1].fFlags &= ~(uint32_t)VFIO_REGION_INFO_FLAG_MMAP;
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0 + 4, GCPhysBar1, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+
+        /* The test maps a whole page of the model, of which the first 256 bytes are the BAR. */
+        uint32_t *pau32Bar1 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR1_REGION_INDEX);
+        RTTESTI_CHECK(pau32Bar1 != NULL);
+        if (pau32Bar1)
+        {
+            /* Reads and writes reach the device with the width the guest uses. */
+            pau32Bar1[4] = UINT32_C(0x44444444);
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(GCPhysBar1 + 16, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0x44444444), ("read %#RX32 from BAR1\n", u32));
+            u32 = UINT32_C(0x55555555);
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysBar1 + 32, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar1[8] == UINT32_C(0x55555555), ("the device sees %#RX32 in BAR1\n", pau32Bar1[8]));
+            uint8_t b = 0x66;
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysBar1 + 37, &b, sizeof(b)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar1[9] == UINT32_C(0x00006600), ("the device sees %#RX32 after a byte write\n", pau32Bar1[9]));
+
+            /* The guest sees a page, but there is nothing behind the BAR and nothing it could change there. */
+            pau32Bar1[cbBar1 / 4] = UINT32_C(0x77777777);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(GCPhysBar1 + cbBar1, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_MAX, ("read %#RX32 from behind BAR1\n", u32));
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(GCPhysBar1 + cbBar1, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar1[cbBar1 / 4] == UINT32_C(0x77777777),
+                              ("a guest write behind BAR1 changed the device memory to %#RX32\n", pau32Bar1[cbBar1 / 4]));
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
  * Reset with MSI enabled: the device gets reset, MSI is off afterwards on both
  * sides and works again when the guest enables it anew.
  */
@@ -674,6 +973,9 @@ int main()
     tstMsi();
     tstMsiVectorCount();
     tstMsixDedicatedBar();
+    tstMsixSharedBar();
+    tstMultiFunction();
+    tstUnmappableBar();
     tstResetMsi();
     tstResetMsix();
     tstUnknownNode();
