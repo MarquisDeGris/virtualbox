@@ -46,11 +46,6 @@ jobs:
           gcc --version | head -1
           ls -l /dev/kvm || true
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Check out source
         uses: actions/checkout@v4
         with:
@@ -64,14 +59,14 @@ jobs:
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "kbuild=$(git -C kBuild rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git log -1 --format='%H %s'
-          ls kBuild
+          ls kBuild/kBuild/bin/linux.amd64 | head -5
 
       - name: Install build dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
             build-essential gcc-multilib g++-multilib libc6-dev-i386 \
-            autoconf automake autopoint gettext texinfo bison flex pkg-config \
+            pkg-config \
             acpica-tools chrpath nasm yasm xsltproc libxml2-utils genisoimage makeself \
             glslang-tools python3 python3-dev \
             libasound2-dev libcap-dev libcurl4-openssl-dev libdevmapper-dev \
@@ -84,21 +79,6 @@ jobs:
             libgl-dev libglu1-mesa-dev mesa-common-dev libvulkan-dev \
             linux-headers-$(uname -r) || \
           sudo apt-get install -y -q --no-install-recommends linux-headers-generic
-
-      - name: Cache kBuild binaries
-        id: kbuildcache
-        uses: actions/cache@v4
-        with:
-          path: kBuild/kBuild/bin/linux.amd64
-          key: kbuild-bin-ubuntu2404-${{ steps.src.outputs.kbuild }}
-
-      - name: Bootstrap kBuild
-        if: steps.kbuildcache.outputs.cache-hit != 'true'
-        run: |
-          cd kBuild
-          ./kBuild/env.sh --full make -f bootstrap.gmk > ../kbuild-bootstrap.log 2>&1 \
-            || { tail -150 ../kbuild-bootstrap.log; exit 1; }
-          ls -l kBuild/bin/linux.amd64 | head -40
 
       - name: Configure
         run: |
@@ -166,7 +146,6 @@ jobs:
             configure.log
             configure-run.log
             configure-help.log
-            kbuild-bootstrap.log
             AutoConfig.kmk
             LocalConfig.kmk
             env.sh
