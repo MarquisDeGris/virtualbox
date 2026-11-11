@@ -7,15 +7,16 @@ Updated: 2026-11-11
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `eb637e18` (4 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `f31b5dda` (5 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 hardening, continued. Done so far: interrupt setup. Next: MSI-X table
-and pending bits when the table shares a BAR with other registers.
+WP2 hardening, continued. Done so far: interrupt setup; MSI-X table and
+pending bits; memory BARs in segments. Next: capability lists, config space
+write semantics, DMA mapping, error paths.
 
 ## Done
 
@@ -35,20 +36,35 @@ and pending bits when the table shares a BAR with other registers.
   - reset masks MSI-X vectors and brings the interrupt setup in line;
   - a passthrough device on the root bus gets the PCI helper pointer it
     needs for MSI-X delivery (it was only set behind a bridge).
+- WP2, part 2 (commit `f31b5dda`):
+  - the guest gets an MSI-X table and pending bit array of its own at the
+    place where the device has them; the table of the physical device is no
+    longer reachable by the guest;
+  - memory BARs keep the size they have on the device and are made of
+    segments which are mapped or trapped; the pages with the MSI-X table and
+    pending bits are trapped, the rest of such a page is forwarded;
+  - masked vectors become pending and are delivered on unmask (vector and
+    function mask); the pending bits are read-only for the guest;
+  - BARs which cannot be mapped (VFIO flag, sub-page size) are accessed
+    through the device file descriptor instead of failing the VM start;
+  - memory BARs are registered for the function they belong to.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
-Each new test was first run against the unmodified device.
+Each new test was first run against the device without the fix it belongs to.
 
-| Test | Unmodified device (run 15) | With fixes (run 16) |
-|------|----------------------------|---------------------|
+| Test | Before the fix | With fixes (run 22) |
+|------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass | pass |
 | MSI delivery | pass | pass |
-| MSI vector count (all Multiple Message Enable encodings) | fails, then the process aborts | pass |
-| MSI-X, 64 vectors, dedicated BAR | fails (8 checks) | pass |
-| Reset with MSI enabled | fails (1 check) | pass |
-| Reset with MSI-X enabled | fails (3 checks) | pass |
+| MSI vector count (all Multiple Message Enable encodings) | fails, then the process aborts (run 15) | pass |
+| MSI-X, 64 vectors, dedicated BAR | fails, 8 checks (run 15) | pass |
+| MSI-X, table and PBA inside a BAR with device registers | fails, 9 checks (run 21) | pass |
+| Two functions, each with a memory BAR | fails, 3 checks (run 21) | pass |
+| BAR which can not be mapped | VM construction fails (run 21) | pass |
+| Reset with MSI enabled | fails, 1 check (run 15) | pass |
+| Reset with MSI-X enabled | fails, 3 checks (run 15) | pass |
 | Unknown device node | pass | pass |
 
 ## Test harness (WP1)
@@ -78,17 +94,14 @@ semantics in the device model.
 
 ## Next (WP2 continued)
 
-1. MSI-X table inside a BAR with other registers: emulate table and pending
-   bits where the capability says they are; deliver pending interrupts on
-   unmask; pending bit array at its own offset.
-2. Capability lists in any order, with loop detection.
-3. Config space writes which span registers with different handling, and
+1. Capability lists in any order, with loop detection.
+2. Config space writes which span registers with different handling, and
    byte writes to registers handled as a whole.
-4. DMA mapping: fail closed, at a defined point, with explicit unmap.
-5. Error paths: descriptor and memory leaks, host I/O errors in guest access
+3. DMA mapping: fail closed, at a defined point, with explicit unmap.
+4. Error paths: descriptor and memory leaks, host I/O errors in guest access
    handlers, validation of configuration strings, explicit no-IOMMU check.
-6. Documentation block of the device.
-7. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
+5. Documentation block of the device.
+6. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
 
 ## Decisions
 
@@ -109,7 +122,7 @@ semantics in the device model.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 7 tests | `eb637e18` | all pass (run 16) |
+| T1 unit | running in CI, 10 tests | `f31b5dda` | all pass (run 22) |
 | T2 fuzz | not started | | |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
@@ -129,3 +142,7 @@ semantics in the device model.
 | 11 to 14 | `scratch/irq-vectors` | tests | mixed | development of the interrupt rework |
 | 15 | `scratch/red-evidence` | tests | failed as intended | all new tests against the unmodified device |
 | 16 | code branch @ `eb637e18` | tests | passed | 7 tests |
+| 17 | `scratch/msix-shared-bar` | tests | failed as intended | MSI-X shared BAR test before the fix |
+| 18 to 20 | `scratch/msix-shared-bar` | tests | passed | development of the MSI-X and BAR rework |
+| 21 | `scratch/red-evidence-2` | tests | failed as intended | three new tests against the driver before the rework, 13 failed checks |
+| 22 | code branch @ `f31b5dda` | tests | passed | 10 tests |
