@@ -36,16 +36,50 @@
  *
  * @section sec_dev_vfio_shortcomings
  *
- * The current emulation only supports MSI based interrupts. The legacy INTx style
+ * The emulation supports MSI and MSI-X interrupts. The legacy INTx style
  * doesn't work currently because VFIO auto masks those after they fired to prevent
  * an interrupt storm on the host and requires explicit unmasking after the guest
  * handled it but we currently lack a callback mechanism from the I/O APIC to get notified
  * about EOI events from the guest for the device.
- * MSI-X interrupt support is not implemented right now, so the passed through device needs
- * to support MSI in order to be supported.
+ * The passed through device therefore needs to support MSI or MSI-X.
  *
  * Saved states are not supported, and will never be as we can't capture the PCIe device state
  * and replay it when resuming.
+ *
+ * @section sec_dev_vfio_guest_view     What the guest gets to see
+ *
+ * The config space is assembled from what the device has: the identification registers, the BARs
+ * with their sizes and types, and the capabilities this emulation knows how to deal with. Each
+ * config space byte is either emulated, passed through to the device or not there for the guest;
+ * capabilities which are not handled are left out of the capability list. A device whose
+ * capability lists loop or overlap is refused.
+ *
+ * The MSI capability is emulated with the layout it has on the device. MSI-X is emulated with a
+ * table and pending bit array of the guest's own at the place where the device has them; the
+ * table of the device belongs to the host kernel and is never reachable by the guest. Interrupts
+ * arrive through eventfds, one per vector, and are forwarded with what the guest has programmed,
+ * masked ones are held back and marked pending.
+ *
+ * Memory BARs are mapped into the guest where VFIO allows it, except for the pages holding the
+ * MSI-X table and pending bit array, which are trapped. Trapped accesses, I/O port BARs and the
+ * legacy VGA ranges go through the device file descriptor. A device which doesn't answer reads as
+ * all ones and ignores writes, the guest never gets an error for it.
+ *
+ * @section sec_dev_vfio_memory         Guest memory
+ *
+ * All guest RAM is made available to the device through the IOMMU when the VM is constructed, at
+ * guest physical addresses. If this fails the VM doesn't start. The mappings stay as they are for
+ * as long as the VM exists, which is why the guest memory has to stay at the same place in the VM
+ * process, see the requirements. The guest can't enable bus mastering without them.
+ *
+ * @section sec_dev_vfio_reset          Reset
+ *
+ * A reset of the VM disables interrupts, bus mastering and decoding of each function and then
+ * resets it. Functions which can't be reset on their own, as is common for devices with several
+ * functions, are reset through the bus they are on, which the host kernel permits if everything on
+ * that bus is passed through to the VM. If there is no way to reset a function it stays disabled
+ * until the guest sets it up again, but keeps the rest of its state; this is noted in the release
+ * log.
  *
  * @section sec_dev_vfio_requirements
  *
@@ -133,6 +167,14 @@
  * so it can output early during boot. However you need to disable the VirtualBox emulated graphics controller or starting the VM
  * fails because both devices want to register those ranges. Disable the emulated graphics controller with
  *    VBoxManage modifyvm vmname --graphicscontroller none
+ *
+ * Instead of the VFIO device node with VfioPath a function can be given by its address on the host, the node is
+ * looked up in sysfs then. The address has to have the form the host kernel uses for it
+ *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/HostAddress" 0000:0a:00.0
+ *
+ * The InterceptMmio setting of a function makes all accesses to its memory BARs go through the device emulation
+ * instead of mapping the BARs into the guest. This is slow and meant for debugging
+ *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/InterceptMmio" 1
  *
  * After that you can start the VM with either the usual GUI or VBoxHeadless.
  */
