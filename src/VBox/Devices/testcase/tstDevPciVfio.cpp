@@ -1301,9 +1301,6 @@ int main()
     tstMsiVectorCount();
     tstMsixDedicatedBar();
     tstMsixSharedBar();
-    tstMsiSmallLayout();
-    tstMsiMasking();
-    tstCfgWriteWidths();
     tstCapsDescending();
     tstCapsLoop();
     tstExtCapsLoop();
@@ -1312,6 +1309,9 @@ int main()
     tstResetMsi();
     tstResetMsix();
     tstUnknownNode();
+    tstMsiMasking();
+    tstCfgWriteWidths();
+    tstMsiSmallLayout();
 
     return RTTestSummaryAndDestroy(hTest);
 }

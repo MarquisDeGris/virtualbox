@@ -359,10 +359,6 @@ typedef struct VFIOPCIFUN
 
     /** The MSI capability offset if enabled. */
     uint8_t              offMsiCtrl;
-    /** Flag whether the MSI capability has a 64-bit message address. */
-    bool                 fMsi64Bit;
-    /** Flag whether the MSI capability has per-vector masking. */
-    bool                 fMsiMaskable;
 
     /** The MSI-X capability offset if enabled. */
     uint8_t              offMsixCtrl;
@@ -602,131 +598,6 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioRead(PPDMDEVINS pDevIns, void *pvUse
 
 
 /**
- * Sends a message signalled interrupt of a function to the interrupt controller.
- *
- * @param   pDevIns     The device instance.
- * @param   pPciDev     The PCI device of the function raising the interrupt.
- * @param   uAddr       The message address.
- * @param   uData       The message data.
- */
-static void pciVfioMsgSend(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint64_t uAddr, uint32_t uData)
-{
-    /* Can't use PDMDevHlpPCISetIrqEx here as the PCI stuff is not aware of the MSI and MSI-X support of this device. */
-    /** @todo This isn't pretty as it accesses stuff internal to the PCI subsystem. */
-    PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
-    AssertPtrReturnVoid(pPciHlp);
-    PPDMDEVINS pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
-    AssertPtrReturnVoid(pDevInsBus);
-    PDEVPCIBUS pBus = PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS);
-    uint16_t const uBusDevFn = PCIBDF_MAKE(pBus->iBus, pPciDev->uDevFn);
-
-    MSIMSG Msi;
-    Msi.Addr.u64 = uAddr;
-    Msi.Data.u32 = uData;
-    pPciHlp->pfnIoApicSendMsi(pDevIns, uBusDevFn, &Msi, 0 /*uTagSrc*/);
-}
-
-
-/**
- * Returns the config space offset of the MSI message data register.
- *
- * The mask bits follow at +4 and the pending bits at +8 if the capability has
- * per-vector masking.
- *
- * @returns Config space offset.
- * @param   pFun        The function, which has to have an MSI capability.
- */
-DECLINLINE(uint32_t) pciVfioMsiGetDataOff(PCVFIOPCIFUN pFun)
-{
-    return pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL
-         + (pFun->fMsi64Bit ? VBOX_MSI_CAP_MESSAGE_DATA_64 : VBOX_MSI_CAP_MESSAGE_DATA_32);
-}
-
-
-/**
- * Checks whether an MSI vector can be delivered right now: MSI is enabled and
- * the vector is not masked.
- *
- * @returns true if the vector can be delivered, false if it has to be held back.
- * @param   pFun        The function.
- * @param   pPciDev     The PCI device of the function.
- * @param   idxVector   The vector.
- */
-DECLINLINE(bool) pciVfioMsiIsVectorOpen(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
-{
-    if (!(PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl) & VBOX_PCI_MSI_FLAGS_ENABLE))
-        return false;
-    return    !pFun->fMsiMaskable
-           || !(PDMPciDevGetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 4) & RT_BIT_32(idxVector));
-}
-
-
-/**
- * Sends the MSI message the guest has configured to the interrupt controller.
- *
- * @param   pDevIns     The device instance.
- * @param   pFun        The function raising the interrupt.
- * @param   pPciDev     The PCI device of the function.
- * @param   idxVector   The vector.
- */
-static void pciVfioMsiSend(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
-{
-    uint32_t const offCap = pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL;
-    uint64_t       uAddr  = PDMPciDevGetDWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO);
-    if (pFun->fMsi64Bit)
-        uAddr |= (uint64_t)PDMPciDevGetDWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI) << 32;
-
-    /* The vector number replaces the low bits of the message data, as many as the guest has enabled vectors for. */
-    uint32_t const cVectorsLog2 = (PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl) & VBOX_PCI_MSI_FLAGS_QSIZE) >> 4;
-    uint32_t const fVectorMask  = RT_BIT_32(RT_MIN(cVectorsLog2, 5)) - 1;
-    uint32_t const uData        =   (PDMPciDevGetWord(pPciDev, pciVfioMsiGetDataOff(pFun)) & ~fVectorMask)
-                                  | (idxVector & fVectorMask);
-
-    pciVfioMsgSend(pDevIns, pPciDev, uAddr, uData);
-}
-
-
-/**
- * Delivers an MSI vector if it is pending and can be delivered now.
- *
- * @param   pDevIns     The device instance.
- * @param   pFun        The function, which has to have an MSI capability with per-vector masking.
- * @param   pPciDev     The PCI device of the function.
- * @param   idxVector   The vector.
- */
-static void pciVfioMsiDeliverPending(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
-{
-    uint32_t volatile *pfPending = (uint32_t volatile *)&pPciDev->abConfig[pciVfioMsiGetDataOff(pFun) + 8];
-    if (   pciVfioMsiIsVectorOpen(pFun, pPciDev, idxVector)
-        && ASMAtomicBitTestAndClear(pfPending, (int32_t)idxVector))
-        pciVfioMsiSend(pDevIns, pFun, pPciDev, idxVector);
-}
-
-
-/**
- * Handles an MSI interrupt of the device: delivers it to the guest or records
- * it as pending if the guest has it masked.
- *
- * @param   pDevIns     The device instance.
- * @param   pFun        The function raising the interrupt.
- * @param   pPciDev     The PCI device of the function.
- * @param   idxVector   The vector.
- */
-static void pciVfioMsiRaise(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
-{
-    if (pciVfioMsiIsVectorOpen(pFun, pPciDev, idxVector))
-        pciVfioMsiSend(pDevIns, pFun, pPciDev, idxVector);
-    else if (pFun->fMsiMaskable)
-    {
-        /* The guest might be unmasking the vector right now, so look again after recording it. */
-        ASMAtomicBitSet((uint32_t volatile *)&pPciDev->abConfig[pciVfioMsiGetDataOff(pFun) + 8], (int32_t)idxVector);
-        pciVfioMsiDeliverPending(pDevIns, pFun, pPciDev, idxVector);
-    }
-    /* else: The guest has disabled MSI in the meantime, the interrupt is lost like on real hardware. */
-}
-
-
-/**
  * Sends the MSI-X message the guest has configured for a vector to the
  * interrupt controller.
  *
@@ -737,8 +608,21 @@ static void pciVfioMsiRaise(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pP
  */
 static void pciVfioMsixSend(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
 {
+    /* Can't use PDMDevHlpPCISetIrqEx here as the PCI stuff is not aware of MSI-X support. */
+    /** @todo This isn't pretty as it accesses stuff internal to the PCI subsystem. */
+    PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
+    AssertPtrReturnVoid(pPciHlp);
+    PPDMDEVINS pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
+    AssertPtrReturnVoid(pDevInsBus);
+    PDEVPCIBUS pBus = PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS);
+    uint16_t const uBusDevFn = PCIBDF_MAKE(pBus->iBus, pPciDev->uDevFn);
+
     PMSIXTBLENTRY pVec = &pFun->paMsixTbl[idxVector];
-    pciVfioMsgSend(pDevIns, pPciDev, ((uint64_t)pVec->u32MsgAddrUpper << 32) | pVec->u32MsgAddr, pVec->u32MsgData);
+    MSIMSG Msi;
+    Msi.Addr.u64 = ((uint64_t)pVec->u32MsgAddrUpper << 32) | pVec->u32MsgAddr;
+    Msi.Data.u32 = pVec->u32MsgData;
+
+    pPciHlp->pfnIoApicSendMsi(pDevIns, uBusDevFn, &Msi, 0 /*uTagSrc*/);
 }
 
 
@@ -1652,8 +1536,6 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
                     uint16_t const uVec = i - 1;
                     if (pFun->uIrqModeCur == VFIO_PCI_MSIX_IRQ_INDEX)
                         pciVfioMsixRaise(pDevIns, pFun, pPciDev, uVec);
-                    else if (pFun->uIrqModeCur == VFIO_PCI_MSI_IRQ_INDEX)
-                        pciVfioMsiRaise(pDevIns, pFun, pPciDev, uVec);
                     else
                         PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, uVec, 1);
 
@@ -2175,46 +2057,42 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
                 fSupported = true;
 
-                /*
-                 * The guest gets the capability with the layout it has on the device, so it
-                 * never extends into whatever follows in the config space.  The registers are
-                 * all emulated here, see pciVfioCfgEmulatedRegWrite() and pciVfioMsiRaise();
-                 * the MSI support of the PCI bus is not used as it knows one layout only.
-                 */
-                bool const    f64Bit    = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
-                bool const    fMaskable = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_MASKBIT);
-                uint8_t const offData   = offCap + (f64Bit ? VBOX_MSI_CAP_MESSAGE_DATA_64 : VBOX_MSI_CAP_MESSAGE_DATA_32);
-                cbCap = (uint8_t)(offData - offCap) + (fMaskable ? 2 + 2 + 4 + 4 : 2);
+                /* We always implement MSI with per-vector masking support, which determines the size of the capability. */
+                bool const f64Bit = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
+                cbCap = f64Bit ? VBOX_MSI_CAP_SIZE_64 : VBOX_MSI_CAP_SIZE_32;
                 if ((uint32_t)offCap + cbCap > 256)
                     return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
                                                N_("The MSI capability at offset %#x doesn't fit into the PCI config space"), offCap);
 
-                /* The message control register describes the device: the layout and as many vectors
-                   as VFIO has for us.  MSI starts out disabled. */
-                uint32_t cVectorsLog2 = (u16Mmc & VBOX_PCI_MSI_FLAGS_QMASK) >> 1;
-                while (cVectorsLog2 > 0 && RT_BIT_32(cVectorsLog2) > cVectors)
-                    cVectorsLog2--;
-                PDMPciDevSetWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,
-                                   (u16Mmc & (VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT))
-                                 | (uint16_t)(cVectorsLog2 << 1));
-                for (uint32_t off = offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO; off < (uint32_t)offCap + cbCap; off++)
-                    PDMPciDevSetByte(pPciDev, off, 0);
+                /* Add capability. */
+                PDMMSIREG MsiReg;
+                RT_ZERO(MsiReg);
+                MsiReg.cMsiVectors     = (uint16_t)cVectors;
+                MsiReg.iMsiCapOffset   = offCap;
+                MsiReg.iMsiNextOffset  = 0; /* Gets updated later. */
+                MsiReg.fMsi64bit       = f64Bit;
+                rc = PDMDevHlpPCIRegisterMsiEx(pDevIns, pPciDev, &MsiReg);
+                if (RT_FAILURE(rc))
+                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                               N_("Failed to register the MSI capability at offset %#x with %Rrc"), offCap, rc);
 
-                pciVfioCfgSpaceSetInterceptU16(pFun, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,    VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Message Control */
-                pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Message Address [Low] */
+                pciVfioCfgSpaceSetInterceptU16(pFun, offCap +  2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
+                pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address [Low] */
                 if (f64Bit)
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Message Address High */
-                pciVfioCfgSpaceSetInterceptU16(pFun, offData, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);          /* Message Data */
-                if (fMaskable)
                 {
-                    pciVfioCfgSpaceSetInterceptRoU16(pFun, offData + 2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);                                  /* Reserved */
-                    pciVfioCfgSpaceSetInterceptU32(  pFun, offData + 4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Mask */
-                    pciVfioCfgSpaceSetInterceptRoU32(pFun, offData + 8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);                                  /* Pending */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address High */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 20, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
+                }
+                else
+                {
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
                 }
 
-                pFun->offMsiCtrl   = offCap + 2;
-                pFun->fMsi64Bit    = f64Bit;
-                pFun->fMsiMaskable = fMaskable;
+                pFun->offMsiCtrl = offCap + 2;
                 break;
             }
             case VBOX_PCI_CAP_ID_CHSWP: LogRel(("VFIO#%d.%u: Cap[%#x]: CompactPCI Hot Swap -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap)); break;
@@ -2810,259 +2688,108 @@ DECLINLINE(uint16_t) pciVfioGetMsixCtrl(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
 
 
 /**
- * Finds the emulated config space register a byte belongs to.
- *
- * @returns true if the byte belongs to an emulated register, false if not.
- * @param   pFun        The function.
- * @param   off         The config space offset of the byte.
- * @param   poffReg     Where to return the config space offset of the register.
- * @param   pcbReg      Where to return the size of the register, 2 or 4.
- */
-static bool pciVfioCfgEmulatedRegLookup(PCVFIOPCIFUN pFun, uint32_t off, uint32_t *poffReg, uint32_t *pcbReg)
-{
-    uint32_t const cbU16 = sizeof(uint16_t);
-    uint32_t const cbU32 = sizeof(uint32_t);
-
-    uint32_t offReg = VBOX_PCI_COMMAND;
-    uint32_t cbReg  = cbU16;
-    if (off - offReg >= cbReg)
-    {
-        offReg = UINT32_MAX;
-        if (pFun->offMsiCtrl)
-        {
-            uint32_t const offCap  = pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL;
-            uint32_t const offData = pciVfioMsiGetDataOff(pFun);
-            if (off - pFun->offMsiCtrl < cbU16)
-            {
-                offReg = pFun->offMsiCtrl;
-                cbReg  = cbU16;
-            }
-            else if (off - (offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO) < cbU32)
-            {
-                offReg = offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO;
-                cbReg  = cbU32;
-            }
-            else if (   pFun->fMsi64Bit
-                     && off - (offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI) < cbU32)
-            {
-                offReg = offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI;
-                cbReg  = cbU32;
-            }
-            else if (off - offData < cbU16)
-            {
-                offReg = offData;
-                cbReg  = cbU16;
-            }
-            else if (   pFun->fMsiMaskable
-                     && off - (offData + 4) < cbU32)
-            {
-                offReg = offData + 4;
-                cbReg  = cbU32;
-            }
-        }
-        if (   offReg == UINT32_MAX
-            && pFun->offMsixCtrl
-            && off - pFun->offMsixCtrl < cbU16)
-        {
-            offReg = pFun->offMsixCtrl;
-            cbReg  = cbU16;
-        }
-        if (offReg == UINT32_MAX)
-            return false;
-    }
-
-    *poffReg = offReg;
-    *pcbReg  = cbReg;
-    return true;
-}
-
-
-/**
- * Handles the guest writing an emulated config space register.
- *
- * @param   pThis       The VFIO PCI device instance.
- * @param   pFun        The function.
- * @param   pPciDev     The PCI device of the function.
- * @param   offReg      The config space offset of the register as returned by pciVfioCfgEmulatedRegLookup().
- * @param   uValue      The new value of the whole register; what the guest did not write is the current content.
- */
-static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t offReg, uint32_t uValue)
-{
-    PPDMDEVINS pDevIns = pThis->pDevIns;
-
-    if (offReg == VBOX_PCI_COMMAND)
-    {
-        /* Map all the guest memory into the IOMMU as soon as the BUSMASTER bit is enabled. */
-        if (uValue & VBOX_PCI_COMMAND_MASTER)
-        {
-            int rc = pciVfioIommuGuestRamMap(pThis, pDevIns);
-            if (RT_FAILURE(rc))
-                LogRel(("VFIO#%d.%u: Failed to map guest RAM into IOMMU for device, expect broken device (%Rrc)\n",
-                        pThis->iInstance, pFun->uPciFun, rc));
-        }
-
-        /* The INTx disable bit decides whether INTx gets used when neither MSI nor MSI-X is enabled. */
-        pciVfioIrqUpdate(pThis, pFun, (uint16_t)uValue, pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
-
-        /* Now write to the device. */
-        int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, (uint16_t)uValue);
-        if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
-
-        /* The PCI bus does the rest, which includes updating the BAR mappings. */
-        VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
-        Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
-    }
-    else if (offReg == pFun->offMsixCtrl)
-    {
-        /* Only the enable and the function mask bit are writable, the rest describes the device. */
-        uint16_t const fMsixCtrlRw = VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK;
-        uint16_t const u16MsixCtrl = (uint16_t)(  (PDMPciDevGetWord(pPciDev, offReg) & ~fMsixCtrlRw)
-                                                | ((uint16_t)uValue & fMsixCtrlRw));
-        pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev), pciVfioGetMsiCtrl(pFun, pPciDev), u16MsixCtrl);
-
-        /* Now write to the device. */
-        int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsixCtrl);
-        if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
-        PDMPciDevSetWord(pPciDev, offReg, u16MsixCtrl);
-
-        /* Vectors held back by the function mask can go out now. */
-        for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
-            pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, i);
-    }
-    else if (offReg == pFun->offMsiCtrl)
-    {
-        /* Only the enable bit and the number of vectors to use are writable, the rest describes the device. */
-        uint16_t const fMsiCtrlRw = VBOX_PCI_MSI_FLAGS_ENABLE | VBOX_PCI_MSI_FLAGS_QSIZE;
-        uint16_t const u16MsiCtrl = (uint16_t)(  (PDMPciDevGetWord(pPciDev, offReg) & ~fMsiCtrlRw)
-                                               | ((uint16_t)uValue & fMsiCtrlRw));
-        pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev), u16MsiCtrl, pciVfioGetMsixCtrl(pFun, pPciDev));
-
-        /* Now write to the device. */
-        int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsiCtrl);
-        if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
-        PDMPciDevSetWord(pPciDev, offReg, u16MsiCtrl);
-    }
-    else
-    {
-        uint32_t const offCap  = pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL;
-        uint32_t const offData = pciVfioMsiGetDataOff(pFun);
-        if (offReg == offData)
-            PDMPciDevSetWord(pPciDev, offReg, (uint16_t)uValue);
-        else if (offReg == offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO)
-            PDMPciDevSetDWord(pPciDev, offReg, uValue & ~UINT32_C(3)); /* The bottom two bits are always zero. */
-        else if (   pFun->fMsi64Bit
-                 && offReg == offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI)
-            PDMPciDevSetDWord(pPciDev, offReg, uValue);
-        else
-        {
-            /* The mask bits: one for each vector of the device.  Vectors which got unmasked are sent what they have pending. */
-            Assert(pFun->fMsiMaskable && offReg == offData + 4);
-            uint32_t const cVectors = pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX];
-            PDMPciDevSetDWord(pPciDev, offReg, uValue & (uint32_t)(RT_BIT_64(cVectors) - 1));
-            for (uint32_t i = 0; i < cVectors; i++)
-                pciVfioMsiDeliverPending(pDevIns, pFun, pPciDev, i);
-        }
-    }
-}
-
-
-/**
  * @callback_method_impl{FNPCICONFIGWRITE}
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigWrite(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
                                                      uint32_t uAddress, unsigned cb, uint32_t u32Value)
 {
-    PVFIOPCI    pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
-    PVFIOPCIFUN pFun  = &pThis->aPciFuns[pPciDev->idxSubDev];
-    AssertReturn(cb <= sizeof(u32Value), VINF_SUCCESS);
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PVFIOPCIFUN pFun = &pThis->aPciFuns[pPciDev->idxSubDev];
 
-    /*
-     * The bytes of an access can be subject to different handling.  Take the access
-     * apart into runs of bytes which are handled the same way and, in the case of
-     * emulated registers, belong to the same register.
-     */
-    uint32_t offAccess = 0;
-    while (offAccess < cb)
+    /** @todo Only handles accesses with the same intercept config for now. */
+    uint8_t fWr = pciVfioCfgSpaceGetInterceptWr(pFun, uAddress);
+    for (uint8_t i = 1; i < cb; i++)
     {
-        uint32_t const offCfg = uAddress + offAccess;
-        uint8_t        fWr    = pciVfioCfgSpaceGetInterceptWr(pFun, offCfg);
-        uint32_t       offReg = 0;
-        uint32_t       cbReg  = 0;
-        if (   fWr == VFIO_PCI_CFG_SPACE_ACCESS_EMULATE
-            && !pciVfioCfgEmulatedRegLookup(pFun, offCfg, &offReg, &cbReg))
+        uint8_t fWrU8 = pciVfioCfgSpaceGetInterceptWr(pFun, uAddress + i);
+        if (fWr != fWrU8)
         {
-            AssertFailed();
-            fWr = VFIO_PCI_CFG_SPACE_ACCESS_INVALID;
+            LogRel(("VFIO#%d.%u: Complicated PCI config space write at offset %#x (+ %u) intercept %u vs %u\n",
+                    pThis->iInstance, pFun->uPciFun, uAddress, i, fWr, fWrU8));
+            return VINF_SUCCESS;
         }
-
-        uint32_t cbRun = 1;
-        while (   offAccess + cbRun < cb
-               && pciVfioCfgSpaceGetInterceptWr(pFun, offCfg + cbRun) == fWr
-               && (   fWr != VFIO_PCI_CFG_SPACE_ACCESS_EMULATE
-                   || offCfg + cbRun < offReg + cbReg))
-            cbRun++;
-        uint32_t const fRunMask = cbRun < sizeof(uint32_t) ? RT_BIT_32(cbRun * 8) - 1 : UINT32_MAX;
-        uint32_t const uRun     = (u32Value >> (offAccess * 8)) & fRunMask;
-
-        switch (fWr)
-        {
-            case VFIO_PCI_CFG_SPACE_ACCESS_INVALID:
-                Log(("VFIO#%d.%u: Invalid PCI config write at offset %#x LB %u, ignoring\n",
-                     pThis->iInstance, pFun->uPciFun, offCfg, cbRun));
-                break;
-
-            case VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH:
-            case VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT:
-            {
-                /* Hand it on in naturally aligned pieces of one, two or four bytes. */
-                uint32_t offRun = 0;
-                while (offRun < cbRun)
-                {
-                    uint32_t const offPiece = offCfg + offRun;
-                    uint32_t const cbLeft   = cbRun - offRun;
-                    uint32_t const cbPiece  = (offPiece & 1) || cbLeft == 1       ? 1
-                                            : (offPiece & 2) || cbLeft < 4        ? 2
-                                            :                                       4;
-                    uint32_t const uPiece   = (uRun >> (offRun * 8)) & (cbPiece < sizeof(uint32_t) ? RT_BIT_32(cbPiece * 8) - 1 : UINT32_MAX);
-                    if (fWr == VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH)
-                    {
-                        int rc = pciVfioConfigPassthroughWrite(pFun, offPiece, cbPiece, uPiece);
-                        if (RT_FAILURE(rc))
-                            LogRelMax(32, ("VFIO#%d.%u: Failed to passthrough PCI config write at offset %#x LB %u (%Rrc)\n",
-                                           pThis->iInstance, pFun->uPciFun, offPiece, cbPiece, rc));
-                    }
-                    else
-                    {
-                        VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, offPiece, cbPiece, uPiece);
-                        Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
-                    }
-                    offRun += cbPiece;
-                }
-                break;
-            }
-
-            case VFIO_PCI_CFG_SPACE_ACCESS_EMULATE:
-            {
-                /* Merge what is written into the current content of the register. */
-                uint32_t const cShift = (offCfg - offReg) * 8;
-                uint32_t       uReg   = cbReg == sizeof(uint16_t) ? PDMPciDevGetWord(pPciDev, offReg) : PDMPciDevGetDWord(pPciDev, offReg);
-                uReg = (uReg & ~(fRunMask << cShift)) | (uRun << cShift);
-                pciVfioCfgEmulatedRegWrite(pThis, pFun, pPciDev, offReg, uReg);
-                break;
-            }
-
-            default:
-                AssertFailed();
-                break;
-        }
-
-        offAccess += cbRun;
     }
 
-    return VINF_SUCCESS;
+    int rc = VINF_SUCCESS;
+    switch (fWr)
+    {
+        case VFIO_PCI_CFG_SPACE_ACCESS_INVALID:
+        {
+            LogRel(("VFIO#%d.%u: Invalid PCI config write at offset %#x, ignoring\n",
+                    pThis->iInstance, pFun->uPciFun, uAddress));
+            break;
+        }
+        case VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH:
+        {
+            rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
+            break;
+        }
+        case VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT:
+            return VINF_PDM_PCI_DO_DEFAULT;
+        case VFIO_PCI_CFG_SPACE_ACCESS_EMULATE:
+        {
+            /* Map all the guest memory into the IOMMU as soon as the BUSMASTER bit is enabled. */
+            if (uAddress == VBOX_PCI_COMMAND)
+            {
+                if (u32Value & RT_BIT(2))
+                {
+                    rc = pciVfioIommuGuestRamMap(pThis, pDevIns);
+                    if (RT_FAILURE(rc))
+                        LogRel(("VFIO#%d.%u: Failed to map guest RAM into IOMMU for device, expect broken device (%Rrc)\n",
+                                pThis->iInstance, pFun->uPciFun, rc));
+                }
+
+                /* The INTx disable bit decides whether INTx gets used when neither MSI nor MSI-X is enabled. */
+                uint16_t u16Cmd = (uint16_t)u32Value;
+                if (cb < sizeof(uint16_t))
+                    u16Cmd = (uint16_t)((PDMPciDevGetCommand(pPciDev) & UINT16_C(0xff00)) | (u16Cmd & UINT16_C(0x00ff)));
+                pciVfioIrqUpdate(pThis, pFun, u16Cmd, pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
+
+                /* Now write to the device. */
+                rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
+                if (RT_FAILURE(rc))
+                    LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
+                rc = VINF_PDM_PCI_DO_DEFAULT; /* Need to update BAR mappings. */
+            }
+            else if (   pFun->offMsiCtrl == uAddress
+                     && cb == sizeof(uint16_t))
+            {
+                pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev), (uint16_t)u32Value, pciVfioGetMsixCtrl(pFun, pPciDev));
+
+                /* Now write to the device. */
+                rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
+                if (RT_FAILURE(rc))
+                    LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
+                rc = VINF_PDM_PCI_DO_DEFAULT; /* Need to update our internal MSI state. */
+            }
+            else if (   pFun->offMsixCtrl == uAddress
+                     && cb == sizeof(uint16_t))
+            {
+                /* Only the enable and the function mask bit are writable, the rest describes the device. */
+                uint16_t const fMsixCtrlRw = VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK;
+                uint16_t const u16MsixCtrl = (uint16_t)(  (PDMPciDevGetWord(pPciDev, uAddress) & ~fMsixCtrlRw)
+                                                        | ((uint16_t)u32Value & fMsixCtrlRw));
+                pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev), pciVfioGetMsiCtrl(pFun, pPciDev), u16MsixCtrl);
+
+                /* Now write to the device. */
+                rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u16MsixCtrl);
+                if (RT_FAILURE(rc))
+                    LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
+                PDMPciDevSetWord(pPciDev, uAddress, u16MsixCtrl);
+
+                /* Vectors held back by the function mask can go out now. */
+                for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
+                    pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, i);
+                rc = VINF_SUCCESS;
+            }
+            else
+                AssertFailed();
+            break;
+        }
+        default:
+            AssertReleaseFailed();
+    }
+
+    return rc;
 }
 
 
@@ -3361,9 +3088,9 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
             AssertLogRelMsg(!rcLnx, ("VFIO#%d.%u: Failed to reset device %d\n", pThis->iInstance, pFun->uPciFun, errno));
 
             /*
-             * The device comes out of the reset with MSI and MSI-X disabled and all MSI-X
-             * vectors masked.  The PCI bus takes care of the command register, the MSI and
-             * MSI-X state is ours.
+             * The device comes out of the reset with MSI-X disabled and all vectors masked.
+             * The PCI bus takes care of the command register and of the MSI capability,
+             * the MSI-X state is ours.
              */
             if (pFun->offMsixCtrl)
             {
@@ -3373,17 +3100,6 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
                 for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
                     pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
                 RT_BZERO((void *)pFun->pbmMsixPba, pFun->cbMsixPba);
-            }
-            if (pFun->offMsiCtrl)
-            {
-                PDMPciDevSetWord(pPciDev, pFun->offMsiCtrl,
-                                   PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl)
-                                 & ~(VBOX_PCI_MSI_FLAGS_ENABLE | VBOX_PCI_MSI_FLAGS_QSIZE));
-                if (pFun->fMsiMaskable)
-                {
-                    PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 4, 0); /* Mask */
-                    PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 8, 0); /* Pending */
-                }
             }
 
             /* Bring the interrupt setup of the device in line with that. */
