@@ -1412,17 +1412,6 @@ static DECLCALLBACK(int) tstPdmHlp_VMSetErrorV(PPDMDEVINS pDevIns, int rc, RT_SR
 }
 
 
-/** @interface_method_impl{PDMDEVHLPR3,pfnVMSetError} */
-static DECLCALLBACK(int) tstPdmHlp_VMSetError(PPDMDEVINS pDevIns, int rc, RT_SRC_POS_DECL, const char *pszFormat, ...)
-{
-    va_list va;
-    va_start(va, pszFormat);
-    tstPdmHlp_VMSetErrorV(pDevIns, rc, RT_SRC_POS_ARGS, pszFormat, va);
-    va_end(va);
-    return rc;
-}
-
-
 /** @interface_method_impl{PDMDEVHLPR3,pfnCritSectGetNop} */
 static DECLCALLBACK(PPDMCRITSECT) tstPdmHlp_CritSectGetNop(PPDMDEVINS pDevIns)
 {
@@ -1516,7 +1505,6 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnPCISetIrqNoWait                 = tstPdmHlp_PCISetIrq;
     g_tstPdmDevHlpR3.pfnThreadCreate                    = tstPdmHlp_ThreadCreate;
     g_tstPdmDevHlpR3.pfnVMSetErrorV                     = tstPdmHlp_VMSetErrorV;
-    g_tstPdmDevHlpR3.pfnVMSetError                      = tstPdmHlp_VMSetError;
     g_tstPdmDevHlpR3.pfnCritSectGetNop                  = tstPdmHlp_CritSectGetNop;
     g_tstPdmDevHlpR3.pfnSetDeviceCritSect               = tstPdmHlp_SetDeviceCritSect;
     g_tstPdmDevHlpR3.pfnSSMRegister                     = tstPdmHlp_SSMRegister;
