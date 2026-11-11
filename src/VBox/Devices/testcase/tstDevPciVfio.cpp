@@ -504,8 +504,8 @@ static void tstMsixDedicatedBar(void)
     tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
     tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
     tstModelSetBar(&Model, 2, _8K, PCI_ADDRESS_SPACE_MEM);
-    tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
     tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+    tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
 
     PTSTVFIODEV pDev = NULL;
     int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
