@@ -7,7 +7,7 @@ Updated: 2026-11-11
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `b27efb27` (9 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `cb26af23` (10 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -16,8 +16,9 @@ Updated: 2026-11-11
 
 WP2 hardening, continued. Done so far: interrupt setup; MSI-X table and
 pending bits; memory BARs in segments; capability lists; MSI capability;
-config space writes; DMA mapping; guest access paths. Next: configuration
-validation and cleanup paths, reset, documentation, sanitizer and fuzz runs.
+config space writes; DMA mapping; guest access paths; configuration
+validation and cleanup. Next: reset and command register handling,
+documentation, sanitizer and fuzz runs.
 
 ## Done
 
@@ -84,13 +85,22 @@ validation and cleanup paths, reset, documentation, sanitizer and fuzz runs.
   - config space handling settings replace each other instead of mixing;
     the device quirk for a config space range leaves capabilities alone;
   - no release assertion is left in the config space read path.
+- WP2, part 7 (commit `cb26af23`):
+  - the host address of a function has to be a PCI address before it is
+    used in paths;
+  - all file descriptors are close-on-exec;
+  - the option for trapping memory BAR accesses is read where it is
+    declared;
+  - checks which are not system calls no longer take their status from
+    errno;
+  - the destructor only undoes what was set up.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 34) |
+| Test | Before the fix | With fixes (run 41) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -114,6 +124,10 @@ Each new test was first run against the device without the fix it belongs to.
 | Legacy VGA ranges of a graphics device | fails, 8 checks (runs 37, 38) | pass |
 | Device quirk for a config space range, with and without a capability in it | the process aborts (run 37) | pass |
 | BAR which can not be written | the process crashes (run 38) | pass |
+| File descriptors are not inherited by child processes | fails, 1 check (run 42) | pass |
+| Memory BAR with all accesses trapped on request | fails, 1 check (run 42) | pass |
+| Device without IOMMU, device which is not PCI | pass | pass |
+| Host address which is not a PCI address | fails, 10 checks (run 42) | pass |
 
 ## Test harness (WP1)
 
@@ -141,11 +155,11 @@ device, saved-state stream, legacy group/container API.
 
 ## Next (WP2 continued)
 
-1. Configuration validation and cleanup: device address strings, descriptor
-   flags, explicit no-IOMMU check, destructor and error paths.
-2. Reset: device state after a failed reset, multi-function devices.
-3. Documentation block of the device.
-4. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
+1. Reset: device state after a failed reset, devices with several
+   functions; order of device and guest side updates when the guest changes
+   the command register; trapped BAR accesses through the device file.
+2. Documentation block of the device.
+3. Sanitizer flavor (ASan/UBSan) in CI; fuzz target (T2).
 
 ## Decisions
 
@@ -170,7 +184,7 @@ device, saved-state stream, legacy group/container API.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 22 tests | `b27efb27` | all pass (run 34) |
+| T1 unit | running in CI, 26 tests | `cb26af23` | all pass (run 41) |
 | T2 fuzz | not started | | |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
@@ -209,5 +223,8 @@ device, saved-state stream, legacy group/container API.
 | 35, 36 | `scratch/red-evidence-7`, `-8` | tests | cancelled | superseded by 37 and 38 |
 | 37 | `scratch/red-evidence-7` | tests | failed as intended | access path tests against the driver before the change, quirk test last |
 | 38 | `scratch/red-evidence-8` | tests | failed as intended | same with the read-only BAR test last |
+| 39, 40 | `scratch/config`, `scratch/red-evidence-9` | tests | failed | a mistake in the fake kernel (copies of eventfds lost a flag) |
+| 41 | code branch @ `cb26af23` (as `scratch/config`) | tests | passed | 26 tests |
+| 42 | `scratch/red-evidence-9` | tests | failed as intended | configuration tests against the driver before the change, 12 failed checks |
 
 Run numbers are those GitHub shows for the `build` workflow.
