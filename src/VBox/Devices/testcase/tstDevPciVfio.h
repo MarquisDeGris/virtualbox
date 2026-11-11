@@ -161,6 +161,7 @@ int             tstPdmIoPortRead(RTIOPORT uPort, uint32_t *pu32, unsigned cb);
 int             tstPdmIoPortWrite(RTIOPORT uPort, uint32_t u32, unsigned cb);
 int             tstPdmPhysRead(RTGCPHYS GCPhys, void *pv, unsigned cb);
 int             tstPdmPhysWrite(RTGCPHYS GCPhys, const void *pv, unsigned cb);
+int             tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned cItems);
 uint32_t        tstPdmPciCfgRead(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, unsigned cb);
 void            tstPdmPciCfgWrite(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, uint32_t u32, unsigned cb);
 const char     *tstPdmGetLastError(void);

@@ -761,22 +761,40 @@ static int tstVfioKrnlOpen(const char *pszPath)
 
 
 /**
- * Checks whether the file descriptor refers to a PCI function which is gone.
+ * Checks a read from or a write to a file descriptor the way the kernel does
+ * it for a device: the device has to be there and the region has to allow it.
  *
- * @returns true if I/O has to fail, false if it can go ahead.
+ * @returns 0 if the access may go ahead, which is also the case for file
+ *          descriptors which are not ours, an errno value if not.
  * @param   iFd                 The file descriptor.
+ * @param   off                 Offset of the access.
+ * @param   fWrite              Whether this is a write (true) or a read (false).
  */
-static bool tstVfioKrnlIsFdOfGoneDev(int iFd)
+static int tstVfioKrnlCheckFdAccess(int iFd, off_t off, bool fWrite)
 {
-    bool fGone = false;
+    int iErrno = 0;
     if (g_Krnl.fInitialized)
     {
         RTCritSectEnter(&g_Krnl.CritSect);
         PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
-        fGone = pFd && pFd->enmType == TSTVFIOFDTYPE_DEVICE && pFd->pDev->fGone;
+        if (pFd && pFd->enmType == TSTVFIOFDTYPE_DEVICE)
+        {
+            PTSTVFIODEV    pDev      = pFd->pDev;
+            uint64_t const idxRegion = (uint64_t)off >> TSTVFIO_REGION_SHIFT;
+            uint64_t const offRegion = (uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1);
+            if (pDev->fGone)
+                iErrno = ENODEV;
+            else if (   idxRegion >= TSTVFIO_REGION_COUNT
+                     || offRegion >= pDev->acbRegions[idxRegion])
+                iErrno = EINVAL;
+            else if (   idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
+                     && !(  pDev->Cfg.aRegions[idxRegion].fFlags
+                          & (fWrite ? VFIO_REGION_INFO_FLAG_WRITE : VFIO_REGION_INFO_FLAG_READ)))
+                iErrno = EINVAL;
+        }
         RTCritSectLeave(&g_Krnl.CritSect);
     }
-    return fGone;
+    return iErrno;
 }
 
 
@@ -1236,32 +1254,36 @@ int __wrap_ioctl(int iFd, unsigned long uReq, ...)
 
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off)
 {
-    if (tstVfioKrnlIsFdOfGoneDev(iFd))
-        return errno = ENODEV, -1;
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
     return __real_pread(iFd, pvBuf, cbBuf, off);
 }
 
 
 ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off)
 {
-    if (tstVfioKrnlIsFdOfGoneDev(iFd))
-        return errno = ENODEV, -1;
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
     return __real_pread64(iFd, pvBuf, cbBuf, off);
 }
 
 
 ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
 {
-    if (tstVfioKrnlIsFdOfGoneDev(iFd))
-        return errno = ENODEV, -1;
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
     return __real_pwrite(iFd, pvBuf, cbBuf, off);
 }
 
 
 ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
 {
-    if (tstVfioKrnlIsFdOfGoneDev(iFd))
-        return errno = ENODEV, -1;
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
     return __real_pwrite64(iFd, pvBuf, cbBuf, off);
 }
 
@@ -1274,9 +1296,10 @@ ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
  * @returns true if the mapping can go ahead, false if it has to be refused.
  * @param   iFd                 The file descriptor.
  * @param   cb                  Size of the mapping.
+ * @param   fProt               The protection asked for.
  * @param   off                 Offset of the mapping.
  */
-static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, off_t off)
+static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, int fProt, off_t off)
 {
     bool fAllowed = true;
     if (g_Krnl.fInitialized)
@@ -1294,6 +1317,10 @@ static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, off_t off)
                 fAllowed =    idxRegion < TSTVFIO_REGION_COUNT
                            && idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
                            && (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_MMAP)
+                           && (   !(fProt & PROT_READ)
+                               || (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_READ))
+                           && (   !(fProt & PROT_WRITE)
+                               || (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_WRITE))
                            && offRegion + cb <= RT_ALIGN_64(pDev->acbRegions[idxRegion], TSTVFIO_PAGE_SIZE);
             }
         }
@@ -1305,7 +1332,7 @@ static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, off_t off)
 
 void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
 {
-    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, off))
+    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
     {
         errno = EINVAL;
         return MAP_FAILED;
@@ -1316,7 +1343,7 @@ void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t
 
 void *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
 {
-    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, off))
+    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
     {
         errno = EINVAL;
         return MAP_FAILED;
