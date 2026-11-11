@@ -633,6 +633,8 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
                 return errno = EINVAL, -1;
             if (!tstVfioKrnlIoasExists(pAttach->pt_id))
                 return errno = ENOENT, -1;
+            if (pDev->Cfg.fNoIommu) /* Binding it went fine, but there is nothing to attach. */
+                return errno = EINVAL, -1;
             pDev->idIoas = pAttach->pt_id;
             return 0;
         }
@@ -651,7 +653,7 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
             struct vfio_device_info *pInfo = (struct vfio_device_info *)pvArg;
             if (pInfo->argsz < RT_UOFFSETOF(struct vfio_device_info, cap_offset))
                 return errno = EINVAL, -1;
-            pInfo->flags       = VFIO_DEVICE_FLAGS_PCI | VFIO_DEVICE_FLAGS_RESET;
+            pInfo->flags       = (pDev->Cfg.fNotPci ? RT_BIT_32(2) /* a platform device */ : VFIO_DEVICE_FLAGS_PCI) | VFIO_DEVICE_FLAGS_RESET;
             pInfo->num_regions = TSTVFIO_REGION_COUNT;
             pInfo->num_irqs    = TSTVFIO_IRQ_INDEX_COUNT;
             if (pInfo->argsz >= sizeof(*pInfo))
@@ -705,8 +707,9 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
  *
  * @returns File descriptor, -1 with errno set on failure, -2 if the path is not ours.
  * @param   pszPath             The path being opened.
+ * @param   fFlags              The open flags, O_CLOEXEC is honoured.
  */
-static int tstVfioKrnlOpen(const char *pszPath)
+static int tstVfioKrnlOpen(const char *pszPath, int fFlags)
 {
     if (!g_Krnl.fInitialized || !pszPath)
         return -2;
@@ -756,6 +759,8 @@ static int tstVfioKrnlOpen(const char *pszPath)
             }
     }
     RTCritSectLeave(&g_Krnl.CritSect);
+    if (iFd != -1 && (fFlags & O_CLOEXEC))
+        fcntl(iFd, F_SETFD, FD_CLOEXEC);
     return iFd;
 }
 
@@ -1067,6 +1072,32 @@ uint32_t tstVfioKrnlGetOpenFdCount(void)
 
 
 /**
+ * Counts the file descriptors a process started by this one would inherit:
+ * those of the fake kernel and the eventfds registered for interrupts.
+ *
+ * @returns Number of file descriptors without the close-on-exec flag.
+ */
+uint32_t tstVfioKrnlGetInheritableFdCount(void)
+{
+    uint32_t cFds = 0;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+        if (   g_Krnl.aFds[i].enmType != TSTVFIOFDTYPE_FREE
+            && !(fcntl(g_Krnl.aFds[i].iFd, F_GETFD) & FD_CLOEXEC))
+            cFds++;
+    for (uint32_t iDev = 0; iDev < g_Krnl.cDevs; iDev++)
+        for (uint32_t uIrqIndex = 0; uIrqIndex < RT_ELEMENTS(g_Krnl.aDevs[iDev].apaiIrqFds); uIrqIndex++)
+            if (g_Krnl.aDevs[iDev].apaiIrqFds[uIrqIndex])
+                for (uint32_t i = 0; i < g_Krnl.aDevs[iDev].Cfg.acIrqs[uIrqIndex]; i++)
+                    if (   g_Krnl.aDevs[iDev].apaiIrqFds[uIrqIndex][i] != -1
+                        && !(fcntl(g_Krnl.aDevs[iDev].apaiIrqFds[uIrqIndex][i], F_GETFD) & FD_CLOEXEC))
+                        cFds++;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cFds;
+}
+
+
+/**
  * Returns the number of bytes mapped for DMA in all I/O address spaces.
  *
  * @returns Number of bytes.
@@ -1142,7 +1173,7 @@ void tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno)
 
 int __wrap_open(const char *pszPath, int fFlags, ...)
 {
-    int iFd = tstVfioKrnlOpen(pszPath);
+    int iFd = tstVfioKrnlOpen(pszPath, fFlags);
     if (iFd != -2)
         return iFd;
 
@@ -1160,7 +1191,7 @@ int __wrap_open(const char *pszPath, int fFlags, ...)
 
 int __wrap_open64(const char *pszPath, int fFlags, ...)
 {
-    int iFd = tstVfioKrnlOpen(pszPath);
+    int iFd = tstVfioKrnlOpen(pszPath, fFlags);
     if (iFd != -2)
         return iFd;
 

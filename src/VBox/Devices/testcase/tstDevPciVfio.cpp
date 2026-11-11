@@ -294,6 +294,11 @@ static uint8_t  g_bTstExecEngine      = VM_EXEC_ENGINE_NATIVE_API;
 static uint32_t g_cTstFailIoasMapSkip = UINT32_MAX;
 /** Whether tstFixtureSetup() configures function 0 to expose the legacy VGA ranges. */
 static bool     g_fTstExposeVga       = false;
+/** Whether tstFixtureSetup() configures function 0 to trap all memory BAR accesses. */
+static bool     g_fTstInterceptMmio   = false;
+/** The host address tstFixtureSetup() configures for function 0 instead of the
+ * device node, NULL for configuring the device node. */
+static const char *g_pszTstHostAddressFun0 = NULL;
 
 
 /**
@@ -354,9 +359,14 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
         RTStrPrintf(szName, sizeof(szName), "Fun%u", i);
         PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, szName);
         const char *pszVfioPath = i == 0 && pszVfioPathFun0 ? pszVfioPathFun0 : paModels[i].szNode;
-        RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", pszVfioPath), VINF_SUCCESS);
+        if (i == 0 && g_pszTstHostAddressFun0)
+            RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "HostAddress", g_pszTstHostAddressFun0), VINF_SUCCESS);
+        else
+            RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", pszVfioPath), VINF_SUCCESS);
         if (i == 0 && g_fTstExposeVga)
             RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "ExposeVga", 1), VINF_SUCCESS);
+        if (i == 0 && g_fTstInterceptMmio)
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "InterceptMmio", 1), VINF_SUCCESS);
     }
     rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, NULL);
     if (RT_SUCCESS(rc))
@@ -814,6 +824,137 @@ static void tstReadOnlyBar(void)
         }
     }
     tstFixtureTeardown();
+}
+
+
+/**
+ * None of the file descriptors the device uses are handed on to processes
+ * started by the VM process.
+ */
+static void tstFdsNotInherited(void)
+{
+    RTTestISub("File descriptors are not inherited by child processes");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* With MSI enabled the kernel has the eventfds of all four vectors. */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | (2 << 4) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 4);
+
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetInheritableFdCount() == 0,
+                          ("%u file descriptor(s) would be inherited\n", tstVfioKrnlGetInheritableFdCount()));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * The per function option for trapping all memory BAR accesses: the guest
+ * gets no direct mapping and the BAR works all the same.
+ */
+static void tstInterceptMmio(void)
+{
+    RTTestISub("Memory BAR with all accesses trapped on request");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    g_fTstInterceptMmio = true;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    g_fTstInterceptMmio = false;
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+        RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR), ("the BAR is mapped into the guest\n"));
+
+        uint32_t *pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR0_REGION_INDEX);
+        RTTESTI_CHECK(pau32Bar0 != NULL);
+        if (pau32Bar0)
+        {
+            pau32Bar0[4] = UINT32_C(0xfeedface);
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + 16, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0xfeedface), ("read %#RX32 from BAR0\n", u32));
+
+            u32 = UINT32_C(0x12345678);
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + 32, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(pau32Bar0[8] == UINT32_C(0x12345678), ("device sees %#RX32 in BAR0\n", pau32Bar0[8]));
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Devices which must be refused: one without an IOMMU behind it, and one
+ * which VFIO doesn't report as a PCI device.
+ */
+static void tstUnsuitableDevices(void)
+{
+    RTTestISub("Device without IOMMU, device which is not PCI");
+
+    for (uint32_t iVariant = 0; iVariant < 2; iVariant++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        Model.fNoIommu = iVariant == 0;
+        Model.fNotPci  = iVariant == 1;
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("variant %u: the VM construction succeeded: %Rrc\n", iVariant, rc));
+        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("variant %u: no VM error was set\n", iVariant));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == 0,
+                          ("variant %u: %RU64 bytes mapped for DMA\n", iVariant, tstVfioKrnlGetDmaMappedBytes()));
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * The host address of a function ends up in paths, so only a PCI address is
+ * accepted for it.
+ */
+static void tstHostAddress(void)
+{
+    RTTestISub("Host address which is not a PCI address");
+
+    static const char * const s_apszAddresses[] =
+    {
+        "",
+        "0000:0a:00",
+        "0000:0a:00.8",
+        "0000:0a:00.1x",
+        "000g:0a:00.1",
+        "0000-0a-00.1",
+        "../../../../tmp",
+        "0000:0a:00.1/../../../../../tmp",
+        "/dev/vfio/devices/vfio0"
+    };
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_apszAddresses); i++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        g_pszTstHostAddressFun0 = s_apszAddresses[i];
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_pszTstHostAddressFun0 = NULL;
+        RTTESTI_CHECK_MSG(rc == VERR_INVALID_PARAMETER, ("'%s': %Rrc - %s\n", s_apszAddresses[i], rc, tstPdmGetLastError()));
+        if (pDev)
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("'%s': the device was opened\n", s_apszAddresses[i]));
+        tstFixtureTeardown();
+    }
 }
 
 
@@ -1673,6 +1814,10 @@ int main()
     tstVga();
     tstQuirkConfigRange();
     tstReadOnlyBar();
+    tstFdsNotInherited();
+    tstInterceptMmio();
+    tstUnsuitableDevices();
+    tstHostAddress();
 
     return RTTestSummaryAndDestroy(hTest);
 }
