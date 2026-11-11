@@ -558,7 +558,11 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
                 int iFdNew = -1;
                 if (paiNew[i] != -1)
                 {
-                    iFdNew = dup(paiNew[i]);
+                    /* The copy stands for the eventfd of the caller, so it takes over its close-on-exec flag. */
+                    int const fFdFlags = fcntl(paiNew[i], F_GETFD);
+                    if (fFdFlags == -1)
+                        return -1;
+                    iFdNew = fcntl(paiNew[i], fFdFlags & FD_CLOEXEC ? F_DUPFD_CLOEXEC : F_DUPFD, 0);
                     if (iFdNew == -1)
                         return -1;
                 }
