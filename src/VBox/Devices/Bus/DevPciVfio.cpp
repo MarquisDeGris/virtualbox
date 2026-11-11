@@ -879,11 +879,6 @@ static void pciVfioMsixTblWrite(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDE
  * Reads from or writes to the device memory behind a memory BAR on behalf of
  * the guest.
  *
- * This always goes through the device file, also for a BAR which is mapped
- * into this process.  The host kernel takes the mapping away at times, while
- * the device doesn't decode memory for instance, and touching it then gets the
- * process a signal.  An access through the device file just fails.
- *
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function.
  * @param   pBar        The BAR.
@@ -895,7 +890,37 @@ static void pciVfioMsixTblWrite(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDE
 static void pciVfioBarDevAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCVFIOPCIBAR pBar, uint64_t offBar, void *pv, size_t cb,
                                 bool fWrite)
 {
-    pciVfioFdAccess(pThis, pFun, pBar->offVfio + offBar, pv, cb, fWrite);
+    if (pBar->pvMmio)
+    {
+        /* Device registers have to be accessed with the width the guest uses. */
+        volatile uint8_t *pb = (volatile uint8_t *)pBar->pvMmio + offBar;
+        if (fWrite)
+            switch (cb)
+            {
+                case 1: *pb                       = *(uint8_t const *)pv;  break;
+                case 2: *(volatile uint16_t *)pb  = *(uint16_t const *)pv; break;
+                case 4: *(volatile uint32_t *)pb  = *(uint32_t const *)pv; break;
+                case 8: *(volatile uint64_t *)pb  = *(uint64_t const *)pv; break;
+                default:
+                    for (size_t i = 0; i < cb; i++)
+                        pb[i] = ((uint8_t const *)pv)[i];
+                    break;
+            }
+        else
+            switch (cb)
+            {
+                case 1: *(uint8_t *)pv  = *pb;                      break;
+                case 2: *(uint16_t *)pv = *(volatile uint16_t *)pb; break;
+                case 4: *(uint32_t *)pv = *(volatile uint32_t *)pb; break;
+                case 8: *(uint64_t *)pv = *(volatile uint64_t *)pb; break;
+                default:
+                    for (size_t i = 0; i < cb; i++)
+                        ((uint8_t *)pv)[i] = pb[i];
+                    break;
+            }
+    }
+    else /* The region is not mapped, go through the device file descriptor. */
+        pciVfioFdAccess(pThis, pFun, pBar->offVfio + offBar, pv, cb, fWrite);
 }
 
 
@@ -2962,29 +2987,13 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
         /* The INTx disable bit decides whether INTx gets used when neither MSI nor MSI-X is enabled. */
         pciVfioIrqUpdate(pThis, pFun, (uint16_t)uValue, pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
 
-        /*
-         * The host kernel takes the mappings of the BARs away while the device doesn't
-         * decode its I/O ports or memory.  The guest must not be left with a mapping
-         * which got unusable, so the order matters: the PCI bus removes the guest
-         * mappings of what gets disabled, then the device is written to, and then the
-         * PCI bus does the rest, which includes creating the guest mappings of what
-         * got enabled.
-         */
-        uint16_t const fDecode  = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY;
-        uint16_t const u16Old   = PDMPciDevGetCommand(pPciDev);
-        uint16_t const u16First = (uint16_t)((u16Old & ~fDecode) | (u16Old & uValue & fDecode));
-        VBOXSTRICTRC rcStrict;
-        if (u16First != u16Old)
-        {
-            rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16First);
-            Assert(rcStrict == VINF_SUCCESS);
-        }
-
+        /* Now write to the device. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, (uint16_t)uValue);
         if (RT_FAILURE(rc))
             LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
 
-        rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
+        /* The PCI bus does the rest, which includes updating the BAR mappings. */
+        VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
         Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
     }
     else if (offReg == pFun->offMsixCtrl)
@@ -3474,142 +3483,53 @@ static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPC
 
 
 /**
- * Resets all functions of the device by resetting the bus they are on.
- *
- * The host kernel only does this if everything affected by it is ours.
- *
- * @returns VBox status code.
- * @param   pThis       The VFIO PCI device instance.
- */
-static int pciVfioBusReset(PVFIOPCI pThis)
-{
-    /* Any function will do for asking. */
-    PCVFIOPCIFUN pFun = NULL;
-    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns) && !pFun; iPciFun++)
-        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
-            pFun = &pThis->aPciFuns[iPciFun];
-    AssertReturn(pFun, VERR_INVALID_STATE);
-
-    struct
-    {
-        struct vfio_pci_hot_reset   Hdr;
-        int32_t                     iFdGroup;
-    } Req;
-    AssertCompile(sizeof(Req) == sizeof(struct vfio_pci_hot_reset) + sizeof(int32_t));
-    RT_ZERO(Req);
-    if (pThis->fVfioLegacy)
-    {
-        /* The group is the proof of owning what is affected. */
-        Req.Hdr.argsz = sizeof(Req);
-        Req.Hdr.count = 1;
-        Req.iFdGroup  = pThis->VfioGroup.iFdVfioGroup;
-    }
-    else
-    {
-        /* The kernel goes by the IOMMUFD context the functions are bound to. */
-        Req.Hdr.argsz = sizeof(Req.Hdr);
-        Req.Hdr.count = 0;
-    }
-
-    int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_PCI_HOT_RESET, &Req);
-    if (rcLnx == -1)
-        return RTErrConvertFromErrno(errno);
-    return VINF_SUCCESS;
-}
-
-
-/**
  * @interface_method_impl{PDMDEVREG,pfnReset}
  */
 static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
 {
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
 
-    /*
-     * Make the functions keep quiet first: no bus mastering, no decoding and no
-     * interrupts.  This is what they are left with should the reset not work.
-     */
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
-        if (pFun->iFdVfio == -1)
-            continue;
-        PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
 
-        /*
-         * The device comes out of the reset with MSI and MSI-X disabled and all MSI-X
-         * vectors masked, this is the state the guest gets to see.
-         */
-        if (pFun->offMsixCtrl)
+        if (pFun->iFdVfio != -1)
         {
-            PDMPciDevSetWord(pPciDev, pFun->offMsixCtrl,
-                               PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl)
-                             & ~(VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK));
-            for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
-                pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
-            RT_BZERO((void *)pFun->pbmMsixPba, pFun->cbMsixPba);
-        }
-        if (pFun->offMsiCtrl)
-        {
-            PDMPciDevSetWord(pPciDev, pFun->offMsiCtrl,
-                               PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl)
-                             & ~(VBOX_PCI_MSI_FLAGS_ENABLE | VBOX_PCI_MSI_FLAGS_QSIZE));
-            if (pFun->fMsiMaskable)
+            PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
+
+            int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_RESET, NULL);
+            AssertLogRelMsg(!rcLnx, ("VFIO#%d.%u: Failed to reset device %d\n", pThis->iInstance, pFun->uPciFun, errno));
+
+            /*
+             * The device comes out of the reset with MSI and MSI-X disabled and all MSI-X
+             * vectors masked.  The PCI bus takes care of the command register, the MSI and
+             * MSI-X state is ours.
+             */
+            if (pFun->offMsixCtrl)
             {
-                PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 4, 0); /* Mask */
-                PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 8, 0); /* Pending */
+                PDMPciDevSetWord(pPciDev, pFun->offMsixCtrl,
+                                   PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl)
+                                 & ~(VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK));
+                for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
+                    pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
+                RT_BZERO((void *)pFun->pbmMsixPba, pFun->cbMsixPba);
             }
+            if (pFun->offMsiCtrl)
+            {
+                PDMPciDevSetWord(pPciDev, pFun->offMsiCtrl,
+                                   PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl)
+                                 & ~(VBOX_PCI_MSI_FLAGS_ENABLE | VBOX_PCI_MSI_FLAGS_QSIZE));
+                if (pFun->fMsiMaskable)
+                {
+                    PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 4, 0); /* Mask */
+                    PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 8, 0); /* Pending */
+                }
+            }
+
+            /* Bring the interrupt setup of the device in line with that. */
+            pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev),
+                             pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
         }
-
-        /* The command register: the guest loses its mappings of the BARs, then the device stops decoding. */
-        pciVfioCfgEmulatedRegWrite(pThis, pFun, pPciDev, VBOX_PCI_COMMAND, 0);
-
-        /* No interrupts while the device is being reset. */
-        pciVfioIrqReconfigure(pThis, pFun, UINT8_MAX /*uVfioIrq*/, 0 /*cVectors*/);
-    }
-
-    /*
-     * Reset the functions.  Where a function can't be reset on its own, which is
-     * common for devices with several functions, the bus they are on gets reset.
-     */
-    bool fBusReset = false;
-    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
-    {
-        PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
-        if (   pFun->iFdVfio != -1
-            && ioctl(pFun->iFdVfio, VFIO_DEVICE_RESET, NULL) == -1)
-        {
-            LogRelMax(16, ("VFIO#%d.%u: The function can't be reset on its own (%d)\n", pThis->iInstance, pFun->uPciFun, errno));
-            fBusReset = true;
-        }
-    }
-    if (fBusReset)
-    {
-        int rc = pciVfioBusReset(pThis);
-        if (RT_FAILURE(rc))
-            LogRelMax(16, ("VFIO#%d: The device could not be reset (%Rrc).  It keeps its state apart from being disabled "
-                           "until the guest sets it up again\n", pThis->iInstance, rc));
-    }
-
-    /*
-     * Whatever the reset has done to the command register of a function, the guest
-     * sees a cleared one and that is what the device is to have.  Interrupts start
-     * out as INTx.
-     */
-    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
-    {
-        PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
-        if (pFun->iFdVfio == -1)
-            continue;
-        PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
-
-        int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, 0);
-        if (RT_FAILURE(rc))
-            LogRelMax(16, ("VFIO#%d.%u: Failed to clear the command register of the device after the reset (%Rrc)\n",
-                           pThis->iInstance, pFun->uPciFun, rc));
-
-        pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev),
-                         pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
     }
 }
 
@@ -3846,9 +3766,6 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         if (!(DevInfo.flags & VFIO_DEVICE_FLAGS_PCI))
             return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("VFIO device is not a PCI/PCI Express device. This configuration is not supported"));
-        if (!(DevInfo.flags & VFIO_DEVICE_FLAGS_RESET))
-            LogRel(("VFIO#%d.%u: The function can't be reset on its own, a reset is going to affect everything on its bus\n",
-                    iInstance, iPciFun));
 
         /* Setup access to the PCI config space first. */
         struct vfio_region_info RegionInfo;
