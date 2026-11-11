@@ -45,6 +45,8 @@
 #include <VBox/vmm/vmapi.h>
 #include <VBox/err.h>
 #include <iprt/assert.h>
+#include <iprt/env.h>
+#include <iprt/rand.h>
 #include <iprt/string.h>
 #include <iprt/test.h>
 
@@ -1999,6 +2001,523 @@ static void tstResetMsix(void)
 }
 
 
+/*
+ *
+ * Random device models and random guest accesses.
+ *
+ */
+
+/** Where tstFuzz() makes the guest map a memory BAR: 32 MiB apart, above the RAM and the ECAM window. */
+#define TST_FUZZ_MEM_ADDR(a_iBar)   (UINT32_C(0xe8000000) + (a_iBar) * UINT32_C(0x02000000))
+/** Where tstFuzz() makes the guest map an I/O port BAR. */
+#define TST_FUZZ_IO_PORT(a_iBar)    (UINT32_C(0xd000) + (a_iBar) * UINT32_C(0x100))
+
+/** The random number generator of tstFuzz(). */
+static RTRAND g_hTstRand = NIL_RTRAND;
+
+
+/** Returns a random number in a range, both ends included. */
+DECLINLINE(uint32_t) tstRnd(uint32_t uFirst, uint32_t uLast)
+{
+    return RTRandAdvU32Ex(g_hTstRand, uFirst, uLast);
+}
+
+
+/** Returns true in the given percentage of calls. */
+DECLINLINE(bool) tstRndChance(uint32_t uPercent)
+{
+    return RTRandAdvU32Ex(g_hTstRand, 0, 99) < uPercent;
+}
+
+
+/** Returns a random value which tends to be at the edge of something. */
+static uint32_t tstRndValue(void)
+{
+    switch (tstRnd(0, 5))
+    {
+        case 0:  return 0;
+        case 1:  return UINT32_MAX;
+        case 2:  return RT_BIT_32(tstRnd(0, 31));
+        case 3:  return tstRnd(0, 0xff);
+        default: return RTRandAdvU32(g_hTstRand);
+    }
+}
+
+
+/**
+ * Makes up a device model: mostly something a real device could look like,
+ * with a part of it being off limits now and then.
+ *
+ * @returns Whether the device is configured to expose the legacy VGA ranges.
+ * @param   pModel              The device model to fill in.
+ */
+static bool tstFuzzModelInit(PTSTVFIODEVCFG pModel)
+{
+    static const uint8_t s_abClasses[] = { 0x01, 0x02, 0x03, 0x04, 0x0c };
+    uint8_t const bClass = s_abClasses[tstRnd(0, RT_ELEMENTS(s_abClasses) - 1)];
+    tstModelInit(pModel, TST_VFIO_NODE, bClass, bClass == 0x03 && tstRndChance(70) ? 0x00 : (uint8_t)tstRnd(0, 0x80));
+    if (tstRndChance(30))
+        pModel->cbCfg = 4096;
+    if (tstRndChance(5))
+    {
+        /* The device there is a quirk for. */
+        tstModelSetU16(pModel, VBOX_PCI_VENDOR_ID, 0x8086);
+        tstModelSetU16(pModel, VBOX_PCI_DEVICE_ID, 0xe223);
+    }
+    if (tstRndChance(25))
+        for (uint32_t off = 0x40; off < 0x100; off++)
+            pModel->abCfg[off] = (uint8_t)tstRnd(0, 255);
+
+    /*
+     * The BARs, and what VFIO has to say about them.
+     */
+    for (uint32_t iBar = 0; iBar < 6; iBar++)
+    {
+        static const uint32_t s_acbMem[] = { 0x100, 0x1000, 0x2000, 0x4000, 0x10000, 0x100000, 0x1800, 0x10 };
+        static const uint32_t s_acbIo[]  = { 0x8, 0x20, 0x100, 0x3 };
+        uint32_t const uKind = tstRnd(0, 9);
+        if (uKind < 5)
+            continue;
+        if (uKind < 8)
+        {
+            bool const f64Bit = iBar < 5 && tstRndChance(30);
+            tstModelSetBar(pModel, iBar, s_acbMem[tstRnd(0, RT_ELEMENTS(s_acbMem) - 1)],
+                             (uint32_t)PCI_ADDRESS_SPACE_MEM
+                           | (f64Bit            ? (uint32_t)PCI_ADDRESS_SPACE_BAR64        : 0)
+                           | (tstRndChance(30)  ? (uint32_t)PCI_ADDRESS_SPACE_MEM_PREFETCH : 0));
+            pModel->aRegions[iBar].fMsixMappable = tstRndChance(30);
+            if (f64Bit)
+                iBar++;
+        }
+        else
+            tstModelSetBar(pModel, iBar, s_acbIo[tstRnd(0, RT_ELEMENTS(s_acbIo) - 1)], PCI_ADDRESS_SPACE_IO);
+    }
+    for (uint32_t iBar = 0; iBar < 6; iBar++)
+        if (pModel->aRegions[iBar].cb && tstRndChance(15))
+            pModel->aRegions[iBar].fFlags &= ~RT_BIT_32(tstRnd(0, 2)); /* read, write or mmap */
+
+    if (tstRndChance(15))
+    {
+        static const uint32_t s_acbRom[] = { _64K, _32K, 0x1800, _1M };
+        pModel->aRegions[VFIO_PCI_ROM_REGION_INDEX].cb     = s_acbRom[tstRnd(0, RT_ELEMENTS(s_acbRom) - 1)];
+        pModel->aRegions[VFIO_PCI_ROM_REGION_INDEX].fFlags = VFIO_REGION_INFO_FLAG_READ;
+    }
+
+    bool fExposeVga = false;
+    if (bClass == 0x03 && tstRndChance(50))
+    {
+        fExposeVga = tstRndChance(80);
+        pModel->aRegions[VFIO_PCI_VGA_REGION_INDEX].cb     = 0xc0000;
+        pModel->aRegions[VFIO_PCI_VGA_REGION_INDEX].fFlags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
+    }
+    else
+        fExposeVga = tstRndChance(3); /* Asked for without the device having them. */
+
+    /*
+     * The interrupts.  What VFIO reports doesn't always go with the capabilities.
+     */
+    pModel->acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = tstRndChance(85) ? 1 : tstRnd(0, 3);
+    if (!pModel->acIrqs[VFIO_PCI_INTX_IRQ_INDEX])
+        pModel->abCfg[VBOX_PCI_INTERRUPT_PIN] = 0;
+
+    /*
+     * The standard capabilities.
+     */
+    uint8_t  aoffCaps[8];
+    uint32_t cCaps     = 0;
+    uint32_t offNext   = 0x40;
+    uint32_t const cCapsWanted = tstRnd(0, 6);
+    while (cCaps < cCapsWanted)
+    {
+        uint8_t abBody[64];
+        size_t  cbBody = 0;
+        uint8_t bCapId;
+        RT_ZERO(abBody);
+        switch (tstRnd(0, 6))
+        {
+            case 0:
+            case 1:
+            {
+                bCapId = VBOX_PCI_CAP_ID_MSI;
+                bool const     f64Bit    = tstRndChance(60);
+                bool const     fMaskable = tstRndChance(50);
+                uint32_t const cLog2     = tstRndChance(90) ? tstRnd(0, 5) : tstRnd(6, 7); /* 6 and 7 are reserved */
+                uint16_t const fCtrl     = (uint16_t)(  (f64Bit    ? VBOX_PCI_MSI_FLAGS_64BIT   : 0)
+                                                      | (fMaskable ? VBOX_PCI_MSI_FLAGS_MASKBIT : 0)
+                                                      | (cLog2 << 1));
+                abBody[0] = RT_LO_U8(fCtrl);
+                abBody[1] = RT_HI_U8(fCtrl);
+                cbBody = 2 + 4 + (f64Bit ? 4 : 0) + 2 + (fMaskable ? 2 + 4 + 4 : 0);
+                pModel->acIrqs[VFIO_PCI_MSI_IRQ_INDEX] = tstRndChance(85) ? RT_BIT_32(RT_MIN(cLog2, 5)) : tstRnd(0, 200);
+                break;
+            }
+
+            case 2:
+            case 3:
+            {
+                bCapId = VBOX_PCI_CAP_ID_MSIX;
+                uint32_t const cVectors = tstRndChance(80) ? tstRnd(1, 64) : tstRnd(1, 2048);
+                uint32_t const iBarTbl  = tstRndChance(90) ? tstRnd(0, 5) : tstRnd(6, 7);
+                uint32_t const iBarPba  = tstRndChance(80) ? iBarTbl : tstRnd(0, 7);
+                uint32_t const offTbl   = tstRndChance(80) ? tstRnd(0, 16) * 0x1000 : tstRndValue() & ~UINT32_C(7);
+                uint32_t const offPba   = tstRndChance(80)
+                                        ? offTbl + RT_ALIGN_32(cVectors * 16, tstRndChance(50) ? 0x1000 : 8)
+                                        : tstRndValue() & ~UINT32_C(7);
+                uint16_t const fCtrl    = (uint16_t)(cVectors - 1);
+                uint32_t const u32Tbl   = offTbl | iBarTbl;
+                uint32_t const u32Pba   = offPba | iBarPba;
+                abBody[0] = RT_LO_U8(fCtrl);
+                abBody[1] = RT_HI_U8(fCtrl);
+                abBody[2] = RT_BYTE1(u32Tbl);
+                abBody[3] = RT_BYTE2(u32Tbl);
+                abBody[4] = RT_BYTE3(u32Tbl);
+                abBody[5] = RT_BYTE4(u32Tbl);
+                abBody[6] = RT_BYTE1(u32Pba);
+                abBody[7] = RT_BYTE2(u32Pba);
+                abBody[8] = RT_BYTE3(u32Pba);
+                abBody[9] = RT_BYTE4(u32Pba);
+                cbBody = 10;
+                pModel->acIrqs[VFIO_PCI_MSIX_IRQ_INDEX] = tstRndChance(85) ? cVectors : tstRnd(0, 4096);
+                break;
+            }
+
+            case 4:
+                bCapId    = VBOX_PCI_CAP_ID_EXP;
+                abBody[0] = (uint8_t)(tstRndChance(85) ? tstRnd(1, 2) : tstRnd(0, 15)); /* the version */
+                cbBody    = tstRndChance(80) ? 58 : 18;
+                break;
+
+            case 5:
+            {
+                bCapId = VBOX_PCI_CAP_ID_VNDR;
+                uint32_t const cbCap = tstRnd(3, 40);
+                abBody[0] = (uint8_t)(tstRndChance(80) ? cbCap : tstRnd(0, 255)); /* the length */
+                for (uint32_t i = 1; i < cbCap - 2; i++)
+                    abBody[i] = (uint8_t)tstRnd(0, 255);
+                cbBody = cbCap - 2;
+                break;
+            }
+
+            default:
+                bCapId = (uint8_t)tstRnd(0, 0x20);
+                cbBody = tstRnd(0, 20);
+                for (uint32_t i = 0; i < cbBody; i++)
+                    abBody[i] = (uint8_t)tstRnd(0, 255);
+                break;
+        }
+
+        /* Most of the time capabilities follow each other, now and then they end up anywhere. */
+        uint32_t const offCap = tstRndChance(85) ? offNext : tstRnd(0x40, 0xfc) & ~UINT32_C(3);
+        if (offCap + 2 + cbBody > 256)
+            break;
+        pModel->abCfg[offCap]     = bCapId;
+        pModel->abCfg[offCap + 1] = 0;
+        memcpy(&pModel->abCfg[offCap + 2], abBody, cbBody);
+        aoffCaps[cCaps++] = (uint8_t)offCap;
+        offNext = RT_ALIGN_32(offCap + 2 + (uint32_t)cbBody, 4);
+        if (offNext > 0xfc)
+            break;
+    }
+    if (cCaps)
+    {
+        /* Link them: in the order they were made up, the other way around or mixed up. */
+        uint32_t const uOrder = tstRnd(0, 9);
+        if (uOrder >= 7)
+            for (uint32_t i = 0; i < cCaps / 2; i++)
+            {
+                uint32_t const iOther = uOrder == 7 ? cCaps - 1 - i : tstRnd(0, cCaps - 1);
+                uint8_t const  offTmp = aoffCaps[i];
+                aoffCaps[i]      = aoffCaps[iOther];
+                aoffCaps[iOther] = offTmp;
+            }
+        pModel->abCfg[VBOX_PCI_CAPABILITY_LIST] = aoffCaps[0];
+        for (uint32_t i = 0; i + 1 < cCaps; i++)
+            pModel->abCfg[aoffCaps[i] + 1] = aoffCaps[i + 1];
+        pModel->abCfg[VBOX_PCI_STATUS] |= VBOX_PCI_STATUS_CAP_LIST;
+
+        /* A list which isn't one: looping, pointing into the middle of something or to nowhere. */
+        if (tstRndChance(12))
+        {
+            uint8_t * const pbLink = tstRndChance(15)
+                                   ? &pModel->abCfg[VBOX_PCI_CAPABILITY_LIST]
+                                   : &pModel->abCfg[aoffCaps[tstRnd(0, cCaps - 1)] + 1];
+            switch (tstRnd(0, 4))
+            {
+                case 0:  *pbLink = aoffCaps[tstRnd(0, cCaps - 1)];                       break;
+                case 1:  *pbLink = (uint8_t)(aoffCaps[tstRnd(0, cCaps - 1)] + tstRnd(1, 3)); break;
+                case 2:  *pbLink = (uint8_t)tstRnd(1, 0x3f);                             break;
+                case 3:  *pbLink = 0xff;                                                 break;
+                default: *pbLink = (uint8_t)tstRnd(0, 255);                              break;
+            }
+        }
+    }
+    else if (tstRndChance(5))
+        pModel->abCfg[VBOX_PCI_STATUS] |= VBOX_PCI_STATUS_CAP_LIST; /* Says so and has none. */
+
+    /*
+     * The extended capabilities.
+     */
+    if (   pModel->cbCfg == 4096
+        && tstRndChance(80))
+    {
+        uint32_t       off        = 0x100;
+        uint32_t const cExtWanted = tstRnd(1, 8);
+        for (uint32_t i = 0; i < cExtWanted; i++)
+        {
+            uint32_t offNextExt = i + 1 < cExtWanted ? off + tstRnd(1, 16) * 4 : 0;
+            if (offNextExt > 0xffc)
+                offNextExt = 0;
+            if (tstRndChance(8))
+                offNextExt = tstRndChance(50) ? 0x100 : tstRnd(0, 0xfff); /* looping or pointing to nowhere */
+            tstModelSetU32(pModel, off, tstRnd(1, 0x30) | (tstRnd(1, 3) << 16) | (offNextExt << 20));
+            if (off + 8 <= 4096)
+                tstModelSetU32(pModel, off + 4, RTRandAdvU32(g_hTstRand));
+            if (   offNextExt < 0x100
+                || offNextExt > 0xffc
+                || (offNextExt & 3))
+                break;
+            off = offNextExt;
+        }
+    }
+
+    /*
+     * Properties which make the device unusable or awkward.
+     */
+    pModel->fNoIommu         = tstRndChance(2);
+    pModel->fNotPci          = tstRndChance(2);
+    pModel->fNoFunctionReset = tstRndChance(20);
+    pModel->fNoBusReset      = tstRndChance(30);
+    return fExposeVga;
+}
+
+
+/**
+ * Lets the guest do one random thing to the device.
+ *
+ * @param   pModel              The device model.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   fExposeVga          Whether the legacy VGA ranges may be there.
+ */
+static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, bool fExposeVga)
+{
+    static const uint8_t s_acbAccess[] = { 1, 2, 4 };
+    uint32_t const       uOp           = tstRnd(0, 99);
+    if (uOp < 40)
+    {
+        /* A config space write. */
+        unsigned const cb  = s_acbAccess[tstRnd(0, RT_ELEMENTS(s_acbAccess) - 1)];
+        uint32_t       off;
+        uint32_t       u32 = tstRndValue();
+        switch (tstRnd(0, 9))
+        {
+            case 0:
+            case 1:
+            case 2:
+                /* The command register, often turning on what makes the device do things. */
+                off = VBOX_PCI_COMMAND;
+                if (tstRndChance(70))
+                    u32 = tstRnd(0, 7) | (tstRndChance(20) ? VBOX_PCI_COMMAND_INTX_DISABLE : 0);
+                break;
+
+            case 3:
+            case 4:
+            {
+                /* A BAR: sizing it, disabling it or giving it the address reserved for it here. */
+                uint32_t const iBar = tstRnd(0, 5);
+                off = VBOX_PCI_BASE_ADDRESS_0 + iBar * 4;
+                if (tstRndChance(85))
+                    u32 = tstRndChance(20)                                ? UINT32_MAX
+                        : tstRndChance(15)                                ? UINT32_C(0)
+                        : (pModel->abCfg[off] & PCI_ADDRESS_SPACE_IO)     ? TST_FUZZ_IO_PORT(iBar)
+                        :                                                   TST_FUZZ_MEM_ADDR(iBar);
+                break;
+            }
+
+            case 5:
+            case 6:
+            case 7:
+                /* Where the capabilities are. */
+                off = tstRnd(0x34, 0xff);
+                break;
+
+            default:
+                off = tstRnd(0, pModel->cbCfg - 1);
+                break;
+        }
+        if (tstRndChance(90))
+            off &= ~(uint32_t)(cb - 1);
+        if (off + cb <= 4096)
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, off, u32, cb);
+    }
+    else if (uOp < 60)
+    {
+        /* A config space read. */
+        unsigned const cb  = s_acbAccess[tstRnd(0, RT_ELEMENTS(s_acbAccess) - 1)];
+        uint32_t       off = tstRnd(0, tstRndChance(50) ? 0xff : 4095);
+        if (tstRndChance(90))
+            off &= ~(uint32_t)(cb - 1);
+        if (off + cb <= 4096)
+            tstPdmPciCfgRead(0, TST_PCI_DEVFN, off, cb);
+    }
+    else if (uOp < 82)
+    {
+        /* An access to where a BAR might be mapped, around page boundaries more often than not. */
+        uint32_t const iBar = tstRnd(0, 5);
+        uint64_t const cbBar = RT_MAX(pModel->aRegions[iBar].cb, 16);
+        uint32_t const offBar = tstRndChance(50)
+                              ? (uint32_t)(tstRnd(0, 16) * 0x1000 + tstRnd(0, 0x40) - 0x20) % (uint32_t)cbBar
+                              : tstRnd(0, (uint32_t)cbBar - 1);
+        if (pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBar * 4] & PCI_ADDRESS_SPACE_IO)
+        {
+            unsigned const cb  = s_acbAccess[tstRnd(0, RT_ELEMENTS(s_acbAccess) - 1)];
+            uint32_t       u32 = 0;
+            if (tstRndChance(50))
+                tstPdmIoPortRead((RTIOPORT)(TST_FUZZ_IO_PORT(iBar) + (offBar & 0xff)), &u32, cb);
+            else
+                tstPdmIoPortWrite((RTIOPORT)(TST_FUZZ_IO_PORT(iBar) + (offBar & 0xff)), tstRndValue(), cb);
+        }
+        else
+        {
+            static const uint8_t s_acbMmio[] = { 1, 2, 4, 8 };
+            unsigned const cb = s_acbMmio[tstRnd(0, RT_ELEMENTS(s_acbMmio) - 1)];
+            uint64_t       u64 = RT_MAKE_U64(tstRndValue(), tstRndValue());
+            RTGCPHYS const GCPhys = TST_FUZZ_MEM_ADDR(iBar) + (tstRndChance(90) ? (offBar & ~(uint32_t)(cb - 1)) : offBar);
+            if (tstRndChance(50))
+                tstPdmPhysRead(GCPhys, &u64, cb);
+            else
+                tstPdmPhysWrite(GCPhys, &u64, cb);
+        }
+    }
+    else if (uOp < 90)
+    {
+        /* The device raises an interrupt.  Which fails if it isn't set up, and that is fine. */
+        uint32_t const uIrqIndex = tstRnd(VFIO_PCI_INTX_IRQ_INDEX, VFIO_PCI_MSIX_IRQ_INDEX);
+        if (pModel->acIrqs[uIrqIndex])
+            tstVfioKrnlDevTriggerIrq(pDev, uIrqIndex, tstRnd(0, RT_MIN(pModel->acIrqs[uIrqIndex], 2048) - 1));
+    }
+    else if (uOp < 93)
+    {
+        if (fExposeVga)
+        {
+            /* The legacy VGA ranges. */
+            uint64_t u64 = RT_MAKE_U64(tstRndValue(), tstRndValue());
+            uint32_t u32 = 0;
+            switch (tstRnd(0, 4))
+            {
+                case 0:  tstPdmIoPortRead((RTIOPORT)tstRnd(0x3b0, 0x3df), &u32, 1);                            break;
+                case 1:  tstPdmIoPortWrite((RTIOPORT)tstRnd(0x3b0, 0x3df), tstRndValue(), 1);                  break;
+                case 2:  tstPdmPhysRead(tstRnd(0xa0000, 0xbfff8), &u64, 4);                                    break;
+                case 3:  tstPdmPhysWrite(tstRnd(0xa0000, 0xbfff8), &u64, 4);                                   break;
+                default: tstPdmPhysFill(tstRnd(0xa0000, 0xbffff), tstRndValue(), 1U << tstRnd(0, 2), tstRnd(0, 0x10000)); break;
+            }
+        }
+    }
+    else if (uOp < 96)
+        tstPdmReset();
+    else
+    {
+        /* The device stops answering for a while. */
+        tstVfioKrnlDevSetGone(pDev, true);
+        for (uint32_t i = 0, cOps = tstRnd(1, 8); i < cOps; i++)
+        {
+            uint32_t u32 = 0;
+            tstPdmPciCfgRead(0, TST_PCI_DEVFN, tstRnd(0, 0xff) & ~UINT32_C(3), 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, tstRnd(0, 0xff) & ~UINT32_C(3), tstRndValue(), 4);
+            tstPdmPhysRead(TST_FUZZ_MEM_ADDR(tstRnd(0, 5)) + (tstRnd(0, 0xfff) & ~UINT32_C(3)), &u32, 4);
+        }
+        tstVfioKrnlDevSetGone(pDev, false);
+    }
+}
+
+
+/**
+ * Random device models with random guest accesses.
+ *
+ * Whatever the device looks like, the VM is either constructed or not, with
+ * nothing left behind in the latter case, and whatever the guest does, the
+ * VM process survives it and the host kernel sees no request it would refuse
+ * for being out of bounds.  This is of most use with the sanitizers.
+ *
+ * The number of models and the seed can be set with the environment variables
+ * TSTDEVPCIVFIO_FUZZ_MODELS and TSTDEVPCIVFIO_FUZZ_SEED, the seed of a model
+ * which fails is given in the output.
+ */
+static void tstFuzz(void)
+{
+    RTTestISub("Random device models and guest accesses");
+
+    uint32_t    cModels = 150;
+    uint32_t    uSeed   = UINT32_C(0x20261111);
+    const char *psz     = RTEnvGet("TSTDEVPCIVFIO_FUZZ_MODELS");
+    if (psz)
+        cModels = RTStrToUInt32(psz);
+    psz = RTEnvGet("TSTDEVPCIVFIO_FUZZ_SEED");
+    if (psz)
+        uSeed = RTStrToUInt32(psz);
+
+    int rc = RTRandAdvCreateParkMiller(&g_hTstRand);
+    RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+    if (RT_FAILURE(rc))
+        return;
+
+    uint32_t cConstructed = 0;
+    for (uint32_t iModel = 0; iModel < cModels; iModel++)
+    {
+        uint32_t const uModelSeed    = uSeed + iModel;
+        uint32_t const cErrorsBefore = RTTestIErrorCount();
+        RTRandAdvSeed(g_hTstRand, uModelSeed);
+
+        static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
+        bool const  fExposeVga = tstFuzzModelInit(&s_Model);
+        PTSTVFIODEV pDev       = NULL;
+        g_fTstExposeVga     = fExposeVga;
+        g_fTstInterceptMmio = tstRndChance(10);
+        rc = tstFixtureSetup(&s_Model, 1, &pDev, NULL);
+        g_fTstExposeVga     = false;
+        g_fTstInterceptMmio = false;
+        if (RT_SUCCESS(rc))
+        {
+            cConstructed++;
+            uint64_t const cbMapped = tstVfioKrnlGetDmaMappedBytes();
+            RTTESTI_CHECK_MSG(cbMapped == TST_RAM_SIZE - TSTPDM_RAM_HOLE_SIZE, ("%RU64 bytes mapped for DMA\n", cbMapped));
+            tstPdmPowerOn();
+
+            for (uint32_t iOp = 0, cOps = tstRnd(20, 400); iOp < cOps; iOp++)
+                tstFuzzGuestOp(&s_Model, pDev, fExposeVga);
+
+            /* The guest never changes what is mapped for DMA, and the identity of the device stays what it is. */
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbMapped,
+                              ("%RU64 bytes mapped for DMA, was %RU64\n", tstVfioKrnlGetDmaMappedBytes(), cbMapped));
+            uint32_t const idVendor = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2);
+            RTTESTI_CHECK_MSG(idVendor == RT_MAKE_U16(s_Model.abCfg[VBOX_PCI_VENDOR_ID], s_Model.abCfg[VBOX_PCI_VENDOR_ID + 1]),
+                              ("vendor ID %#RX32\n", idVendor));
+        }
+        else
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == 0,
+                              ("%RU64 bytes mapped for DMA with the VM construction having failed\n",
+                               tstVfioKrnlGetDmaMappedBytes()));
+
+        /* Nothing the host kernel would refuse for being out of bounds. */
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+        tstFixtureTeardown();
+
+        if (RTTestIErrorCount() != cErrorsBefore)
+        {
+            RTTestIFailureDetails("the model with seed %#RX32 failed (construction: %Rrc); "
+                                  "run with TSTDEVPCIVFIO_FUZZ_SEED=%u TSTDEVPCIVFIO_FUZZ_MODELS=1 to get it again\n",
+                                  uModelSeed, rc, uModelSeed);
+            break;
+        }
+    }
+    RTTestIPrintf(RTTESTLVL_ALWAYS, "%u device model(s) starting with seed %#RX32, %u of them made it into a VM\n",
+                  cModels, uSeed, cConstructed);
+
+    RTRandAdvDestroy(g_hTstRand);
+    g_hTstRand = NIL_RTRAND;
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -2036,6 +2555,7 @@ int main()
     tstCmdRegOrder();
     tstResetFallback();
     tstTrappedAccessMappingGone();
+    tstFuzz();
 
     return RTTestSummaryAndDestroy(hTest);
 }
