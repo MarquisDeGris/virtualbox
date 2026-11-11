@@ -28,6 +28,14 @@ on:
         description: "Branch whose baseline build output is reused (tests and sanitize flavors)"
         required: false
         default: main
+      fuzz_models:
+        description: "Number of random device models for the fuzz test (default: 2000, with sanitize 20000)"
+        required: false
+        default: ""
+      fuzz_seed:
+        description: "Seed of the first random device model (default: the one built into the testcase)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -196,6 +204,15 @@ jobs:
           cd out/linux.amd64/release/bin/testcase
           ls -l tstDevPciVfio
           log="$GITHUB_WORKSPACE/test-tstDevPciVfio.log"
+          # The fuzz test gets more to do here than it does by default, and time for it.
+          limit=600
+          export TSTDEVPCIVFIO_FUZZ_MODELS=2000
+          if [ "${{ inputs.flavor }}" = "sanitize" ]; then
+            limit=1800
+            export TSTDEVPCIVFIO_FUZZ_MODELS=20000
+          fi
+          if [ -n "${{ inputs.fuzz_models }}" ]; then export TSTDEVPCIVFIO_FUZZ_MODELS="${{ inputs.fuzz_models }}"; fi
+          if [ -n "${{ inputs.fuzz_seed }}" ]; then export TSTDEVPCIVFIO_FUZZ_SEED="${{ inputs.fuzz_seed }}"; fi
           if [ "${{ inputs.flavor }}" = "sanitize" ]; then
             # Memory errors and leaks end the run with a failure.  Undefined behaviour is
             # reported and the run goes on, the reports are looked at below.
@@ -206,10 +223,10 @@ jobs:
           fi
           ./tstDevPciVfio > "$log" 2>&1 &
           pid=$!
-          # A run takes a few seconds. A test which hangs is stopped after three
-          # minutes, with a backtrace of all its threads.
+          # A test which hangs is stopped when the time limit is reached, with a
+          # backtrace of all its threads.
           i=0
-          while kill -0 $pid 2>/dev/null && [ $i -lt 180 ]; do sleep 1; i=$((i + 1)); done
+          while kill -0 $pid 2>/dev/null && [ $i -lt $limit ]; do sleep 1; i=$((i + 1)); done
           if kill -0 $pid 2>/dev/null; then
             cat "$log"
             echo "TEST HANGS, backtrace of all threads:"
@@ -220,10 +237,10 @@ jobs:
           if ! wait $pid; then
             cat "$log"
             echo "TEST FAILED, running it again in the debugger for a backtrace"
-            timeout -k 5 180 gdb -batch -ex run -ex "thread apply all bt" --args ./tstDevPciVfio 2>&1 | tail -150 || true
+            timeout -k 5 $limit gdb -batch -ex run -ex "thread apply all bt" --args ./tstDevPciVfio 2>&1 | tail -150 || true
             exit 1
           fi
-          cat "$log"
+          tail -n 200 "$log"
           if [ "${{ inputs.flavor }}" = "sanitize" ]; then
             # Undefined behaviour in the device, the bus code it is tested with or in the
             # test itself is a failure.
