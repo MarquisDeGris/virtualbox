@@ -107,11 +107,7 @@ jobs:
             echo "VBOX_WITH_VALIDATIONKIT :="
             echo "VBOX_WITH_WEBSERVICES :="
             echo "VBOX_WITH_UPDATE_AGENT :="
-            if [ "${{ inputs.flavor }}" = "tests" ]; then
-              echo "VBOX_WITH_TESTCASES := 1"
-            else
-              echo "VBOX_WITH_TESTCASES :="
-            fi
+            echo "VBOX_WITH_TESTCASES :="
           } > LocalConfig.kmk
           cat LocalConfig.kmk
 
@@ -133,15 +129,27 @@ jobs:
           du -sh out 2>/dev/null || true
           df -h /
 
+      - name: Build device testcases
+        if: inputs.flavor == 'tests'
+        run: |
+          . ./env.sh
+          ( time kmk -C src/VBox/Devices -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 ) > build-tests.log 2>&1 \
+            || { echo "TESTCASE BUILD FAILED"; grep -n -E 'error:|undefined reference|multiple definition|ld returned|[*][*][*] ' build-tests.log | head -150; echo ----; tail -40 build-tests.log; exit 1; }
+          tail -8 build-tests.log
+          grep -E 'warning:' build-tests.log | grep -E 'tstDevPciVfio|DevPciVfio|DevPciIch9' | head -60 || true
+
       - name: Run device testcases
         if: inputs.flavor == 'tests'
         run: |
-          set -x
-          cd out/linux.amd64/release/bin
-          ls testcase | grep -i -E 'tstDevice|tstPci|tstVfio' || true
-          for t in testcase/tstDeviceStructSize; do
-            [ -x "$t" ] && "$t"
-          done
+          cd out/linux.amd64/release/bin/testcase
+          ls -l tstDevPciVfio
+          if ! timeout 600 ./tstDevPciVfio > ../../../../../test-tstDevPciVfio.log 2>&1; then
+            cat ../../../../../test-tstDevPciVfio.log
+            echo "TEST FAILED, running it again in the debugger for a backtrace"
+            timeout 600 gdb -batch -ex run -ex "thread apply all bt" --args ./tstDevPciVfio 2>&1 | tail -150 || true
+            exit 1
+          fi
+          cat ../../../../../test-tstDevPciVfio.log
 
       - name: Upload logs
         if: always()
@@ -150,6 +158,8 @@ jobs:
           name: logs-${{ inputs.flavor }}-${{ steps.src.outputs.head }}
           path: |
             build.log
+            build-tests.log
+            test-tstDevPciVfio.log
             configure.log
             configure-run.log
             configure-help.log
