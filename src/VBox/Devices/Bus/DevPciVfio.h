@@ -200,6 +200,16 @@ AssertCompileSize(struct vfio_irq_set, 5 * sizeof(uint32_t));
 
 #define VFIO_DEVICE_RESET               _IO(VFIO_TYPE, VFIO_BASE + 11)
 
+struct vfio_pci_hot_reset
+{
+    uint32_t argsz;
+    uint32_t flags;
+    uint32_t count;
+    /* int32_t group_fds[count] follows. */
+};
+AssertCompileSize(struct vfio_pci_hot_reset, 3 * sizeof(uint32_t));
+#define VFIO_DEVICE_PCI_HOT_RESET       _IO(VFIO_TYPE, VFIO_BASE + 13)
+
 struct vfio_iommu_type1_dma_map
 {
     uint32_t argsz;

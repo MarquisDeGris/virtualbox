@@ -93,6 +93,10 @@ typedef struct TSTVFIODEVCFG
     bool                fNoIommu;
     /** Whether VFIO reports the function as something else than a PCI device. */
     bool                fNotPci;
+    /** Whether the function can't be reset on its own. */
+    bool                fNoFunctionReset;
+    /** Whether the bus the function is on can't be reset by its user. */
+    bool                fNoBusReset;
 } TSTVFIODEVCFG;
 /** Pointer to a device model description. */
 typedef TSTVFIODEVCFG *PTSTVFIODEVCFG;
@@ -102,6 +106,19 @@ typedef const TSTVFIODEVCFG *PCTSTVFIODEVCFG;
 /** Opaque handle to a PCI function of the fake kernel. */
 typedef struct TSTVFIODEV *PTSTVFIODEV;
 
+/**
+ * Callback for writes to the config space of a PCI function, called after the
+ * write was done.
+ *
+ * @param   pDev                The PCI function.
+ * @param   offReg              The config space offset written to.
+ * @param   cb                  Number of bytes written.
+ * @param   pvUser              The user argument.
+ */
+typedef DECLCALLBACKTYPE(void, FNTSTVFIOCFGWRITE,(PTSTVFIODEV pDev, uint32_t offReg, size_t cb, void *pvUser));
+/** Pointer to a config space write callback. */
+typedef FNTSTVFIOCFGWRITE *PFNTSTVFIOCFGWRITE;
+
 int         tstVfioKrnlInit(void);
 void        tstVfioKrnlTerm(void);
 int         tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev);
@@ -109,6 +126,9 @@ void       *tstVfioKrnlDevGetRegionPtr(PTSTVFIODEV pDev, uint32_t iRegion);
 int         tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVector);
 uint32_t    tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex);
 uint32_t    tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev);
+uint32_t    tstVfioKrnlDevGetBusResetCount(PTSTVFIODEV pDev);
+void        tstVfioKrnlDevProtectMappings(PTSTVFIODEV pDev, bool fProtect);
+void        tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser);
 uint32_t    tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone);
 uint32_t    tstVfioKrnlGetOpenFdCount(void);
