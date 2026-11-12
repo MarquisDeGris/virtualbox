@@ -4120,7 +4120,6 @@ static DECLCALLBACK(void) pciVfioSlotLinkChanged(PPDMDEVINS pDevIns, bool fLinkU
          * service of the device, which is nothing if it was taken out, is disabled
          * and reset now.
          */
-        pciVfioReset(pDevIns);
         ASMAtomicWriteU64(&pThis->msAttnPressed, 0);
     }
     LogRelMax(256, ("VFIO#%d: The link to the device is %s\n", pThis->iInstance, fLinkUp ? "up" : "down"));
