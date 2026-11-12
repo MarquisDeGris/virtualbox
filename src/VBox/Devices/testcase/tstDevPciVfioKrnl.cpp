@@ -1235,6 +1235,72 @@ int tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev)
 
 
 /**
+ * Puts another PCI function into the place of one nobody has open, like
+ * plugging another device in where one was pulled, or the same one again.
+ *
+ * @returns VBox status code, VERR_RESOURCE_BUSY if the function is open.
+ * @param   pDev                The PCI function.
+ * @param   pCfg                The description of the new function, copied.  It is reachable
+ *                              where the old one was whatever the description says.
+ */
+int tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg)
+{
+    AssertReturn(g_Krnl.fInitialized, VERR_WRONG_ORDER);
+    AssertReturn(pCfg->cbCfg == 256 || pCfg->cbCfg == 4096, VERR_INVALID_PARAMETER);
+
+    int rc = VINF_SUCCESS;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    if (pDev->cOpens == 0)
+    {
+        /* What the test has mapped of the old one, and its interrupts. */
+        for (uint32_t iRegion = 0; iRegion < RT_ELEMENTS(pDev->apvRegions); iRegion++)
+            if (pDev->apvRegions[iRegion])
+            {
+                munmap(pDev->apvRegions[iRegion], pDev->acbRegions[iRegion]);
+                pDev->apvRegions[iRegion] = NULL;
+            }
+        for (uint32_t i = 0; i < TSTVFIO_IRQ_INDEX_COUNT; i++)
+        {
+            RTMemFree(pDev->apaiIrqFds[i]);
+            pDev->apaiIrqFds[i] = NULL;
+        }
+
+        /* The new one, with the node of the old one. */
+        char szNode[sizeof(pDev->Cfg.szNode)];
+        memcpy(szNode, pDev->Cfg.szNode, sizeof(szNode));
+        pDev->Cfg = *pCfg;
+        memcpy(pDev->Cfg.szNode, szNode, sizeof(szNode));
+        for (uint32_t i = 0; i < TSTVFIO_REGION_COUNT; i++)
+            pDev->acbRegions[i] = i == VFIO_PCI_CONFIG_REGION_INDEX ? pCfg->cbCfg : pCfg->aRegions[i].cb;
+        if (   ftruncate(pDev->iFdBacking, 0) != 0
+            || ftruncate(pDev->iFdBacking, (off_t)((uint64_t)TSTVFIO_REGION_COUNT << TSTVFIO_REGION_SHIFT)) != 0
+            ||    __real_pwrite(pDev->iFdBacking, pCfg->abCfg, pCfg->cbCfg, (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX])
+               != (ssize_t)pCfg->cbCfg)
+            rc = RTErrConvertFromErrno(errno);
+        for (uint32_t i = 0; i < TSTVFIO_IRQ_INDEX_COUNT && RT_SUCCESS(rc); i++)
+            if (pCfg->acIrqs[i])
+            {
+                pDev->apaiIrqFds[i] = (int *)RTMemAlloc(pCfg->acIrqs[i] * sizeof(int));
+                if (pDev->apaiIrqFds[i])
+                    for (uint32_t iIrq = 0; iIrq < pCfg->acIrqs[i]; iIrq++)
+                        pDev->apaiIrqFds[i][iIrq] = -1;
+                else
+                    rc = VERR_NO_MEMORY;
+            }
+
+        /* It is there and it answers. */
+        pDev->fGone       = false;
+        pDev->fRemoved    = false;
+        pDev->fIntxMasked = false;
+    }
+    else
+        rc = VERR_RESOURCE_BUSY;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return rc;
+}
+
+
+/**
  * Returns a pointer to the memory of a region of the PCI function, for
  * inspecting what the guest wrote and for preparing what it will read.
  *
@@ -1702,12 +1768,37 @@ int __wrap_close(int iFd)
 }
 
 
+/**
+ * Takes note of a file descriptor having been duplicated: a PCI function stays
+ * open until the last file descriptor referring to it is closed.
+ *
+ * @param   iFdOld              The file descriptor which was duplicated.
+ * @param   iFdNew              The duplicate.
+ */
+static void tstVfioKrnlFdDuplicated(int iFdOld, int iFdNew)
+{
+    if (g_Krnl.fInitialized && iFdOld != iFdNew)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFdOld = tstVfioKrnlFdLookup(iFdOld);
+        if (   pFdOld
+            && pFdOld->enmType == TSTVFIOFDTYPE_DEVICE
+            && tstVfioKrnlFdRegister(iFdNew, TSTVFIOFDTYPE_DEVICE, pFdOld->pDev))
+            pFdOld->pDev->cOpens++;
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+}
+
+
 int __wrap_dup2(int iFdOld, int iFdNew)
 {
     /* What the new file descriptor number stood for is closed by this. */
     if (iFdOld != iFdNew)
         tstVfioKrnlFdForget(iFdNew);
-    return __real_dup2(iFdOld, iFdNew);
+    int const rcLnx = __real_dup2(iFdOld, iFdNew);
+    if (rcLnx != -1)
+        tstVfioKrnlFdDuplicated(iFdOld, iFdNew);
+    return rcLnx;
 }
 
 
@@ -1715,7 +1806,10 @@ int __wrap_dup3(int iFdOld, int iFdNew, int fFlags)
 {
     if (iFdOld != iFdNew)
         tstVfioKrnlFdForget(iFdNew);
-    return __real_dup3(iFdOld, iFdNew, fFlags);
+    int const rcLnx = __real_dup3(iFdOld, iFdNew, fFlags);
+    if (rcLnx != -1)
+        tstVfioKrnlFdDuplicated(iFdOld, iFdNew);
+    return rcLnx;
 }
 
 
