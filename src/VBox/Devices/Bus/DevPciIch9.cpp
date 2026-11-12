@@ -4296,7 +4296,8 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
         && (   !fExpress
             || uExpressPortType != VBOX_PCI_EXP_TYPE_ROOT_PORT))
         return PDMDEV_SET_ERROR(pDevIns, VERR_NOT_SUPPORTED,
-                                N_("Configuration error: \"HotPlug\" needs a PCI express root port (\"ExpressEnabled\", \"ExpressPortType\" set to \"RootCmplxRootPort\")"));
+                                N_("Configuration error: \"HotPlug\" needs a PCI express root port "
+                                   "(\"ExpressEnabled\", \"ExpressPortType\" set to \"RootCmplxRootPort\")"));
 
     Log(("PCI/bridge#%u: fR0Enabled=%RTbool fRCEnabled=%RTbool fExpress=%RTbool uExpressPortType=%u (%s) fHotPlug=%RTbool\n",
          iInstance, pDevIns->fR0Enabled, pDevIns->fRCEnabled, fExpress, uExpressPortType, szExpressPortType, fHotPlug));
