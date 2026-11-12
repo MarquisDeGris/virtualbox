@@ -136,6 +136,7 @@ void        tstVfioKrnlDevProtectMappings(PTSTVFIODEV pDev, bool fProtect);
 void        tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser);
 uint32_t    tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone);
+void        tstVfioKrnlDevRequest(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevRemove(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevSignalError(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlGetOpenFdCount(void);

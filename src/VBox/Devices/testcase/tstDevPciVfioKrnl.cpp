@@ -265,6 +265,8 @@ int     __wrap_dup3(int iFdOld, int iFdNew, int fFlags);
 int     __wrap_ioctl(int iFd, unsigned long uReq, ...);
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __wrap___pread_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax);
+ssize_t __wrap___pread64_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax);
 ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
 void   *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
@@ -1421,6 +1423,20 @@ static void tstVfioKrnlDevNotify(PTSTVFIODEV pDev, uint32_t uIrqIndex)
 
 
 /**
+ * Asks the user of a PCI function to let go of it, like the host does when the
+ * driver is to be unbound from a device which is still there.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevRequest(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    tstVfioKrnlDevNotify(pDev, VFIO_PCI_REQ_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
  * Removes a PCI function from the host for good, like pulling the plug: it
  * stops answering, its user is asked to let go of it, and once that has
  * happened what the user still has mapped of it is unusable.
@@ -1799,6 +1815,25 @@ ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off)
     if (iErrno)
         return errno = iErrno, -1;
     return __real_pread64(iFd, pvBuf, cbBuf, off);
+}
+
+
+/*
+ * The C library has variants of pread which check the size of the buffer.  The
+ * compiler picks them where it knows the size of the buffer at run time only,
+ * which depends on the compiler options and is what happens with sanitizers.
+ */
+ssize_t __wrap___pread_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax)
+{
+    AssertRelease(cbBuf <= cbBufMax);
+    return __wrap_pread(iFd, pvBuf, cbBuf, off);
+}
+
+
+ssize_t __wrap___pread64_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax)
+{
+    AssertRelease(cbBuf <= cbBufMax);
+    return __wrap_pread64(iFd, pvBuf, cbBuf, off);
 }
 
 
