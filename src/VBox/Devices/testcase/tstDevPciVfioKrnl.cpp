@@ -207,6 +207,9 @@ typedef struct TSTVFIOKRNL
     uint32_t            aidIoas[TSTVFIO_MAX_IOAS];
     /** The next I/O address space ID. */
     uint32_t            idIoasNext;
+    /** Number of requests which were refused for being out of bounds: interrupt
+     * vectors a function hasn't got, accesses beyond the end of a region. */
+    uint32_t            cViolations;
     /** Fault injection: whether a failure is armed. */
     bool                fFailArmed;
     /** Fault injection: the ioctl request to fail. */
@@ -559,7 +562,10 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
     uint32_t const cIrqs = pDev->Cfg.acIrqs[pSet->index];
     if (   pSet->start >= cIrqs
         || pSet->start + pSet->count > cIrqs)
+    {
+        g_Krnl.cViolations++;
         return errno = EINVAL, -1;
+    }
 
     size_t cbItem = 0;
     if (fData == VFIO_IRQ_SET_DATA_BOOL)
@@ -849,7 +855,10 @@ static int tstVfioKrnlCheckFdAccess(int iFd, off_t off, bool fWrite)
                 iErrno = ENODEV;
             else if (   idxRegion >= TSTVFIO_REGION_COUNT
                      || offRegion >= pDev->acbRegions[idxRegion])
+            {
+                g_Krnl.cViolations++;
                 iErrno = EINVAL;
+            }
             else if (   idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
                      && !(  pDev->Cfg.aRegions[idxRegion].fFlags
                           & (fWrite ? VFIO_REGION_INFO_FLAG_WRITE : VFIO_REGION_INFO_FLAG_READ)))
@@ -1210,6 +1219,18 @@ uint32_t tstVfioKrnlGetInheritableFdCount(void)
                         cFds++;
     RTCritSectLeave(&g_Krnl.CritSect);
     return cFds;
+}
+
+
+/**
+ * Returns the number of requests the fake kernel has refused for being out of
+ * bounds since it was initialized.
+ *
+ * @returns Number of such requests.
+ */
+uint32_t tstVfioKrnlGetViolationCount(void)
+{
+    return g_Krnl.cViolations;
 }
 
 
