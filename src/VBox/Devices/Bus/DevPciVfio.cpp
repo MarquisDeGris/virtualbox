@@ -4978,7 +4978,7 @@ static void pciVfioSlotEmptyComplete(PVFIOPCI pThis)
         for (uint32_t i = 0; i < RT_ELEMENTS(s_aCfgSpaceDesc); i++)
             if (s_aCfgSpaceDesc[i].fInitFromDev)
                 memset(&pPciDev->abConfig[s_aCfgSpaceDesc[i].offReg], 0, s_aCfgSpaceDesc[i].cbReg);
-        PDMPciDevSetVendorId(pPciDev, UINT16_MAX);
+        PDMPciDevSetVendorId(pPciDev, PDMPciDevGetVendorId(pPciDev));
         PDMPciDevSetDeviceId(pPciDev, UINT16_MAX);
         PDMPciDevSetCapabilityList(pPciDev, 0);
         memset(&pPciDev->abConfig[0x40], 0, sizeof(pPciDev->abConfig) - 0x40);
