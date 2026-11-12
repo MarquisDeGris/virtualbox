@@ -3783,7 +3783,6 @@ static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy)
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
             pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy);
-    devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, false /*fPresent*/);
 }
 
 
