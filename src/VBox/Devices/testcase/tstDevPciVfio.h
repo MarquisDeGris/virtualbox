@@ -127,6 +127,7 @@ int         tstVfioKrnlInit(void);
 void        tstVfioKrnlTerm(void);
 void        tstVfioKrnlSetLegacy(bool fLegacy);
 int         tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev);
+int         tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg);
 void       *tstVfioKrnlDevGetRegionPtr(PTSTVFIODEV pDev, uint32_t iRegion);
 int         tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVector);
 uint32_t    tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex);

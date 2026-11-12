@@ -1007,6 +1007,29 @@ static DECLCALLBACK(int) tstPdmHlp_VMReqCallNoWaitV(PPDMDEVINS pDevIns, VMCPUID 
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnVMReqPriorityCallWaitV} */
+static DECLCALLBACK(int) tstPdmHlp_VMReqPriorityCallWaitV(PPDMDEVINS pDevIns, VMCPUID idDstCpu, PFNRT pfnFunction, unsigned cArgs,
+                                                          va_list Args)
+{
+    RT_NOREF(pDevIns, idDstCpu);
+    AssertReturn(cArgs <= 4, VERR_TOO_MUCH_DATA);
+    uintptr_t auArgs[4] = { 0, 0, 0, 0 };
+    for (unsigned i = 0; i < cArgs; i++)
+        auArgs[i] = va_arg(Args, uintptr_t);
+
+    /* Whoever calls this plays the EMT.  A request like this one is done ahead of those
+       which nobody waits for, so they stay where they are. */
+    switch (cArgs)
+    {
+        case 0:  return ((int (*)(void))pfnFunction)();
+        case 1:  return ((int (*)(uintptr_t))pfnFunction)(auArgs[0]);
+        case 2:  return ((int (*)(uintptr_t, uintptr_t))pfnFunction)(auArgs[0], auArgs[1]);
+        case 3:  return ((int (*)(uintptr_t, uintptr_t, uintptr_t))pfnFunction)(auArgs[0], auArgs[1], auArgs[2]);
+        default: return ((int (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t))pfnFunction)(auArgs[0], auArgs[1], auArgs[2], auArgs[3]);
+    }
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnGetMainExecutionEngine} */
 static DECLCALLBACK(uint8_t) tstPdmHlp_GetMainExecutionEngine(PPDMDEVINS pDevIns)
 {
@@ -1671,6 +1694,7 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnMMPhysGetRamSizeAbove4GB        = tstPdmHlp_MMPhysGetRamSizeAbove4GB;
     g_tstPdmDevHlpR3.pfnGetMainExecutionEngine          = tstPdmHlp_GetMainExecutionEngine;
     g_tstPdmDevHlpR3.pfnVMReqCallNoWaitV                = tstPdmHlp_VMReqCallNoWaitV;
+    g_tstPdmDevHlpR3.pfnVMReqPriorityCallWaitV          = tstPdmHlp_VMReqPriorityCallWaitV;
     g_tstPdmDevHlpR3.pfnMMHeapAllocZ                    = tstPdmHlp_MMHeapAllocZ;
     g_tstPdmDevHlpR3.pfnMMHeapFree                      = tstPdmHlp_MMHeapFree;
     g_tstPdmDevHlpR3.pfnPCIBusRegister                  = tstPdmHlp_PCIBusRegister;
