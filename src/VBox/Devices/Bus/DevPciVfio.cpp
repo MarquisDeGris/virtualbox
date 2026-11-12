@@ -5009,7 +5009,7 @@ static int pciVfioFunLayoutFromCfg(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCFGMNODE 
         uint64_t const cb = pLayout->aBars[iBar].cb;
         if (!cb)
             continue;
-        if (   !RT_IS_POWER_OF_TWO(cb)
+        if (   cb == UINT64_MAX
             || (pLayout->aBars[iBar].fIoPorts
                 ? cb < 4 || cb > _32K
                 :    cb < 16
