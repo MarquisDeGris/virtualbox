@@ -7,7 +7,7 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `fb6dca3a` (25 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `c5cc9847` (28 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -16,14 +16,14 @@ Updated: 2026-11-12
 
 WP2 (hardening), WP3 (removal of the device on the host), WP4 (saved state:
 refused while the device is in the VM, possible while the hot-plug slot is
-empty), WP5 (hot-plug slot in the root port, ACPI) and four parts of WP6 are
-done: the guest is asked before a device is taken out of the slot, a device
-can be put into the empty slot while the VM runs, the VM can start with an
-empty slot, and the state of the VM can be saved and loaded while the slot
-is empty. The testcase runs clean with AddressSanitizer, LeakSanitizer and
-UndefinedBehaviorSanitizer, including the fuzz tests (T2). Next: the
-interface for the management and the random test with devices coming and
-going (rest of WP6).
+empty), WP5 (hot-plug slot in the root port, ACPI) and WP6 (the passthrough
+device in the slot) are done: the guest is asked before a device is taken out
+of the slot, a device can be put into the empty slot while the VM runs, the
+VM can start with an empty slot, its state can be saved and loaded while the
+slot is empty, and there is an interface for the management. The testcase has
+49 tests and three random tests and runs clean with AddressSanitizer,
+LeakSanitizer and UndefinedBehaviorSanitizer (T2). Next: WP7, the management
+in Main and `VBoxManage`.
 
 ## Done
 
@@ -222,8 +222,8 @@ going (rest of WP6).
   (commit `2ef64145`, in PGM). The memory which keeps the place of the
   BARs of a device which is not there stays without host memory behind it
   when a state is loaded. The device testcase does not reach PGM, so this
-  has no test of its own. Only a baseline build compiles it: run 180, not
-  finished when this was written.
+  has no test of its own. Only a baseline build compiles it, which run 180
+  did.
 - WP6, fourth part, which is the second part of WP4 (commit `fb6dca3a`):
   the state of the VM can be saved and the VM can be teleported while the
   hot-plug slot is empty.
@@ -253,13 +253,38 @@ going (rest of WP6).
     scan the memory keeping the place of the BARs in every pass, which
     takes time and bookkeeping memory in proportion to the size of the
     BARs.
+- WP6, fifth part (commit `80a60fc9`): an interface for whoever manages the
+  VM, `PDMIPCIPASSTHROUGHPORT` in `include/VBox/vmm/pdmifs.h`, which the
+  device has on its base interface.
+  - It tells whether the device is in a hot-plug capable slot, whether the
+    PCI device of the host is in the VM and whether the guest can reach it;
+    it puts the device into the slot and takes it out.
+  - It tells the layout of a function as values with the names they have
+    in the configuration. The management stores them and puts them into
+    the configuration as they are, without knowing what they mean.
+  - The tests get at the device through it, the way the management does.
+- Interrupts after the VM was suspended and resumed (commit `07cbc95b`):
+  the thread waiting for the interrupts of a function is entered anew each
+  time the VM gets going and put together what to wait for only when the
+  interrupt mode had changed. After a suspend and resume, which is also
+  what a snapshot does, the interrupts of the device no longer reached the
+  guest. The driver has had this all along; the random test below found
+  it.
+- WP6, sixth part (commit `c5cc9847`): a random test for the device in the
+  slot. Guest, management, host and VM do things in random order: accesses,
+  devices which come and go in every way there is, another kind of device
+  plugged in, resets, suspending, saving and loading states. After each
+  operation it checks what has to hold whatever happened, among it that a
+  device in the slot is reached by the guest and gets its interrupts
+  through. One case it does not get to has a test of its own: a state is
+  loaded while the host waits for the device.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 181) |
+| Test | Before the fix | With fixes (run 212) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -309,6 +334,10 @@ Each new test was first run against the device without the fix it belongs to.
 | Hot-plug slot: the VM starts without the device | new feature; deliberate defects are found (runs 133, 134, 136 to 139, 141, 142) | pass |
 | Hot-plug slot: saved state with the slot being empty | new feature; deliberate defects are found (runs 167 to 169, 171, 172) | pass |
 | Hot-plug slot: saved states which are refused | new feature; deliberate defects are found (runs 166 to 168, 170 to 179) | pass |
+| Hot-plug slot: a state is loaded while the host waits for the device | a deliberate defect which went unnoticed before (run 211) is found (run 214) | pass |
+| Hot-plug slot: the interface for the management | new feature; deliberate defects are found (runs 185 to 192) | pass |
+| Interrupts after the VM was suspended and resumed | fails, 14 checks (run 202) | pass |
+| Hot-plug slot: random operations with devices coming and going | new test; found the interrupts lost after suspend and resume (run 195); deliberate defects are found (runs 207, 215) | pass |
 | ACPI table: hardware ID of the root bridge and `_OSC`, executed with the ACPICA tools | without the change: ID and `_OSC` as before (first half of the check) | pass |
 
 ## Test harness (WP1)
@@ -342,11 +371,9 @@ harness since WP5, saved states since the fourth part of WP6.
 
 ## Next
 
-1. WP6, rest: interface for the management; random test with devices
-   coming and going.
-2. WP7: management interface, which also sets the two settings of WP5 and
-   stores the layout.
-3. T4: a guest operating system using the slot, in CI.
+1. WP7: the management in Main and `VBoxManage`, which uses the interface
+   of the device, sets the two settings of WP5 and stores the layout.
+2. T4: a guest operating system using the slot, in CI.
 
 ## Decisions
 
@@ -399,6 +426,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-12 | One critical section serializes putting a device in, taking functions out of service, the EMT part of a removal and the saved state callbacks | Several EMTs and the watcher thread can be at these at the same time |
 | 2026-11-12 | PGM leaves MMIO2 pages alone which are zero when a state is loaded | Writing zeros to the memory keeping the place of the BARs makes the host back it, which can be many gigabytes nobody needs |
 | 2026-11-12 | The mock saves and loads states as a stream of typed items, with a unit standing in for PGM which writes to every MMIO2 page | A get which does not match its put shows, and so does a load which reaches device memory |
+| 2026-11-12 | The management gets the layout of a function as values under the names they have in the configuration and stores them as they are | Nothing outside the device has to know what a layout consists of, and nothing has to change there when it gets another value |
+| 2026-11-12 | A random test for the device in the slot with checks after every operation, next to the tests for single cases | The cases nobody thought of are sequences; the first run with interrupts in it found a defect the driver has had all along |
 
 ## Test tiers (see PLAN.md section 6)
 
@@ -496,5 +525,17 @@ harness since WP5, saved states since the fourth part of WP6.
 | 164, 165 | `scratch/slotstate` | tests, sanitize | passed | with the message of the PCI bus fixed and a state with another vendor ID as a test; the tree of the code branch @ `fb6dca3a` |
 | 166 to 179 | `scratch/mutant-su1` to `scratch/mutant-su14` | tests | failed as intended | all fourteen deliberate defects on the final tree, each one caught by a failing test, none by a crash |
 | 181, 182 | code branch @ `fb6dca3a` | tests, sanitize | passed | 46 tests, two fuzz tests, ACPI table check |
+| 180 | code branch @ `fb6dca3a` | baseline | passed | full build, the only kind which compiles the PGM change. 875 warning lines, none in a file the branch changes; `main` had 871 and 874 in runs 5 and 7, the number depends on how lines of parallel jobs fall together |
+| 183, 184 | `scratch/slotifc` | tests, sanitize | passed | fifth part of WP6, 47 tests; the tree of the code branch @ `80a60fc9` |
+| 185 to 192 | `scratch/mutant-if1` to `scratch/mutant-if8` | tests | failed as intended | eight deliberate defects in the interface for the management, each one caught |
+| 193, 194 | `scratch/slotfuzz` | tests, sanitize | passed | first version of the third random test |
+| 195, 196 | `scratch/slotfuzz` | tests, sanitize | failed | the random test with interrupts of the device in it: one did not arrive after the VM was suspended and resumed |
+| 197 to 201 | `scratch/mutant-fz1` to `scratch/mutant-fz5` | tests | failed | of no use: started before run 195 was looked at, they fail for its reason |
+| 202 | `scratch/red-evidence-15` | tests | failed as intended | the test for interrupts after suspend and resume against the driver without the fix |
+| 203, 204 | `scratch/irqresume` | tests, sanitize | passed | with the fix, 48 tests; the tree of the code branch @ `07cbc95b` |
+| 205, 206 | `scratch/slotfuzz2` | tests, sanitize | passed | the random test on top of the fix; 40000 operations in run 205: the device put in 1034 times, taken by the host 503 times, 837 states saved, 844 loaded, 713 interrupts of the device |
+| 207 to 211 | `scratch/mutant-fy1` to `scratch/mutant-fy5` | tests | 207, 209, 210 failed as intended; 208, 211 passed | five deliberate defects which take a sequence of events to show. One is caught by the random test alone (207), two by other tests (209, 210). One changes nothing (208: the hold-off of the attention button is cleared when the link goes down as well). One went unnoticed (211: the watcher thread is not woken when a device is put back after a state was loaded), no test got to that |
+| 212, 213 | `scratch/slotfuzz2` | tests, sanitize | passed | with a test for that case: 49 tests and three random tests; the tree of the code branch @ `c5cc9847` |
+| 214, 215 | `scratch/mutant-fy5b`, `scratch/mutant-fy1b` | tests | failed as intended | the defect which went unnoticed is caught by the new test, the other one by the random test again |
 
 Run numbers are those GitHub shows for the `build` workflow.

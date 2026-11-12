@@ -223,8 +223,9 @@ Design:
   page when saving and writes to every one when loading, the BARs mapped
   into the guest are MMIO2 pages, and with the device out these are
   ordinary memory.
-- Management reaches attach and detach through a PDM interface of the
-  device (used by WP7).
+- Management reaches the device through a PDM interface of the device,
+  as built `PDMIPCIPASSTHROUGHPORT`: state, attach, detach, and the layout
+  as values under the names they have in the configuration (used by WP7).
 
 Steps, each with tests in the model and a green CI run:
 
@@ -238,7 +239,7 @@ Steps, each with tests in the model and a green CI run:
 4. PDM interface for the management; fuzz test with devices coming and
    going.
 
-Steps 1 to 3 are done, see `STATUS.md`.
+All four steps are done, see `STATUS.md`.
 
 - Acceptance: attach/detach loops in the model without leaks; mismatching
   device is refused; guest sees removal and re-arrival in simulation.
