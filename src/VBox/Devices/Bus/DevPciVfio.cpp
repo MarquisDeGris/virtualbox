@@ -5289,7 +5289,7 @@ static DECLCALLBACK(int) pciVfioLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
     pThis->fLoadReattach = false;
 
     /* A state without the unit of this device was saved by a VM which didn't have the device at all. */
-    if (!pThis->fLoadUnitSeen)
+    if (!pThis->fLoadUnitSeen && !pThis->pDevInsPort)
         rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
                                       N_("The saved state was made without the PCI device of the host which is "
                                          "configured for the VM now. Remove the device from the VM or discard "
