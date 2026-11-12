@@ -4740,7 +4740,7 @@ static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
 
     /* The watcher thread has functions to watch again. */
     uint64_t const uOne      = 1;
-    ssize_t const  cbWritten = write(pThis->iFdWatcherWakeup, &uOne, sizeof(uOne));
+    ssize_t const  cbWritten = PDMDevHlpVMState(pDevIns) == VMSTATE_LOADING ? 0 : write(pThis->iFdWatcherWakeup, &uOne, sizeof(uOne));
     RT_NOREF(cbWritten);
 
     LogRel(("VFIO#%d: A device was put into the slot\n", pThis->iInstance));
