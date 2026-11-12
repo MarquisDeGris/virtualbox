@@ -3387,6 +3387,49 @@ static DECLCALLBACK(void) tstPortLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
 static uint32_t g_cMsTstGuestRelease = 0;
 
 
+/** The layouts tstPortFixtureSetupEx() puts into the configuration of the functions, NULL for none. */
+static PCPCIVFIOFUNLAYOUT g_paTstLayouts = NULL;
+/** The functions which are not there when tstPortFixtureSetupEx() creates the VM, a bit for each. */
+static uint32_t g_fTstDevicesAbsent = 0;
+
+
+/**
+ * Puts the layout of a function into its configuration.
+ *
+ * @param   pCfgFun             The configuration node of the function.
+ * @param   pLayout             The layout.
+ */
+static void tstCfgAddLayout(PCFGMNODE pCfgFun, PCPCIVFIOFUNLAYOUT pLayout)
+{
+    PCFGMNODE pCfgLayout = tstCfgNodeCreate(pCfgFun, "Layout");
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "ConfigSpaceSize", pLayout->cbPciCfg), VINF_SUCCESS);
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars); iBar++)
+        if (pLayout->aBars[iBar].cb)
+        {
+            char szName[32];
+            RTStrPrintf(szName, sizeof(szName), "Bar%uSize", iBar);
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, szName, pLayout->aBars[iBar].cb), VINF_SUCCESS);
+            RTStrPrintf(szName, sizeof(szName), "Bar%uIoPorts", iBar);
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, szName, pLayout->aBars[iBar].fIoPorts), VINF_SUCCESS);
+            RTStrPrintf(szName, sizeof(szName), "Bar%u64Bit", iBar);
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, szName, pLayout->aBars[iBar].f64Bit), VINF_SUCCESS);
+            RTStrPrintf(szName, sizeof(szName), "Bar%uPrefetchable", iBar);
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, szName, pLayout->aBars[iBar].fPrefetchable), VINF_SUCCESS);
+            RTStrPrintf(szName, sizeof(szName), "Bar%uMappable", iBar);
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, szName, pLayout->aBars[iBar].fMappable), VINF_SUCCESS);
+        }
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "RomSize", pLayout->cbRom), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "Vga", pLayout->fVga), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "Msix", pLayout->fMsix), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "MsixBar", pLayout->iBarMsix), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "IntxVectors", pLayout->acIrqVectors[0]), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "MsiVectors", pLayout->acIrqVectors[1]), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "MsixVectors", pLayout->acIrqVectors[2]), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "MsixTableOffset", pLayout->offMsixTbl), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, "MsixPbaOffset", pLayout->offMsixPba), VINF_SUCCESS);
+}
+
+
 /**
  * Sets up a VM with the ICH9 PCI bus and a bridge on it, a PCI express root
  * port usually, and optionally the fake kernel with PCI functions and a
@@ -3423,6 +3466,8 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
         RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
         if (RT_FAILURE(rc))
             return rc;
+        if (g_fTstDevicesAbsent & RT_BIT_32(i))
+            tstVfioKrnlDevSetGone(papDevs[i], true);
     }
 
     rc = tstPdmInit(TST_RAM_SIZE);
@@ -3476,6 +3521,8 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
             RTStrPrintf(szName, sizeof(szName), "Fun%u", i);
             PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, szName);
             RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", paModels[i].szNode), VINF_SUCCESS);
+            if (g_paTstLayouts)
+                tstCfgAddLayout(pCfgFun, &g_paTstLayouts[i]);
         }
         rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, ppDevInsDev);
     }
@@ -4966,6 +5013,232 @@ static void tstSlotAttach(void)
 }
 
 
+/**
+ * The VM is started without the device, built from the layout a VM which was
+ * started with the device has told, and gets the device later.
+ */
+static void tstSlotStartEmpty(void)
+{
+    RTTestISub("Hot-plug slot: the VM starts without the device");
+
+    static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
+    PCIVFIOFUNLAYOUT     Layout;
+    for (unsigned iVariant = 0; iVariant < 3; iVariant++)
+    {
+        /* The device: a memory BAR with MSI and INTx, MSI-X with the table and the pending bits in
+           a BAR of their own, an I/O port BAR and a prefetchable 64-bit memory BAR. */
+        if (iVariant == 1)
+            tstModelInitMsixDedicatedBar(&s_Model, 8 /*cVectors*/);
+        else
+            tstModelInitDefault(&s_Model);
+        if (iVariant == 2)
+        {
+            tstModelSetBar(&s_Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+            tstModelSetBar(&s_Model, 2, _1M, PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_BAR64 | PCI_ADDRESS_SPACE_MEM_PREFETCH);
+        }
+
+        /*
+         * A VM which is started with the device tells what it is built from.
+         */
+        RT_ZERO(Layout);
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            RTTESTI_CHECK_RC(pciVfioR3QueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
+            PCIVFIOFUNLAYOUT Layout1;
+            RTTESTI_CHECK_RC(pciVfioR3QueryLayout(pDevInsDev, 1, &Layout1), VERR_NOT_FOUND);
+            RTTESTI_CHECK_MSG(Layout.cbPciCfg == s_Model.cbCfg, ("variant %u: %u\n", iVariant, Layout.cbPciCfg));
+            RTTESTI_CHECK_MSG(   Layout.aBars[0].cb == TST_BAR0_SIZE
+                              && !Layout.aBars[0].fIoPorts
+                              && !Layout.aBars[0].f64Bit
+                              && Layout.aBars[0].fMappable, ("variant %u\n", iVariant));
+            if (iVariant == 0)
+                RTTESTI_CHECK(   Layout.acIrqVectors[0] == 1 && Layout.acIrqVectors[1] == 4 && Layout.acIrqVectors[2] == 0
+                              && !Layout.fMsix && Layout.aBars[1].cb == 0);
+            else if (iVariant == 1)
+                RTTESTI_CHECK(   Layout.fMsix && Layout.iBarMsix == 2 && Layout.acIrqVectors[2] == 8
+                              && Layout.offMsixTbl == 0 && Layout.offMsixPba == _4K && Layout.aBars[2].cb == _8K);
+            else
+                RTTESTI_CHECK(   Layout.aBars[1].cb == TST_IOBAR_SIZE && Layout.aBars[1].fIoPorts
+                              && Layout.aBars[2].cb == _1M && Layout.aBars[2].f64Bit && Layout.aBars[2].fPrefetchable
+                              && Layout.aBars[3].cb == 0);
+        }
+        tstFixtureTeardown();
+        if (RT_FAILURE(rc))
+            continue;
+
+        /*
+         * A VM with this in its configuration starts without the device.
+         */
+        g_paTstLayouts      = &Layout;
+        g_fTstDevicesAbsent = RT_BIT_32(0);
+        rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_paTstLayouts      = NULL;
+        g_fTstDevicesAbsent = 0;
+        if (RT_SUCCESS(rc))
+        {
+            /* The slot is empty, the guest memory is ready for a device. */
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!devpciR3HotPlugSlotIsLinkUp(pDevInsPort), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == 0xffff, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == TST_RAM_SIZE - TSTPDM_RAM_HOLE_SIZE,
+                              ("variant %u: %RU64 bytes mapped for DMA\n", iVariant, tstVfioKrnlGetDmaMappedBytes()));
+            uint32_t const cFdsEmpty = tstVfioKrnlGetOpenFdCount();
+
+            /* Nothing to take out, a reset of the VM changes nothing, and the device still isn't there. */
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+            tstPdmReset();
+            tstPortGuestSetBusNumbers();
+            tstPortGuestEnableMsi();
+            tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+            rc = pciVfioR3SlotAttach(pDevInsDev);
+            RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("variant %u: %Rrc\n", iVariant, rc));
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsEmpty, ("variant %u\n", iVariant));
+
+            /* It gets plugged in and put into the slot: the guest finds and uses it. */
+            tstVfioKrnlDevSetGone(pDev, false);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            if (iVariant == 0)
+                tstSlotCheckMsi(__LINE__, pDev);
+            else if (iVariant == 1)
+            {
+                /* The MSI-X table is the one of the guest: all vectors start out masked. */
+                tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_BASE_ADDRESS_2, TST_MSIX_BAR_ADDR, 4);
+                uint32_t u32 = 0;
+                RTTESTI_CHECK_RC(tstPdmPhysRead(TST_MSIX_BAR_ADDR + 12, &u32, sizeof(u32)), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(u32 == 1, ("vector control of MSI-X table entry 0 is %#RX32\n", u32));
+                u32 = UINT32_C(0x00004711);
+                RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_MSIX_BAR_ADDR + 8, &u32, sizeof(u32)), VINF_SUCCESS);
+                u32 = 0;
+                RTTESTI_CHECK_RC(tstPdmPhysRead(TST_MSIX_BAR_ADDR + 8, &u32, sizeof(u32)), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(u32 == UINT32_C(0x00004711), ("message data of MSI-X table entry 0 is %#RX32\n", u32));
+            }
+            else
+            {
+                /* The I/O port BAR. */
+                uint8_t *pbIo = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR1_REGION_INDEX);
+                RTTESTI_CHECK(pbIo != NULL);
+                if (pbIo)
+                {
+                    pbIo[3] = 0x5a;
+                    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_BASE_ADDRESS_1, TST_IOBAR_PORT, 4);
+                    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND,
+                                      VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+                    uint32_t u32 = 0;
+                    RTTESTI_CHECK_RC(tstPdmIoPortRead(TST_IOBAR_PORT + 3, &u32, 1), VINF_SUCCESS);
+                    RTTESTI_CHECK_MSG((uint8_t)u32 == 0x5a, ("read %#RX32 from the I/O port BAR\n", u32));
+                }
+            }
+
+            /* Out and in once more. */
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsEmpty, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                              ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * What doesn't work.  The layout is the one of the last device above.
+     */
+    for (unsigned iVariant = 0; iVariant < 8; iVariant++)
+    {
+        TSTVFIODEVCFG    aModels[2];
+        aModels[0] = s_Model;
+        aModels[1] = s_Model;
+        RTStrCopy(aModels[1].szNode, sizeof(aModels[1].szNode), "/dev/vfio/devices/vfio1");
+        PCIVFIOFUNLAYOUT aLayouts[2] = { Layout, Layout };
+        uint32_t         cModels     = 1;
+        bool             fHotPlug    = true;
+        int              rcExpected  = VERR_INVALID_PARAMETER;
+        g_fTstDevicesAbsent = RT_BIT_32(0);
+        switch (iVariant)
+        {
+            case 0: /* The slot isn't a hot-plug capable one. */
+                fHotPlug   = false;
+                rcExpected = VERR_NOT_SUPPORTED;
+                break;
+            case 1: /* Two functions, one of them is there. */
+                cModels    = 2;
+                g_fTstDevicesAbsent = RT_BIT_32(1);
+                rcExpected = VERR_NOT_SUPPORTED;
+                break;
+            case 2: /* A BAR size which isn't one. */
+                aLayouts[0].aBars[0].cb = TST_BAR0_SIZE + _4K;
+                break;
+            case 3: /* A 64-bit BAR with another BAR where its upper half is. */
+                aLayouts[0].aBars[2].cb     = _1M;
+                aLayouts[0].aBars[2].f64Bit = true;
+                aLayouts[0].aBars[3].cb     = _4K;
+                break;
+            case 4: /* More interrupts than there can be. */
+                aLayouts[0].acIrqVectors[1] = 4096;
+                break;
+            case 5: /* An MSI-X table which isn't inside its BAR. */
+                aLayouts[0].fMsix           = true;
+                aLayouts[0].iBarMsix        = 0;
+                aLayouts[0].acIrqVectors[2] = 8;
+                aLayouts[0].offMsixTbl      = TST_BAR0_SIZE - 8;
+                aLayouts[0].offMsixPba      = 0;
+                break;
+            case 6: /* A config space of a size there is none of. */
+                aLayouts[0].cbPciCfg = 512;
+                break;
+            default: /* A ROM of a size there is none of. */
+                aLayouts[0].cbRom = _4K + 512;
+                break;
+        }
+        g_paTstLayouts = aLayouts;
+        PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+        PPDMDEVINS  pDevInsPort = NULL;
+        int rc = tstPortFixtureSetupEx("RootCmplxRootPort", fHotPlug, aModels, cModels, apDevs, &pDevInsPort, NULL);
+        g_paTstLayouts      = NULL;
+        g_fTstDevicesAbsent = 0;
+        RTTESTI_CHECK_MSG(rc == rcExpected, ("variant %u: %Rrc, expected %Rrc\n", iVariant, rc, rcExpected));
+        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("variant %u: no message\n", iVariant));
+        tstFixtureTeardown();
+    }
+
+    /*
+     * A VM which was started without the device takes no device of another kind.
+     */
+    static TSTVFIODEVCFG s_Other;
+    s_Other = s_Model;
+    tstModelSetBar(&s_Other, 0, TST_BAR0_SIZE * 2, PCI_ADDRESS_SPACE_MEM);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    g_paTstLayouts      = &Layout;
+    g_fTstDevicesAbsent = RT_BIT_32(0);
+    int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    g_paTstLayouts      = NULL;
+    g_fTstDevicesAbsent = 0;
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Other), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_MISMATCH);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+    }
+    tstFixtureTeardown();
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -5017,6 +5290,7 @@ int main()
     tstSlotDetach();
     tstSlotHostRequest();
     tstSlotAttach();
+    tstSlotStartEmpty();
     tstFuzz();
     tstPortFuzz();
 
