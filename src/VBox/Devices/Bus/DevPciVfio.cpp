@@ -3883,8 +3883,7 @@ static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszW
 {
     /* Being out of service and the device being let go of are one thing for whoever
        holds the critical section of the slot. */
-    int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
-    AssertRC(rcLock);
+    int const rcLock = VERR_SEM_DESTROYED;
     bool const fWasGone = ASMAtomicXchgBool(&pFun->fGone, true);
     if (!fWasGone)
     {
