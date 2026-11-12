@@ -350,8 +350,6 @@ typedef struct TSTPDM
     uint32_t            cReqs;
     /** Number of requests made so far. */
     uint32_t volatile   cReqsTotal;
-    /** Number of requests made so far. */
-    uint32_t volatile   cReqsTotal;
     /** Whether requests wait until the test asks for them to be done. */
     bool                fManualReqs;
     /** Number of blocks currently allocated from the MM heap. */
@@ -986,7 +984,6 @@ static DECLCALLBACK(int) tstPdmHlp_VMReqCallNoWaitV(PPDMDEVINS pDevIns, VMCPUID 
         for (unsigned i = 0; i < cArgs; i++)
             g_Pdm.aReqs[g_Pdm.cReqs].auArgs[i] = va_arg(Args, uintptr_t);
         g_Pdm.cReqs++;
-        g_Pdm.cReqsTotal++;
         g_Pdm.cReqsTotal++;
     }
     else
@@ -1967,17 +1964,6 @@ void tstPdmProcessRequests(void)
             default: ((int (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t))pfn)(auArgs[0], auArgs[1], auArgs[2], auArgs[3]); break;
         }
     }
-}
-
-
-/**
- * Returns the number of requests for the EMT devices have made so far.
- *
- * @returns Number of requests, those which are done included.
- */
-uint32_t tstPdmGetRequestCount(void)
-{
-    return ASMAtomicReadU32(&g_Pdm.cReqsTotal);
 }
 
 

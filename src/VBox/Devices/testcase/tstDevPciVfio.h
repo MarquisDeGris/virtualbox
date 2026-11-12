@@ -193,7 +193,6 @@ void            tstPdmPowerOff(void);
 void            tstPdmReset(void);
 void            tstPdmProcessRequests(void);
 uint32_t        tstPdmGetRequestCount(void);
-uint32_t        tstPdmGetRequestCount(void);
 void            tstPdmSetRequestProcessing(bool fAutomatic);
 int             tstPdmIoPortRead(RTIOPORT uPort, uint32_t *pu32, unsigned cb);
 int             tstPdmIoPortWrite(RTIOPORT uPort, uint32_t u32, unsigned cb);
