@@ -110,20 +110,20 @@
  * Before a device in such a slot is taken away from the guest, the guest is asked to let go of it
  * by the attention button of the slot and gets time for it; it shows that it is done by switching
  * the slot off. This is how it goes when the host wants the device back while the device still
- * answers, and when the device is detached on request, see pciVfioR3SlotDetach(). A guest which
+ * answers, and when the device is detached on request, see pciVfioPortDetach(). A guest which
  * doesn't react loses the device the hard way when the time is up, if it is the host which waits
  * or if the one who made the request insists. The slot is empty afterwards and the guest is told
  * so. An error of the device reported by the host and a device which no longer answers empty the
  * slot at once.
  *
- * A device can be put into the empty slot while the VM runs, see pciVfioR3SlotAttach(). It has to be
+ * A device can be put into the empty slot while the VM runs, see pciVfioPortAttach(). It has to be
  * like the device the VM was started with as far as the VM was built around that one: the BARs,
  * the place of the MSI-X table, the size of the ROM and the interrupts. A device which is not is
  * refused. The guest is told that there is a device in the slot and takes it from there.
  *
  * The VM can also start without the device and get it later. It has to know what to be built
  * from then, which is the Layout node in the configuration of each function, see
- * pciVfioFunLayoutFromCfg(). The values are those pciVfioR3QueryLayout() returns for a VM which
+ * pciVfioFunLayoutFromCfg(). The values are those pciVfioPortQueryLayout() tells for a VM which
  * was started with the device. A device which is there when the VM starts is what counts, the
  * configured layout is not looked at then.
  *
@@ -135,6 +135,10 @@
  * reads and writes the memory of the VM for the saved state gets the ordinary memory keeping
  * the place of the device memory, and never the memory of a device. A state is only loaded
  * into a VM which is built from the same layout as the one which saved it.
+ *
+ * Whoever manages the VM does all of this through the PDMIPCIPASSTHROUGHPORT interface of the
+ * device: taking the device out of the slot, putting it in, asking how things are with it, and
+ * getting the layout to store for the next start of the VM.
  *
  * @section sec_dev_vfio_requirements
  *
@@ -257,6 +261,7 @@
 #include <iprt/string.h>
 #include <iprt/thread.h>
 #include <iprt/time.h>
+#include <iprt/uuid.h>
 #include <iprt/errcore.h>
 
 #include <iprt/linux/sysfs.h>
@@ -633,6 +638,8 @@ typedef struct VFIOPCI
     bool                 fLoadReattach;
     /** Flag whether the saved state being loaded has the unit of this device. */
     bool                 fLoadUnitSeen;
+    /** The interface for whoever manages the VM. */
+    PDMIPCIPASSTHROUGHPORT IPassthroughPort;
 } VFIOPCI;
 /** Pointer to the raw PCI instance data. */
 typedef VFIOPCI *PVFIOPCI;
@@ -4386,27 +4393,11 @@ static DECLCALLBACK(void) pciVfioSlotLinkChanged(PPDMDEVINS pDevIns, bool fLinkU
 
 
 /**
- * Takes the device out of the hot-plug capable slot it is in.
- *
- * The guest is asked to let go of the device first, by the attention button of
- * the slot, if it has the slot switched on.  It shows that it did by switching
- * the slot off, which a guest takes five seconds and more for.
- *
- * @returns VBox status code.
- * @retval  VERR_NOT_SUPPORTED if the device is not in a hot-plug capable slot.
- * @retval  VERR_TIMEOUT if the guest didn't let go of the device in time and
- *          fForce is clear.  The device is where it was.  The guest was asked and
- *          can still switch the slot off, which leaves the device in the slot.
- * @param   pDevIns     The device instance.
- * @param   cMsWait     How long to wait for the guest to let go of the device.
- * @param   fForce      Whether the device is taken away from the guest if it didn't
- *                      let go of it in time.
- *
- * @thread  Any but an EMT, which is needed for the guest to do its part.
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnDetach}
  */
-DECLHIDDEN(int) pciVfioR3SlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bool fForce)
+static DECLCALLBACK(int) pciVfioPortDetach(PPDMIPCIPASSTHROUGHPORT pInterface, RTMSINTERVAL cMsWait, bool fForce)
 {
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
     if (!pThis->pDevInsPort)
         return VERR_NOT_SUPPORTED;
 
@@ -4795,28 +4786,16 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
 
 
 /**
- * Puts the device which is configured for the device instance into the empty
- * hot-plug capable slot.  The guest is told and does the rest.
- *
- * The device has to be like the one the VM was started with as far as the VM
- * is built around that, see pciVfioFunCheckLayout().
- *
- * @returns VBox status code, the reason for a failure is in the release log.
- * @retval  VERR_NOT_SUPPORTED if the device instance is not in a hot-plug capable slot.
- * @retval  VERR_ALREADY_EXISTS if there is a device in the slot.
- * @retval  VERR_MISMATCH if the device is not like the one the VM was started with.
- * @retval  VERR_VM_INVALID_VM_STATE if the VM is neither running nor suspended, which
- *          it isn't while its state is being saved or loaded.
- * @param   pDevIns     The device instance.
- *
- * @thread  Any.
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnAttach}
  */
-DECLHIDDEN(int) pciVfioR3SlotAttach(PPDMDEVINS pDevIns)
+static DECLCALLBACK(int) pciVfioPortAttach(PPDMIPCIPASSTHROUGHPORT pInterface)
 {
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
     if (!pThis->pDevInsPort)
         return VERR_NOT_SUPPORTED;
-    return PDMDevHlpVMReqPriorityCallWait(pDevIns, VMCPUID_ANY, (PFNRT)pciVfioSlotAttachOnEmt, 1, pDevIns);
+
+    /* On an EMT, so nothing of the VM gets in the way.  See pciVfioFunCheckLayout() for what the device has to be like. */
+    return PDMDevHlpVMReqPriorityCallWait(pThis->pDevIns, VMCPUID_ANY, (PFNRT)pciVfioSlotAttachOnEmt, 1, pThis->pDevIns);
 }
 
 
@@ -4927,6 +4906,9 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
 
     return VINF_SUCCESS;
 }
+
+
+static int pciVfioFunQueryLayout(PVFIOPCI pThis, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout);
 
 
 /**
@@ -5066,7 +5048,7 @@ static DECLCALLBACK(int) pciVfioSaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
     for (uint32_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PCIVFIOFUNLAYOUT Layout;
-        if (RT_FAILURE(pciVfioR3QueryLayout(pDevIns, iPciFun, &Layout)))
+        if (RT_FAILURE(pciVfioFunQueryLayout(pThis, iPciFun, &Layout)))
             continue;
 
         pHlp->pfnSSMPutU32(pSSM, iPciFun);
@@ -5244,7 +5226,7 @@ static DECLCALLBACK(int) pciVfioLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, ui
         AssertRCReturn(rc, rc);
 
         PCIVFIOFUNLAYOUT Layout;
-        rc = pciVfioR3QueryLayout(pDevIns, iPciFun, &Layout);
+        rc = pciVfioFunQueryLayout(pThis, iPciFun, &Layout);
         if (RT_FAILURE(rc))
             return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
                                            N_("The state was saved with function %u of a passed through PCI device, "
@@ -5359,16 +5341,16 @@ static DECLCALLBACK(int) pciVfioInitComplete(PPDMDEVINS pDevIns)
  *
  * @returns VBox status code.
  * @retval  VERR_NOT_FOUND if the function is not configured.
- * @param   pDevIns     The device instance.
+ * @param   pThis       The VFIO PCI device instance.
  * @param   iPciFun     The function.
  * @param   pLayout     Where to return the layout.
  *
  * @thread  Any.
  */
-DECLHIDDEN(int) pciVfioR3QueryLayout(PPDMDEVINS pDevIns, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout)
+static int pciVfioFunQueryLayout(PVFIOPCI pThis, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout)
 {
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
-    AssertReturn(iPciFun < RT_ELEMENTS(pThis->aPciFuns), VERR_INVALID_PARAMETER);
+    if (iPciFun >= RT_ELEMENTS(pThis->aPciFuns))
+        return VERR_NOT_FOUND;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
     if (pFun->iFdVfio == -1)
         return VERR_NOT_FOUND;
@@ -5403,9 +5385,101 @@ DECLHIDDEN(int) pciVfioR3QueryLayout(PPDMDEVINS pDevIns, uint32_t iPciFun, PPCIV
 
 
 /**
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnQueryLayout}
+ */
+static DECLCALLBACK(int) pciVfioPortQueryLayout(PPDMIPCIPASSTHROUGHPORT pInterface, uint32_t iFunction,
+                                                PFNPDMPCIPASSTHROUGHLAYOUTVALUE pfnValue, void *pvUser)
+{
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
+    AssertPtrReturn(pfnValue, VERR_INVALID_POINTER);
+
+    PCIVFIOFUNLAYOUT Layout;
+    int rc = pciVfioFunQueryLayout(pThis, iFunction, &Layout);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /*
+     * The values under the names pciVfioFunLayoutFromCfg() reads them by.  A BAR
+     * which isn't there has no values.
+     */
+    rc = pfnValue(pvUser, "ConfigSpaceSize", Layout.cbPciCfg);
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(Layout.aBars) && RT_SUCCESS(rc); iBar++)
+        if (Layout.aBars[iBar].cb)
+        {
+            static const char * const s_apszBarValues[] = { "Size", "IoPorts", "64Bit", "Prefetchable", "Mappable" };
+            uint64_t const            auBarValues[]     =
+            {
+                Layout.aBars[iBar].cb,
+                Layout.aBars[iBar].fIoPorts,
+                Layout.aBars[iBar].f64Bit,
+                Layout.aBars[iBar].fPrefetchable,
+                Layout.aBars[iBar].fMappable
+            };
+            AssertCompile(RT_ELEMENTS(s_apszBarValues) == RT_ELEMENTS(auBarValues));
+            for (uint32_t i = 0; i < RT_ELEMENTS(s_apszBarValues) && RT_SUCCESS(rc); i++)
+            {
+                char szName[32];
+                RTStrPrintf(szName, sizeof(szName), "Bar%u%s", iBar, s_apszBarValues[i]);
+                rc = pfnValue(pvUser, szName, auBarValues[i]);
+            }
+        }
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "RomSize", Layout.cbRom);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "Vga", Layout.fVga);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "Msix", Layout.fMsix);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixBar", Layout.iBarMsix);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "IntxVectors", Layout.acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsiVectors", Layout.acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixVectors", Layout.acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixTableOffset", Layout.offMsixTbl);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixPbaOffset", Layout.offMsixPba);
+    return rc;
+}
+
+
+/**
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnQueryState}
+ */
+static DECLCALLBACK(int) pciVfioPortQueryState(PPDMIPCIPASSTHROUGHPORT pInterface, bool *pfHotPlug, bool *pfPresent, bool *pfInUse)
+{
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
+
+    /* A device which is being put into the slot or taken out of it shows as not being there. */
+    bool const fPresent = !pciVfioIsOutOfService(pThis);
+    *pfHotPlug = pThis->pDevInsPort != NULL;
+    *pfPresent = fPresent;
+    *pfInUse   =    fPresent
+                 && (   !pThis->pDevInsPort
+                     || devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort));
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @interface_method_impl{PDMIBASE,pfnQueryInterface}
+ */
+static DECLCALLBACK(void *) pciVfioQueryInterface(PPDMIBASE pInterface, const char *pszIID)
+{
+    PPDMDEVINS pDevIns = RT_FROM_MEMBER(pInterface, PDMDEVINS, IBase);
+    PVFIOPCI   pThis   = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PDMIBASE_RETURN_INTERFACE(pszIID, PDMIBASE, &pDevIns->IBase);
+    PDMIBASE_RETURN_INTERFACE(pszIID, PDMIPCIPASSTHROUGHPORT, &pThis->IPassthroughPort);
+    return NULL;
+}
+
+
+/**
  * Reads what the VM is to be built from for a function from the configuration,
  * for a device which isn't there when the VM starts, and checks that it makes
- * sense.  This is what pciVfioR3QueryLayout() returns for a VM which was
+ * sense.  This is what pciVfioPortQueryLayout() tells for a VM which was
  * started with the device.
  *
  * @returns VBox status code.
@@ -5738,6 +5812,12 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->msAttnPressed    = 0;
     pThis->fLoadReattach    = false;
     pThis->fLoadUnitSeen    = false;
+
+    pDevIns->IBase.pfnQueryInterface       = pciVfioQueryInterface;
+    pThis->IPassthroughPort.pfnQueryState  = pciVfioPortQueryState;
+    pThis->IPassthroughPort.pfnAttach      = pciVfioPortAttach;
+    pThis->IPassthroughPort.pfnDetach      = pciVfioPortDetach;
+    pThis->IPassthroughPort.pfnQueryLayout = pciVfioPortQueryLayout;
 
     for (uint8_t i = 0; i < RT_ELEMENTS(pThis->aPciFuns); i++)
     {
