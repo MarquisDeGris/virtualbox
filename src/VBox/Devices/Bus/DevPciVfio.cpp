@@ -5285,7 +5285,7 @@ static DECLCALLBACK(int) pciVfioLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
     /* The PCI bus takes what it knows about the interrupt capabilities of a function from the
        state.  It knows nothing about those of our functions, they are dealt with here. */
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns) && RT_SUCCESS(rc); iPciFun++)
-        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+        if (   pThis->aPciFuns[iPciFun].iFdVfio == -2
             && (   pDevIns->apPciDevs[iPciFun]->Int.s.u8MsiCapOffset
                 || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsiCapSize
                 || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsixCapOffset
