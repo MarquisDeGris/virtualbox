@@ -4127,11 +4127,11 @@ static void tstPortFuzz(void)
         for (uint32_t iOp = 0; iOp < cOps; iOp++)
         {
             /* What decides about interrupts, before the operation. */
-            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            uint32_t const cErrorsBefore = RTTestIErrorCount();
+            uint32_t const cMsisBefore   = tstPdmMsiGetCount();
             bool const     fCanIrqBefore =    (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) & VBOX_PCI_MSI_FLAGS_ENABLE)
-                                           && (   (tstPortCfgRead(TSTPORT_SLTCTL, 2) & VBOX_PCI_EXP_SLTCTL_HPIE)
-                                               /* An interrupt held back by the mask bit of MSI comes when the guest clears the bit. */
-                                               || (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_PENDING_BITS_64, 1) & 1));
+                                           && (tstPortCfgRead(TSTPORT_SLTCTL, 2) & VBOX_PCI_EXP_SLTCTL_HPIE);
+            bool           fMsiMaskWrite = false;
 
             uint32_t const uOp = tstRnd(0, 99);
             if (uOp < 50)
@@ -4154,6 +4154,8 @@ static void tstPortFuzz(void)
                 if (   off + cb > VBOX_PCI_PRIMARY_BUS
                     && off <= VBOX_PCI_SUBORDINATE_BUS)
                     continue;
+                fMsiMaskWrite =    off + cb > TSTPORT_MSI_CAP + VBOX_MSI_CAP_MASK_BITS_64
+                                && off < TSTPORT_MSI_CAP + VBOX_MSI_CAP_PENDING_BITS_64;
                 tstPortCfgWrite(off, tstRndValue(), cb);
             }
             else if (uOp < 58)
@@ -4204,15 +4206,21 @@ static void tstPortFuzz(void)
                     tstPortGuestSetBusNumbers();
             }
 
-            /* No interrupt unless the guest has asked for it, before or by what it just did. */
+            /* No interrupt unless the guest has asked for it, before or by what it just did, and one
+               at most.  What MSI does when the guest clears mask bits is none of the port's business:
+               there are pending bits for more interrupts than the port has, and the guest can set them. */
             bool const fCanIrqAfter =    (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) & VBOX_PCI_MSI_FLAGS_ENABLE)
                                       && (tstPortCfgRead(TSTPORT_SLTCTL, 2) & VBOX_PCI_EXP_SLTCTL_HPIE);
             uint32_t const cMsis = tstPdmMsiGetCount();
-            RTTESTI_CHECK_MSG(cMsis == cMsisBefore || fCanIrqBefore || fCanIrqAfter,
-                              ("%u interrupt(s) the guest has not asked for\n", cMsis - cMsisBefore));
-            RTTESTI_CHECK_MSG(cMsis - cMsisBefore <= 1, ("%u interrupts for one operation\n", cMsis - cMsisBefore));
+            if (!fMsiMaskWrite)
+            {
+                RTTESTI_CHECK_MSG(cMsis == cMsisBefore || fCanIrqBefore || fCanIrqAfter,
+                                  ("%u interrupt(s) the guest has not asked for\n", cMsis - cMsisBefore));
+                RTTESTI_CHECK_MSG(cMsis - cMsisBefore <= 1, ("%u interrupts for one operation\n", cMsis - cMsisBefore));
+            }
 
-            if (!tstPortFuzzCheck(pDevInsPort, abInitial, fPresent, fBusNumbersSet))
+            if (   !tstPortFuzzCheck(pDevInsPort, abInitial, fPresent, fBusNumbersSet)
+                || RTTestIErrorCount() != cErrorsBefore)
             {
                 RTTestIFailureDetails("operation %u (kind %u) with seed %#RX32 failed; run with TSTDEVPCIVFIO_FUZZ_SEED=%u to get it again\n",
                                       iOp, uOp, uSeed, uSeed);
