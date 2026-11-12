@@ -4018,6 +4018,17 @@ static void tstPortSavedState(void)
             tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
             devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
             tstPortCheck(__LINE__, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, 3);
+
+            /* What counts is the state which is loaded, not what the VM it is loaded into has seen:
+               a state with such an event in a VM without, and a state without in a VM with it. */
+            tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+            tstPortLoadU16(pDevInsPort, TSTPORT_SLTSTA, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB);
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
+            tstPortCheck(__LINE__, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, 3);
+            tstPortLoadU16(pDevInsPort, TSTPORT_SLTSTA, fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0);
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
+            devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+            tstPortCheck(__LINE__, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, 4);
         }
         tstFixtureTeardown();
     }
