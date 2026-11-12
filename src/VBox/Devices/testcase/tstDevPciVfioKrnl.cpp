@@ -1421,6 +1421,20 @@ static void tstVfioKrnlDevNotify(PTSTVFIODEV pDev, uint32_t uIrqIndex)
 
 
 /**
+ * Asks the user of a PCI function to let go of it, like the host does when the
+ * driver is to be unbound from a device which is still there.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevRequest(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    tstVfioKrnlDevNotify(pDev, VFIO_PCI_REQ_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
  * Removes a PCI function from the host for good, like pulling the plug: it
  * stops answering, its user is asked to let go of it, and once that has
  * happened what the user still has mapped of it is unusable.
