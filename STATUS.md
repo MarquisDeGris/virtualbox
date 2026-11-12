@@ -7,7 +7,7 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `bd836fb5` (19 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `6176a66b` (20 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -15,11 +15,11 @@ Updated: 2026-11-12
 ## Current step
 
 WP2 (hardening), WP3 (removal of the device on the host), the first part of
-WP4 (saved state is refused) and WP5 (hot-plug slot in the root port, ACPI)
-are done. The testcase runs clean with AddressSanitizer, LeakSanitizer and
-UndefinedBehaviorSanitizer, including the fuzz tests (T2). Next: the
-passthrough device uses the slot, so it can come and go while the VM runs
-(WP6).
+WP4 (saved state is refused), WP5 (hot-plug slot in the root port, ACPI) and
+the first part of WP6 (the guest is asked before a device is taken out of
+the slot) are done. The testcase runs clean with AddressSanitizer,
+LeakSanitizer and UndefinedBehaviorSanitizer, including the fuzz tests (T2).
+Next: putting a device into the empty slot while the VM runs (WP6).
 
 ## Done
 
@@ -174,13 +174,28 @@ passthrough device uses the slot, so it can come and go while the VM runs
   - Until WP7 both settings are extra data:
     `VBoxInternal/Devices/ich9pcibridge/<n>/Config/HotPlug` and
     `VBoxInternal/Devices/acpi/0/Config/PciExpressNativeHotPlug`.
+- WP6, first part (commit `6176a66b`): the passthrough device behind a root
+  port with a hot-plug capable slot is the device in the slot.
+  - The guest switching the slot off, or disabling the link, disables and
+    resets the device like a reset of the VM.
+  - `pciVfioR3SlotDetach()` takes the device out of the slot: the guest is
+    asked by the attention button and gets time to switch the slot off; if
+    it does not, the device stays or goes the hard way, as the caller says.
+    Nothing calls it yet (WP7).
+  - The host wanting a function back: the guest is asked first if the
+    device still answers and the slot is on, and gets `GuestReleaseTimeoutMs`
+    (new setting, 15 seconds by default). An unplugged device, an error and
+    a slot which is off empty the slot at once. The whole device goes and
+    the guest is told that the slot is empty.
+  - Not yet: putting a device back into the slot, starting with an empty
+    slot, saved state with an empty slot.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 101) |
+| Test | Before the fix | With fixes (run 112) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -223,6 +238,9 @@ Each new test was first run against the device without the fix it belongs to.
 | Root port: device in the hot-plug slot | new feature; deliberate defects are found (runs 93, 97) | pass |
 | Root port: hot-plug slot and saved state | new feature; deliberate defect is found (run 96) | pass |
 | Root port: random guest accesses and slot events | new feature; deliberate defect is found (run 98) | pass |
+| Hot-plug slot: the guest switches the slot off and on | new feature; deliberate defect is found (run 105) | pass |
+| Hot-plug slot: the device is detached | new feature; deliberate defects are found (runs 106, 108, 114) | pass |
+| Hot-plug slot: the host wants the device back | new feature; deliberate defects are found (runs 107, 108, 109, 115) | pass |
 | ACPI table: hardware ID of the root bridge and `_OSC`, executed with the ACPICA tools | without the change: ID and `_OSC` as before (first half of the check) | pass |
 
 ## Test harness (WP1)
@@ -251,8 +269,9 @@ device, saved-state stream.
 
 ## Next
 
-1. WP6: the passthrough device in the hot-plug slot: attach and detach
-   while the VM runs, asking the guest first, second part of WP4.
+1. WP6, rest: a device is put into the empty slot while the VM runs; start
+   with an empty slot; saved state with an empty slot (second part of WP4);
+   interface for the management.
 2. WP7: management interface, which also sets the two settings of WP5.
 3. T4: a guest operating system using the slot, in CI.
 
@@ -288,13 +307,18 @@ device, saved-state stream.
 | 2026-11-12 | The slot adds nothing to the saved state; after loading, the port compares what is in the slot with what the guest saw last | The config space is all the guest knows; a device which was put in or taken out while the state was on disk is an ordinary hot-plug event |
 | 2026-11-12 | `_OSC` grants native hot-plug, PME, AER and the capability structure together, and only with a setting of its own; the root bridge is `PNP0A08` then | Same as in other virtual machines Windows guests do native hot-plug with; VMs without the setting keep their ACPI behaviour |
 | 2026-11-12 | The ACPI table is checked in CI by executing it with the ACPICA tools | The table is the one part of WP5 the device testcase cannot reach |
+| 2026-11-12 | Before a device in a hot-plug slot is taken away the guest is asked by the attention button and gets a bounded time; then the device goes anyway if the host waits for it or the caller insists | The guest can stop using the device in an orderly way; a guest which does not react must not keep the host or the user waiting for ever |
+| 2026-11-12 | The attention button is not pressed again within ten seconds | Guests take a second press within five seconds for the request being taken back, and a press on a slot which is off for a request to switch it on |
+| 2026-11-12 | In a hot-plug slot the whole device goes when the host wants one function back or reports an error of one | A slot holds one device; the guest cannot be told about a part of it |
+| 2026-11-12 | A device which no longer answers when the host wants it back is taken out of the slot at once | It was unplugged; there is nothing the guest could do in an orderly way |
+| 2026-11-12 | The link to the slot going down resets the device | The guest expects a device in its reset state when it switches the slot on again, as after a power cycle |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 39 tests, ACPI table check | `bd836fb5` | all pass (run 101); clean with ASan, LSan and UBSan (run 102) |
-| T2 fuzz | running in CI | `bd836fb5` | 2000 models and 400000 operations on the root port per run, 20000 and 2000000 with sanitizers (run 102); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 42 tests, ACPI table check | `6176a66b` | all pass (run 112); clean with ASan, LSan and UBSan (run 113) |
+| T2 fuzz | running in CI | `6176a66b` | 2000 models and 400000 operations on the root port per run, 20000 and 2000000 with sanitizers (run 113); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -364,5 +388,11 @@ device, saved-state stream.
 | 91, 100 | `scratch/hotplug` | tests, sanitize | passed | 39 tests, two fuzz tests, ACPI table check |
 | 92 to 99 | `scratch/mutant-hp1` to `scratch/mutant-hp8` | tests | failed as intended | eight deliberate defects in the hot-plug slot, each one caught |
 | 101, 102 | code branch @ `bd836fb5` | tests, sanitize | passed | 39 tests, two fuzz tests, ACPI table check |
+| 103 | `scratch/slotclient` | tests | passed | first part of WP6, 42 tests |
+| 104 | `scratch/slotclient` | sanitize | failed | a gap of the test harness: with the sanitizers the compiler uses a variant of `pread` the fake kernel did not catch |
+| 105 to 109 | `scratch/mutant-sc1` to `scratch/mutant-sc5` | tests | failed as intended | five deliberate defects in the slot handling of the passthrough device, each one caught |
+| 110, 111 | `scratch/mutant-sc6`, `scratch/mutant-sc7` | tests | failed to build | the two defects did not compile |
+| 112, 113 | code branch @ `6176a66b` (as `scratch/slotclient`) | tests, sanitize | passed | 42 tests, two fuzz tests, ACPI table check |
+| 114, 115 | `scratch/mutant-sc6b`, `scratch/mutant-sc7b` | tests | failed as intended | the two defects again, each one caught |
 
 Run numbers are those GitHub shows for the `build` workflow.
