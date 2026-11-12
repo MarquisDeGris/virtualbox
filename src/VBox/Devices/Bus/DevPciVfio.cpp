@@ -5416,7 +5416,7 @@ static DECLCALLBACK(int) pciVfioPortQueryLayout(PPDMIPCIPASSTHROUGHPORT pInterfa
                 Layout.aBars[iBar].fMappable
             };
             AssertCompile(RT_ELEMENTS(s_apszBarValues) == RT_ELEMENTS(auBarValues));
-            for (uint32_t i = 0; i < RT_ELEMENTS(s_apszBarValues) && RT_SUCCESS(rc); i++)
+            for (uint32_t i = 0; i < RT_ELEMENTS(s_apszBarValues) - 1 && RT_SUCCESS(rc); i++)
             {
                 char szName[32];
                 RTStrPrintf(szName, sizeof(szName), "Bar%u%s", iBar, s_apszBarValues[i]);
