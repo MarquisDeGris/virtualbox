@@ -5427,8 +5427,7 @@ static DECLCALLBACK(int) pciVfioPortQueryLayout(PPDMIPCIPASSTHROUGHPORT pInterfa
         rc = pfnValue(pvUser, "RomSize", Layout.cbRom);
     if (RT_SUCCESS(rc))
         rc = pfnValue(pvUser, "Vga", Layout.fVga);
-    if (RT_SUCCESS(rc))
-        rc = pfnValue(pvUser, "Msix", Layout.fMsix);
+    rc = pfnValue(pvUser, "Msix", Layout.fMsix);
     if (RT_SUCCESS(rc))
         rc = pfnValue(pvUser, "MsixBar", Layout.iBarMsix);
     if (RT_SUCCESS(rc))
