@@ -84,6 +84,8 @@
 #define TSTVFIO_REGION_SHIFT        34
 /** The page size DMA mappings have to be aligned to. */
 #define TSTVFIO_PAGE_SIZE           UINT64_C(4096)
+/** What the DMA mappings of the container are filed under (legacy interface). */
+#define TSTVFIO_CONTAINER_IOAS      UINT32_C(0xffff0001)
 
 
 /*********************************************************************************************************************************
@@ -99,7 +101,11 @@ typedef enum TSTVFIOFDTYPE
     /** An IOMMUFD context. */
     TSTVFIOFDTYPE_IOMMU,
     /** A VFIO device. */
-    TSTVFIOFDTYPE_DEVICE
+    TSTVFIOFDTYPE_DEVICE,
+    /** A VFIO container (legacy interface). */
+    TSTVFIOFDTYPE_CONTAINER,
+    /** A VFIO group (legacy interface). */
+    TSTVFIOFDTYPE_GROUP
 } TSTVFIOFDTYPE;
 
 /**
@@ -129,8 +135,10 @@ typedef struct TSTVFIODEV
     uint32_t            acIrqsTriggered[TSTVFIO_IRQ_INDEX_COUNT];
     /** The I/O address space the function is attached to, 0 if none. */
     uint32_t            idIoas;
-    /** Whether the function is bound to an IOMMUFD context. */
+    /** Whether the function is bound to an IOMMUFD context, or was handed out by its group. */
     bool                fBound;
+    /** Whether the function was handed out by its group (legacy interface). */
+    bool                fGroupDevice;
     /** Whether the function was removed from the host. */
     bool                fGone;
     /** Whether INTx is masked. */
@@ -207,6 +215,12 @@ typedef struct TSTVFIOKRNL
     uint32_t            aidIoas[TSTVFIO_MAX_IOAS];
     /** The next I/O address space ID. */
     uint32_t            idIoasNext;
+    /** Whether only the legacy interface is there: no IOMMUFD, no device nodes. */
+    bool                fLegacy;
+    /** Whether the group is in the container (legacy interface). */
+    bool                fGroupInContainer;
+    /** Whether the IOMMU type of the container is set (legacy interface). */
+    bool                fContainerIommuSet;
     /** Number of requests which were refused for being out of bounds: interrupt
      * vectors a function hasn't got, accesses beyond the end of a region. */
     uint32_t            cViolations;
@@ -367,8 +381,9 @@ static void tstVfioKrnlDevRelease(PTSTVFIODEV pDev)
 {
     for (uint32_t i = 0; i < RT_ELEMENTS(pDev->apaiIrqFds); i++)
         tstVfioKrnlDevIrqDisable(pDev, i);
-    pDev->fBound      = false;
-    pDev->idIoas      = 0;
+    pDev->fBound       = false;
+    pDev->fGroupDevice = false;
+    pDev->idIoas       = 0;
     pDev->fIntxMasked = false;
 }
 
@@ -485,6 +500,161 @@ static int tstVfioKrnlIommuIoctl(unsigned long uReq, void *pvArg)
                     return errno = EBUSY, -1;
             tstVfioKrnlIoasDestroy(pDestroy->id);
             return 0;
+        }
+
+        default:
+            return errno = ENOTTY, -1;
+    }
+}
+
+
+/**
+ * Handles an ioctl on the container (legacy interface).
+ *
+ * @returns The result of the request, -1 with errno set on failure.
+ * @param   uReq                The request.
+ * @param   pvArg               The argument.
+ */
+static int tstVfioKrnlContainerIoctl(unsigned long uReq, void *pvArg)
+{
+    switch (uReq)
+    {
+        case VFIO_GET_API_VERSION:
+            return VFIO_API_VERSION;
+
+        case VFIO_CHECK_EXTENSION:
+            return (uint32_t)(uintptr_t)pvArg == VFIO_TYPE1_IOMMU ? 1 : 0;
+
+        case VFIO_SET_IOMMU:
+            if (   (uint32_t)(uintptr_t)pvArg != VFIO_TYPE1_IOMMU
+                || !g_Krnl.fGroupInContainer
+                || g_Krnl.fContainerIommuSet)
+                return errno = EINVAL, -1;
+            g_Krnl.fContainerIommuSet = true;
+            return 0;
+
+        case VFIO_IOMMU_MAP_DMA:
+        {
+            struct vfio_iommu_type1_dma_map *pMap = (struct vfio_iommu_type1_dma_map *)pvArg;
+            if (   pMap->argsz < sizeof(*pMap)
+                || !(pMap->flags & (VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE))
+                || (pMap->flags & ~(VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE))
+                || !pMap->size
+                || (pMap->size  & (TSTVFIO_PAGE_SIZE - 1))
+                || (pMap->iova  & (TSTVFIO_PAGE_SIZE - 1))
+                || (pMap->vaddr & (TSTVFIO_PAGE_SIZE - 1))
+                || pMap->iova + pMap->size < pMap->iova
+                || !g_Krnl.fContainerIommuSet)
+                return errno = EINVAL, -1;
+
+            unsigned iFree = RT_ELEMENTS(g_Krnl.aDma);
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (g_Krnl.aDma[i].idIoas != TSTVFIO_CONTAINER_IOAS)
+                {
+                    if (!g_Krnl.aDma[i].idIoas && iFree == RT_ELEMENTS(g_Krnl.aDma))
+                        iFree = i;
+                }
+                else if (   pMap->iova              < g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb
+                         && pMap->iova + pMap->size > g_Krnl.aDma[i].uIova)
+                    return errno = EEXIST, -1;
+            if (iFree == RT_ELEMENTS(g_Krnl.aDma))
+                return errno = ENOMEM, -1;
+
+            g_Krnl.aDma[iFree].idIoas = TSTVFIO_CONTAINER_IOAS;
+            g_Krnl.aDma[iFree].uIova  = pMap->iova;
+            g_Krnl.aDma[iFree].cb     = pMap->size;
+            g_Krnl.aDma[iFree].uVirt  = pMap->vaddr;
+            return 0;
+        }
+
+        case VFIO_IOMMU_UNMAP_DMA:
+        {
+            struct vfio_iommu_type1_dma_unmap *pUnmap = (struct vfio_iommu_type1_dma_unmap *)pvArg;
+            bool const fAll = RT_BOOL(pUnmap->flags & VFIO_DMA_UNMAP_FLAG_ALL);
+            if (   pUnmap->argsz < sizeof(*pUnmap)
+                || (pUnmap->flags & ~VFIO_DMA_UNMAP_FLAG_ALL)
+                || (fAll && (pUnmap->iova || pUnmap->size))  /* Everything is asked for with both being zero. */
+                || (!fAll && !pUnmap->size)
+                || pUnmap->iova + pUnmap->size < pUnmap->iova)
+                return errno = EINVAL, -1;
+
+            uint64_t cbUnmapped = 0;
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (   g_Krnl.aDma[i].idIoas == TSTVFIO_CONTAINER_IOAS
+                    && (   fAll
+                        || (   g_Krnl.aDma[i].uIova                       >= pUnmap->iova
+                            && g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb   <= pUnmap->iova + pUnmap->size)))
+                {
+                    cbUnmapped += g_Krnl.aDma[i].cb;
+                    RT_ZERO(g_Krnl.aDma[i]);
+                }
+            pUnmap->size = cbUnmapped;
+            return 0;
+        }
+
+        default:
+            return errno = ENOTTY, -1;
+    }
+}
+
+
+/**
+ * Handles an ioctl on the group (legacy interface).
+ *
+ * @returns The result of the request, -1 with errno set on failure.
+ * @param   uReq                The request.
+ * @param   pvArg               The argument.
+ */
+static int tstVfioKrnlGroupIoctl(unsigned long uReq, void *pvArg)
+{
+    switch (uReq)
+    {
+        case VFIO_GROUP_GET_STATUS:
+        {
+            struct vfio_group_status *pStatus = (struct vfio_group_status *)pvArg;
+            if (pStatus->argsz < sizeof(*pStatus))
+                return errno = EINVAL, -1;
+            pStatus->flags = VFIO_GROUP_FLAGS_VIABLE | (g_Krnl.fGroupInContainer ? VFIO_GROUP_FLAGS_CONTAINER_SET : 0);
+            return 0;
+        }
+
+        case VFIO_GROUP_SET_CONTAINER:
+        {
+            PTSTVFIOFD pFdContainer = tstVfioKrnlFdLookup(*(int *)pvArg);
+            if (!pFdContainer || pFdContainer->enmType != TSTVFIOFDTYPE_CONTAINER)
+                return errno = EBADF, -1;
+            if (g_Krnl.fGroupInContainer)
+                return errno = EINVAL, -1;
+            g_Krnl.fGroupInContainer = true;
+            return 0;
+        }
+
+        case VFIO_GROUP_GET_DEVICE_FD:
+        {
+            /* The functions are only handed out once the group is behind an IOMMU. */
+            if (!g_Krnl.fGroupInContainer || !g_Krnl.fContainerIommuSet)
+                return errno = EINVAL, -1;
+            const char *pszName = (const char *)pvArg;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                if (!strcmp(pszName, g_Krnl.aDevs[i].Cfg.szNode))
+                {
+                    PTSTVFIODEV pDev = &g_Krnl.aDevs[i];
+                    if (pDev->fGone)
+                        return errno = ENODEV, -1;
+                    int iFd = dup(pDev->iFdBacking);
+                    if (iFd == -1)
+                        return -1;
+                    if (!tstVfioKrnlFdRegister(iFd, TSTVFIOFDTYPE_DEVICE, pDev))
+                    {
+                        __real_close(iFd);
+                        return errno = EMFILE, -1;
+                    }
+                    pDev->cOpens++;
+                    pDev->fBound       = true;
+                    pDev->fGroupDevice = true;
+                    return iFd;
+                }
+            return errno = ENODEV, -1;
         }
 
         default:
@@ -652,6 +822,12 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
     if (pDev->fGone)
         return errno = ENODEV, -1;
 
+    if (   pDev->fGroupDevice
+        && (   uReq == VFIO_DEVICE_BIND_IOMMUFD
+            || uReq == VFIO_DEVICE_ATTACH_IOMMUFD_PT
+            || uReq == VFIO_DEVICE_DETACH_IOMMUFD_PT))
+        return errno = ENOTTY, -1;
+
     if (uReq == VFIO_DEVICE_BIND_IOMMUFD)
     {
         struct vfio_device_bind_iommufd *pBind = (struct vfio_device_bind_iommufd *)pvArg;
@@ -744,9 +920,25 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
 
         case VFIO_DEVICE_PCI_HOT_RESET:
         {
-            /* All functions are on one bus.  Ownership goes by the IOMMUFD context, so no group descriptors. */
+            /* All functions are on one bus.  Owning them is shown with the group if that is where the
+               function comes from, it goes by the IOMMUFD context otherwise and there are no descriptors. */
             struct vfio_pci_hot_reset *pReset = (struct vfio_pci_hot_reset *)pvArg;
-            if (pReset->argsz < sizeof(*pReset) || pReset->flags || pReset->count)
+            if (pReset->argsz < sizeof(*pReset) || pReset->flags)
+                return errno = EINVAL, -1;
+            if (pDev->fGroupDevice)
+            {
+                int32_t const *paiFdGroups = (int32_t const *)(pReset + 1);
+                if (   !pReset->count
+                    || pReset->argsz < sizeof(*pReset) + pReset->count * sizeof(int32_t))
+                    return errno = EINVAL, -1;
+                for (uint32_t i = 0; i < pReset->count; i++)
+                {
+                    PTSTVFIOFD pFdGroup = tstVfioKrnlFdLookup(paiFdGroups[i]);
+                    if (!pFdGroup || pFdGroup->enmType != TSTVFIOFDTYPE_GROUP)
+                        return errno = EBADF, -1;
+                }
+            }
+            else if (pReset->count)
                 return errno = EINVAL, -1;
             for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
                 if (g_Krnl.aDevs[i].Cfg.fNoBusReset)
@@ -784,7 +976,27 @@ static int tstVfioKrnlOpen(const char *pszPath, int fFlags)
 
     int iFd = -1;
     RTCritSectEnter(&g_Krnl.CritSect);
-    if (fIommu)
+    if (   !strcmp(pszPath, TSTVFIO_CONTAINER_NODE)
+        || !strcmp(pszPath, TSTVFIO_GROUP_NODE))
+    {
+        /* The legacy interface. */
+        errno = ENOENT;
+        if (g_Krnl.fLegacy)
+        {
+            iFd = tstVfioKrnlMemFdCreate();
+            if (   iFd != -1
+                && !tstVfioKrnlFdRegister(iFd, !strcmp(pszPath, TSTVFIO_GROUP_NODE) ? TSTVFIOFDTYPE_GROUP : TSTVFIOFDTYPE_CONTAINER,
+                                          NULL))
+            {
+                __real_close(iFd);
+                iFd   = -1;
+                errno = EMFILE;
+            }
+        }
+    }
+    else if (g_Krnl.fLegacy)
+        errno = ENOENT; /* Neither the IOMMUFD nor device nodes with the legacy interface only. */
+    else if (fIommu)
     {
         iFd = tstVfioKrnlMemFdCreate();
         if (iFd != -1 && !tstVfioKrnlFdRegister(iFd, TSTVFIOFDTYPE_IOMMU, NULL))
@@ -1223,6 +1435,18 @@ uint32_t tstVfioKrnlGetInheritableFdCount(void)
 
 
 /**
+ * Selects what the fake kernel has: the IOMMUFD with the device nodes, or the
+ * legacy interface with a container and a group all functions are in.
+ *
+ * @param   fLegacy             Whether to have the legacy interface only.
+ */
+void tstVfioKrnlSetLegacy(bool fLegacy)
+{
+    g_Krnl.fLegacy = fLegacy;
+}
+
+
+/**
  * Returns the number of requests the fake kernel has refused for being out of
  * bounds since it was initialized.
  *
@@ -1359,7 +1583,7 @@ int __wrap_close(int iFd)
                 if (--pDev->cOpens == 0)
                     tstVfioKrnlDevRelease(pDev);
             }
-            else
+            else if (pFd->enmType == TSTVFIOFDTYPE_IOMMU)
             {
                 /* Closing the IOMMUFD context destroys everything which lives in it. */
                 for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
@@ -1367,6 +1591,17 @@ int __wrap_close(int iFd)
                 RT_ZERO(g_Krnl.aDma);
                 RT_ZERO(g_Krnl.aidIoas);
             }
+            else if (pFd->enmType == TSTVFIOFDTYPE_CONTAINER)
+            {
+                /* The mappings go with the container. */
+                for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                    if (g_Krnl.aDma[i].idIoas == TSTVFIO_CONTAINER_IOAS)
+                        RT_ZERO(g_Krnl.aDma[i]);
+                g_Krnl.fContainerIommuSet = false;
+                g_Krnl.fGroupInContainer  = false;
+            }
+            else
+                g_Krnl.fGroupInContainer = false;
             pFd->enmType = TSTVFIOFDTYPE_FREE;
             pFd->iFd     = -1;
             pFd->pDev    = NULL;
@@ -1404,6 +1639,10 @@ int __wrap_ioctl(int iFd, unsigned long uReq, ...)
                     g_Krnl.cFailSkip--;
                 if (pFd->enmType == TSTVFIOFDTYPE_IOMMU)
                     rcLnx = tstVfioKrnlIommuIoctl(uReq, pvArg);
+                else if (pFd->enmType == TSTVFIOFDTYPE_CONTAINER)
+                    rcLnx = tstVfioKrnlContainerIoctl(uReq, pvArg);
+                else if (pFd->enmType == TSTVFIOFDTYPE_GROUP)
+                    rcLnx = tstVfioKrnlGroupIoctl(uReq, pvArg);
                 else
                     rcLnx = tstVfioKrnlDevIoctl(pFd->pDev, uReq, pvArg);
                 if (rcLnx == -1)
