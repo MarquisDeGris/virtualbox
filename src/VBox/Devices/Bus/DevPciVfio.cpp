@@ -3853,7 +3853,7 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
         /* The PCI bus removes the mappings when the decoding gets disabled.  The guest doesn't get to enable it again. */
         uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
         uint16_t const u16Cmd     = PDMPciDevGetCommand(pPciDev);
-        if (u16Cmd & fCmdActive)
+        if ((u16Cmd & fCmdActive) && PDMDevHlpVMState(pDevIns) == VMSTATE_RUNNING)
         {
             VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16Cmd & ~fCmdActive);
             Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
