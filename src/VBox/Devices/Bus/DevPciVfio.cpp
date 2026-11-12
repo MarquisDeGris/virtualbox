@@ -4779,7 +4779,7 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
      * and these wait for what is going on here.
      */
     VMSTATE const enmVMState = PDMDevHlpVMState(pDevIns);
-    if (   enmVMState == VMSTATE_RUNNING
+    if (   enmVMState != VMSTATE_TERMINATED
         || enmVMState == VMSTATE_SUSPENDED)
         rc = pciVfioSlotAttachWorker(pDevIns);
     else
