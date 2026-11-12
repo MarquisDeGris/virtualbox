@@ -1739,7 +1739,7 @@ static int ich9pciR3CommonLoadExec(PPDMDEVINS pDevIns, PDEVPCIBUS pBus, PSSMHAND
         {
             /* safe, only needs to go to the config space array */
             rc = pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS, N_("Device in slot %#x (%s) vendor id mismatch! saved=%.4Rhxs current=%.4Rhxs"),
-                                         uDevFn, pDev->pszNameR3, PDMPciDevGetVendorId(&u.DevTmp), PDMPciDevGetVendorId(pDev));
+                                         uDevFn, pDev->pszNameR3, u.DevTmp.abConfig, pDev->abConfig);
             break;
         }
 
