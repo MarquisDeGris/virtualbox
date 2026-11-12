@@ -2833,6 +2833,32 @@ bool tstPdmIsMmio2Mapped(RTGCPHYS GCPhys)
 
 
 /**
+ * Returns how many MMIO2 ranges are mapped into the guest.
+ *
+ * @returns Number of mapped MMIO2 ranges.
+ */
+uint32_t tstPdmGetMmio2MappedCount(void)
+{
+    uint32_t cMapped = 0;
+    for (uint32_t i = 0; i < g_Pdm.cMmio2; i++)
+        if (g_Pdm.aMmio2[i].GCPhys != NIL_RTGCPHYS)
+            cMapped++;
+    return cMapped;
+}
+
+
+/**
+ * Checks whether the VM is running.
+ *
+ * @returns true if the VM is running, false if it was not powered on yet, is suspended or off.
+ */
+bool tstPdmIsRunning(void)
+{
+    return g_Pdm.fRunning;
+}
+
+
+/**
  * Reads from the config space of a PCI device through the ECAM window.
  *
  * @returns The value, all ones if the access failed.
