@@ -81,6 +81,20 @@
  * until the guest sets it up again, but keeps the rest of its state; this is noted in the release
  * log.
  *
+ * @section sec_dev_vfio_removal        The host taking the device back
+ *
+ * The host can want the device back while the VM exists, when it gets unplugged above all, and it
+ * can report an error of the device it can't recover from. A thread which doesn't depend on the
+ * state of the VM watches out for both. The function is taken out of service then, see
+ * pciVfioFunSetGone(): accesses of the guest are answered like those to hardware which isn't
+ * there, the device memory mapped into the guest is replaced by ordinary memory in place, and the
+ * device is let go of so the host isn't kept waiting. An EMT then removes the guest mappings of
+ * the BARs, and from there on the guest finds nothing where the function was. Other functions of
+ * the device stay in service.
+ *
+ * The guest isn't asked and isn't told, for it this is hardware which stops answering. There is no
+ * way back either: the function stays out of service until the VM is powered off.
+ *
  * @section sec_dev_vfio_requirements
  *
  * The following requirements have to be met in order to support PCIe passthrough:
