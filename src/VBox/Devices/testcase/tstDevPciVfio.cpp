@@ -1174,85 +1174,6 @@ static void tstTrappedAccessMappingGone(void)
 
 
 /**
- * A device which has the MSI and the MSI-X capability twice, which it must not:
- * the guest gets each of them once and they work.
- */
-static void tstDuplicateCaps(void)
-{
-    RTTestISub("MSI and MSI-X capability more than once");
-
-    uint16_t const cVectors = 8;
-    TSTVFIODEVCFG  Model;
-    tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
-    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
-    tstModelSetBar(&Model, 2, _8K, PCI_ADDRESS_SPACE_MEM);
-    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
-    tstModelAddMsiCap(&Model, 0x50, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
-    tstModelAddMsiCap(&Model, 0x60, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
-    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
-    tstModelAddMsixCap(&Model, 0xb0, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
-    tstModelAddMsixCap(&Model, 0xc0, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
-
-    PTSTVFIODEV pDev = NULL;
-    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
-    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
-    if (RT_SUCCESS(rc))
-    {
-        tstPdmPowerOn();
-
-        /* Walk the capability list the guest gets to see. */
-        uint32_t cMsi   = 0;
-        uint32_t cMsix  = 0;
-        uint32_t cOther = 0;
-        uint32_t offCap = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_CAPABILITY_LIST, 1);
-        for (uint32_t cLeft = 48; offCap >= 0x40 && cLeft > 0; cLeft--)
-        {
-            uint32_t const bCapId = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offCap, 1);
-            if (bCapId == VBOX_PCI_CAP_ID_MSI)
-            {
-                cMsi++;
-                RTTESTI_CHECK_MSG(offCap == 0x50, ("the MSI capability is at %#RX32\n", offCap));
-            }
-            else if (bCapId == VBOX_PCI_CAP_ID_MSIX)
-            {
-                cMsix++;
-                RTTESTI_CHECK_MSG(offCap == 0xb0, ("the MSI-X capability is at %#RX32\n", offCap));
-            }
-            else
-                cOther++;
-            offCap = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offCap + 1, 1);
-        }
-        RTTESTI_CHECK_MSG(cMsi == 1 && cMsix == 1 && cOther == 1,
-                          ("the guest sees %u MSI, %u MSI-X and %u other capabilities\n", cMsi, cMsix, cOther));
-
-        /* MSI-X works. */
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_2, TST_MSIX_BAR_ADDR, 4);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
-        tstGuestWriteMsixEntry(TST_MSIX_BAR_ADDR, 3, UINT32_C(0x4003), false /*fMasked*/);
-        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0xb0 + 2, 2);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0xb0 + 2, fMsgCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
-        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSIX_IRQ_INDEX) == cVectors);
-        tstMsixTriggerAndCheck(pDev, 3, UINT32_C(0x4003));
-
-        /* So does MSI when MSI-X is off again. */
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0xb0 + 2, fMsgCtrl & ~(uint32_t)VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x50 + 4, UINT32_C(0xfee00000), 4);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x50 + 8, 0x4046, 2);
-        uint32_t const fMsiCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0x50 + 2, 2);
-        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x50 + 2, fMsiCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
-        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
-        uint32_t const cMsisBefore = tstPdmMsiGetCount();
-        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
-        TSTPDMMSI Msi;
-        if (tstPdmMsiGet(cMsisBefore, &Msi))
-            RTTESTI_CHECK_MSG(Msi.uData == 0x4046, ("data %#RX32\n", Msi.uData));
-    }
-    tstFixtureTeardown();
-}
-
-
-/**
  * A device node which does not exist fails the VM construction cleanly.
  */
 static void tstUnknownNode(void)
@@ -2073,6 +1994,85 @@ static void tstResetMsix(void)
         u32 = 0;
         RTTESTI_CHECK_RC(tstPdmPhysRead(TST_MSIX_BAR_ADDR + 12, &u32, sizeof(u32)), VINF_SUCCESS);
         RTTESTI_CHECK_MSG(u32 & RT_BIT_32(0), ("vector control of entry 0 is %#RX32 after the reset\n", u32));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A device which has the MSI and the MSI-X capability twice, which it must not:
+ * the guest gets each of them once and they work.
+ */
+static void tstDuplicateCaps(void)
+{
+    RTTestISub("MSI and MSI-X capability more than once");
+
+    uint16_t const cVectors = 8;
+    TSTVFIODEVCFG  Model;
+    tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+    tstModelSetBar(&Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    tstModelSetBar(&Model, 2, _8K, PCI_ADDRESS_SPACE_MEM);
+    Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddMsiCap(&Model, 0x50, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
+    tstModelAddMsiCap(&Model, 0x60, 0 /*cVectorsLog2*/, false /*f64Bit*/, false /*fMaskable*/);
+    tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+    tstModelAddMsixCap(&Model, 0xb0, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
+    tstModelAddMsixCap(&Model, 0xc0, cVectors, 2 /*iBar*/, 0 /*offTable*/, _4K /*offPba*/);
+
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* Walk the capability list the guest gets to see. */
+        uint32_t cMsi   = 0;
+        uint32_t cMsix  = 0;
+        uint32_t cOther = 0;
+        uint32_t offCap = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_CAPABILITY_LIST, 1);
+        for (uint32_t cLeft = 48; offCap >= 0x40 && cLeft > 0; cLeft--)
+        {
+            uint32_t const bCapId = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offCap, 1);
+            if (bCapId == VBOX_PCI_CAP_ID_MSI)
+            {
+                cMsi++;
+                RTTESTI_CHECK_MSG(offCap == 0x50, ("the MSI capability is at %#RX32\n", offCap));
+            }
+            else if (bCapId == VBOX_PCI_CAP_ID_MSIX)
+            {
+                cMsix++;
+                RTTESTI_CHECK_MSG(offCap == 0xb0, ("the MSI-X capability is at %#RX32\n", offCap));
+            }
+            else
+                cOther++;
+            offCap = tstPdmPciCfgRead(0, TST_PCI_DEVFN, offCap + 1, 1);
+        }
+        RTTESTI_CHECK_MSG(cMsi == 1 && cMsix == 1 && cOther == 1,
+                          ("the guest sees %u MSI, %u MSI-X and %u other capabilities\n", cMsi, cMsix, cOther));
+
+        /* MSI-X works. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_2, TST_MSIX_BAR_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY, 2);
+        tstGuestWriteMsixEntry(TST_MSIX_BAR_ADDR, 3, UINT32_C(0x4003), false /*fMasked*/);
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0xb0 + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0xb0 + 2, fMsgCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSIX_IRQ_INDEX) == cVectors);
+        tstMsixTriggerAndCheck(pDev, 3, UINT32_C(0x4003));
+
+        /* So does MSI when MSI-X is off again. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0xb0 + 2, fMsgCtrl & ~(uint32_t)VBOX_PCI_MSIX_FLAGS_ENABLE, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x50 + 4, UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x50 + 8, 0x4046, 2);
+        uint32_t const fMsiCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, 0x50 + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, 0x50 + 2, fMsiCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+        uint32_t const cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
+        TSTPDMMSI Msi;
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+            RTTESTI_CHECK_MSG(Msi.uData == 0x4046, ("data %#RX32\n", Msi.uData));
     }
     tstFixtureTeardown();
 }
