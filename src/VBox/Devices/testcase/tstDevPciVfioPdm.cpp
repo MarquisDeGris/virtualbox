@@ -336,6 +336,22 @@ typedef struct TSTPDM
     TSTPDMMSI           aMsis[256];
     /** Number of MSIs delivered. */
     uint32_t            cMsis;
+    /** Requests waiting for the thread playing the EMT, protected by CritSectIrq. */
+    struct
+    {
+        /** The function to call. */
+        PFNRT           pfn;
+        /** Number of arguments. */
+        unsigned        cArgs;
+        /** The arguments. */
+        uintptr_t       auArgs[4];
+    }                   aReqs[16];
+    /** Number of requests waiting. */
+    uint32_t            cReqs;
+    /** Number of requests made so far. */
+    uint32_t volatile   cReqsTotal;
+    /** Whether requests wait until the test asks for them to be done. */
+    bool                fManualReqs;
     /** Number of blocks currently allocated from the MM heap. */
     uint32_t volatile   cHeapAllocs;
     /** The last VM error message. */
@@ -948,6 +964,32 @@ static DECLCALLBACK(uint64_t) tstPdmHlp_MMPhysGetRamSizeAbove4GB(PPDMDEVINS pDev
 {
     RT_NOREF(pDevIns);
     return 0;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnVMReqCallNoWaitV} */
+static DECLCALLBACK(int) tstPdmHlp_VMReqCallNoWaitV(PPDMDEVINS pDevIns, VMCPUID idDstCpu, PFNRT pfnFunction, unsigned cArgs,
+                                                    va_list Args)
+{
+    RT_NOREF(pDevIns, idDstCpu);
+    AssertReturn(cArgs <= RT_ELEMENTS(g_Pdm.aReqs[0].auArgs), VERR_TOO_MUCH_DATA);
+
+    /* It gets called by whoever plays the EMT when it gets around to it. */
+    int rc = VINF_SUCCESS;
+    RTCritSectEnter(&g_Pdm.CritSectIrq);
+    if (g_Pdm.cReqs < RT_ELEMENTS(g_Pdm.aReqs))
+    {
+        g_Pdm.aReqs[g_Pdm.cReqs].pfn   = pfnFunction;
+        g_Pdm.aReqs[g_Pdm.cReqs].cArgs = cArgs;
+        for (unsigned i = 0; i < cArgs; i++)
+            g_Pdm.aReqs[g_Pdm.cReqs].auArgs[i] = va_arg(Args, uintptr_t);
+        g_Pdm.cReqs++;
+        g_Pdm.cReqsTotal++;
+    }
+    else
+        rc = VERR_NO_MEMORY;
+    RTCritSectLeave(&g_Pdm.CritSectIrq);
+    return rc;
 }
 
 
@@ -1567,6 +1609,7 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnMMPhysGetRamSizeBelow4GB        = tstPdmHlp_MMPhysGetRamSizeBelow4GB;
     g_tstPdmDevHlpR3.pfnMMPhysGetRamSizeAbove4GB        = tstPdmHlp_MMPhysGetRamSizeAbove4GB;
     g_tstPdmDevHlpR3.pfnGetMainExecutionEngine          = tstPdmHlp_GetMainExecutionEngine;
+    g_tstPdmDevHlpR3.pfnVMReqCallNoWaitV                = tstPdmHlp_VMReqCallNoWaitV;
     g_tstPdmDevHlpR3.pfnMMHeapAllocZ                    = tstPdmHlp_MMHeapAllocZ;
     g_tstPdmDevHlpR3.pfnMMHeapFree                      = tstPdmHlp_MMHeapFree;
     g_tstPdmDevHlpR3.pfnPCIBusRegister                  = tstPdmHlp_PCIBusRegister;
@@ -1658,6 +1701,7 @@ void tstPdmTerm(void)
 {
     if (!g_Pdm.fInitialized)
         return;
+    tstPdmProcessRequests();
 
     tstPdmPowerOff();
 
@@ -1886,11 +1930,83 @@ void tstPdmPowerOff(void)
 
 
 /**
+ * Does what devices have asked to be done on an EMT.  The functions through
+ * which a test plays the guest do this before anything else, like an EMT
+ * getting around to it before it goes back to running guest code.
+ */
+void tstPdmProcessRequests(void)
+{
+    if (!g_Pdm.fInitialized)
+        return;
+    for (;;)
+    {
+        PFNRT     pfn       = NULL;
+        unsigned  cArgs     = 0;
+        uintptr_t auArgs[4] = { 0, 0, 0, 0 };
+        RTCritSectEnter(&g_Pdm.CritSectIrq);
+        if (g_Pdm.cReqs)
+        {
+            pfn   = g_Pdm.aReqs[0].pfn;
+            cArgs = g_Pdm.aReqs[0].cArgs;
+            memcpy(auArgs, g_Pdm.aReqs[0].auArgs, sizeof(auArgs));
+            g_Pdm.cReqs--;
+            memmove(&g_Pdm.aReqs[0], &g_Pdm.aReqs[1], g_Pdm.cReqs * sizeof(g_Pdm.aReqs[0]));
+        }
+        RTCritSectLeave(&g_Pdm.CritSectIrq);
+        if (!pfn)
+            break;
+        switch (cArgs)
+        {
+            case 0:  ((int (*)(void))pfn)(); break;
+            case 1:  ((int (*)(uintptr_t))pfn)(auArgs[0]); break;
+            case 2:  ((int (*)(uintptr_t, uintptr_t))pfn)(auArgs[0], auArgs[1]); break;
+            case 3:  ((int (*)(uintptr_t, uintptr_t, uintptr_t))pfn)(auArgs[0], auArgs[1], auArgs[2]); break;
+            default: ((int (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t))pfn)(auArgs[0], auArgs[1], auArgs[2], auArgs[3]); break;
+        }
+    }
+}
+
+
+/**
+ * Returns the number of requests for the EMT devices have made so far.
+ *
+ * @returns Number of requests, those which are done included.
+ */
+uint32_t tstPdmGetRequestCount(void)
+{
+    return ASMAtomicReadU32(&g_Pdm.cReqsTotal);
+}
+
+
+/**
+ * Selects whether the functions through which a test plays the guest do the
+ * requests for the EMT first, or whether these wait for tstPdmProcessRequests().
+ *
+ * @param   fAutomatic          Whether the requests are done automatically.
+ */
+void tstPdmSetRequestProcessing(bool fAutomatic)
+{
+    g_Pdm.fManualReqs = !fAutomatic;
+}
+
+
+/**
+ * Does the requests for the EMT unless the test wants them to wait.
+ */
+static void tstPdmAutoProcessRequests(void)
+{
+    if (!g_Pdm.fManualReqs)
+        tstPdmProcessRequests();
+}
+
+
+/**
  * Resets the VM.
  */
 void tstPdmReset(void)
 {
     AssertReturnVoid(g_Pdm.fInitialized);
+    tstPdmAutoProcessRequests();
     for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
     {
         PPDMDEVINS pDevIns = g_Pdm.aDevs[i].pDevIns;
@@ -1910,6 +2026,7 @@ void tstPdmReset(void)
  */
 int tstPdmIoPortRead(RTIOPORT uPort, uint32_t *pu32, unsigned cb)
 {
+    tstPdmAutoProcessRequests();
     for (uint32_t i = 0; i < g_Pdm.cIoPorts; i++)
         if (   g_Pdm.aIoPorts[i].fMapped
             && g_Pdm.aIoPorts[i].pfnIn
@@ -1937,6 +2054,7 @@ int tstPdmIoPortRead(RTIOPORT uPort, uint32_t *pu32, unsigned cb)
  */
 int tstPdmIoPortWrite(RTIOPORT uPort, uint32_t u32, unsigned cb)
 {
+    tstPdmAutoProcessRequests();
     for (uint32_t i = 0; i < g_Pdm.cIoPorts; i++)
         if (   g_Pdm.aIoPorts[i].fMapped
             && g_Pdm.aIoPorts[i].pfnOut
@@ -1964,6 +2082,7 @@ int tstPdmIoPortWrite(RTIOPORT uPort, uint32_t u32, unsigned cb)
  */
 int tstPdmPhysRead(RTGCPHYS GCPhys, void *pv, unsigned cb)
 {
+    tstPdmAutoProcessRequests();
     for (uint32_t i = 0; i < g_Pdm.cMmio; i++)
         if (   g_Pdm.aMmio[i].GCPhys != NIL_RTGCPHYS
             && g_Pdm.aMmio[i].pfnRead
@@ -2005,6 +2124,7 @@ int tstPdmPhysRead(RTGCPHYS GCPhys, void *pv, unsigned cb)
  */
 int tstPdmPhysWrite(RTGCPHYS GCPhys, const void *pv, unsigned cb)
 {
+    tstPdmAutoProcessRequests();
     for (uint32_t i = 0; i < g_Pdm.cMmio; i++)
         if (   g_Pdm.aMmio[i].GCPhys != NIL_RTGCPHYS
             && g_Pdm.aMmio[i].pfnWrite
@@ -2060,6 +2180,7 @@ int tstPdmPhysWrite(RTGCPHYS GCPhys, const void *pv, unsigned cb)
  */
 int tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned cItems)
 {
+    tstPdmAutoProcessRequests();
     for (uint32_t i = 0; i < g_Pdm.cMmio; i++)
         if (   g_Pdm.aMmio[i].GCPhys != NIL_RTGCPHYS
             && g_Pdm.aMmio[i].pfnFill
