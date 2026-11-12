@@ -152,21 +152,81 @@ and leaves the tree buildable. Order is by dependency and risk.
 
 ### WP5 PCIe native hot-plug in the root port (G2, guest side)
 
-- Root port: hot-plug capable slot (presence detect, data link layer state,
-  command completed, attention button optional), interrupt for slot events,
-  correct reset values and write masks, saved-state fields with version bump.
-- ACPI: grant native PCIe hot-plug control to the guest OS where needed.
-- Tests: register-level unit tests of the slot state machine, fuzzing of the
-  new config space handlers, saved-state fuzz with the existing SSM fuzzer.
-- Acceptance: Linux and Windows guests in simulation see slot events and
-  enumerate / remove an emulated device behind the port.
+Done, see `STATUS.md`. As built:
+
+- Root port configured with `HotPlug`: slot with power controller, attention
+  button, indicators, hot-plug surprise; command completed for every command;
+  slot events by MSI; access attributes of the specification for the whole
+  PCI express capability; no answer from behind the port while the link is
+  down.
+- The slot adds nothing to the saved state. After loading, the port tells the
+  guest what changed in the slot.
+- ACPI: `_OSC` grants native hot-plug with the setting
+  `PciExpressNativeHotPlug` of the ACPI device, the root bridge is a PCI
+  express root bridge then.
+- Tests: registers, slot events and interrupts, device behind the port,
+  saved state, random accesses; the ACPI table is executed in CI.
+- Left for T4: a guest operating system using the slot.
 
 ### WP6 Hot-pluggable passthrough slot (G2, device side)
 
-- Slot with empty and occupied state, resources created at VM construction
-  from the device layout (constraint 1), attach and detach at run time,
-  layout verification at attach, coupling to the root port slot events and to
-  WP3 for host-initiated removal.
+The passthrough device becomes the client of the slot of WP5. One slot holds
+one device, which is all functions configured for the passthrough device.
+
+Design:
+
+- The device instance has two states: occupied and empty. Empty is what WP3
+  already leaves behind when the host takes a device back: the file
+  descriptors are stand-ins which refuse everything, the address ranges of
+  the BARs are backed by ordinary memory, the guest gets no answer. WP6 adds
+  the way back.
+- What the VM is built from at construction is the layout of the device: per
+  function the BARs (kind, size, address space flags, whether they can be
+  mapped), the place and size of the MSI-X table and pending bits, the size
+  of the ROM, whether there is INTx, and the number of functions (constraint
+  1: ranges can only be created while the VM is constructed). The address
+  space for the BARs is reserved in the process at construction and the
+  device memory is mapped over it when a device is attached.
+- The layout comes from the device if it is there when the VM starts, else
+  from the configuration (written by the management of WP7 when the device
+  is assigned). A VM can start with an empty slot only with a layout in the
+  configuration and behind a root port with a hot-plug capable slot.
+- Attach: open the device, bind it to the I/O address space, compare its
+  layout with the one the VM was built from and refuse it if they differ,
+  set up config space, capabilities and interrupts like the constructor
+  does today, map the BARs over the reserved ranges, put the file
+  descriptors in place of the stand-ins, tell the port that a device is
+  present. The guest memory mapping for DMA stays in place while the slot is
+  empty with IOMMUFD; with the legacy container it is redone on attach.
+- Detach on request: if the link is up, press the attention button and wait
+  a bounded time for the guest to switch the slot off (link down). Then, or
+  at once if the link was down, or after the wait if the caller insists,
+  take the device out of service the way WP3 does and tell the port that
+  the slot is empty.
+- The host wanting a device back (WP3) goes the same way when the device is
+  in a hot-plug slot: ask the guest, wait a bounded time, then let go. An
+  error reported by the host still means letting go at once.
+- Link callback of the port: link down means the guest has no use for the
+  device (bus master, decoding and interrupts off, device reset); link up
+  after that means the device is in the state after a reset.
+- Saved state (second part of WP4): saving is allowed while the slot is
+  empty; a state can only be loaded into a VM with the same layout; if a
+  device is in the slot when the state was loaded the guest sees it arrive.
+- Management reaches attach and detach through a PDM interface of the
+  device (used by WP7).
+
+Steps, each with tests in the model and a green CI run:
+
+1. Constructor split into layout, VM structures and attach, without change
+   of behaviour (all existing tests pass unchanged).
+2. Detach and attach while the VM runs, slot client, link callback; tests:
+   loops without leaks, mismatching device refused, guest plays along or
+   does not.
+3. Start with an empty slot from a configured layout; saved state with an
+   empty slot; the host wanting the device back asks the guest first.
+4. PDM interface for the management; fuzz test with devices coming and
+   going.
+
 - Acceptance: attach/detach loops in the model without leaks; mismatching
   device is refused; guest sees removal and re-arrival in simulation.
 
