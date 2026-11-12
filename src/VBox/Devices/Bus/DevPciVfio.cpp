@@ -4160,7 +4160,7 @@ DECLHIDDEN(int) pciVfioR3SlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bo
         if (RTTimeMilliTS() - msStart >= cMsWait)
         {
             if (!fForce)
-                return VERR_TIMEOUT;
+                break;
             break;
         }
         RTThreadSleep(10);
