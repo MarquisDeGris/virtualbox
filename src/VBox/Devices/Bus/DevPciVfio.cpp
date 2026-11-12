@@ -3648,7 +3648,7 @@ static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszW
     for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
     {
         PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
-        if (pBar->pvMmio)
+        if (pBar->pvMmio && pThis->iInstance == 0x7fffffff) /* deliberate defect: mappings stay as they are */
         {
             void *pv = mmap((void *)pBar->pvMmio, pBar->cbRegion, PROT_READ | PROT_WRITE,
                             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /*fd*/, 0 /*offset*/);
