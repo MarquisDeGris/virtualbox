@@ -6305,6 +6305,455 @@ static void tstSuspendResume(void)
 }
 
 
+/*
+ *
+ * Random operations on a VM with a device in a hot-plug capable slot.
+ *
+ */
+
+/**
+ * What the random test of the slot goes by.
+ */
+typedef struct TSTSLOTFUZZ
+{
+    /** The interface of the passthrough device for the management. */
+    PPDMIPCIPASSTHROUGHPORT pPort;
+    /** The device instance of the root port. */
+    PPDMDEVINS              pDevInsPort;
+    /** Function 0 of the device of the fake kernel. */
+    PTSTVFIODEV             pDev;
+    /** Number of file descriptors the passthrough device has open with the device in the slot. */
+    uint32_t                cFdsOccupied;
+    /** The same with the slot empty, UINT32_MAX until that was seen. */
+    uint32_t                cFdsEmpty;
+    /** How much guest memory is mapped for DMA. */
+    uint64_t                cbDmaMapped;
+} TSTSLOTFUZZ;
+
+
+/**
+ * Asks the passthrough device whether the device is in the slot.
+ *
+ * @returns true if it is, false if not.
+ * @param   pFuzz               What the test goes by.
+ * @param   pfInUse             Where to return whether the guest can reach it, optional.
+ */
+static bool tstSlotFuzzIsPresent(TSTSLOTFUZZ const *pFuzz, bool *pfInUse)
+{
+    bool fHotPlug = false;
+    bool fPresent = false;
+    bool fInUse   = false;
+    int rc = pFuzz->pPort->pfnQueryState(pFuzz->pPort, &fHotPlug, &fPresent, &fInUse);
+    if (rc != VINF_SUCCESS || !fHotPlug)
+        RTTestIFailed("asking for the state: %Rrc, hot-plug %RTbool\n", rc, fHotPlug);
+    if (pfInUse)
+        *pfInUse = fInUse;
+    return fPresent;
+}
+
+
+/**
+ * Waits for the thread of the passthrough device which watches what the host
+ * wants to have taken the device out of the slot.
+ *
+ * @param   pFuzz               What the test goes by.
+ */
+static void tstSlotFuzzWaitForEmpty(TSTSLOTFUZZ const *pFuzz)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (   tstVfioKrnlDevGetOpenCount(pFuzz->pDev) != 0
+           || (tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES))
+    {
+        if (RTTimeMilliTS() - msStart >= RT_MS_10SEC)
+        {
+            RTTestIFailed("the device was not taken out of the slot\n");
+            break;
+        }
+        RTThreadSleep(1);
+    }
+}
+
+
+/**
+ * Has the guest set the root port up for native hot-plug with the slot switched
+ * on, and function 0 of the device in the slot if it finds one.
+ */
+static void tstSlotFuzzGuestSetup(void)
+{
+    tstPortGuestSetBusNumbers();
+    tstPortGuestEnableMsi();
+    tstPortCfgWrite(VBOX_PCI_BRIDGE_CONTROL, 0, 2);
+    tstPortCfgWrite(TSTPORT_LNKCTL, 0, 2);
+    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+    tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+    if (tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID)
+        tstSlotGuestEnableDevice();
+}
+
+
+/**
+ * Has the guest set up MSI for function 0 of the device in the slot and the
+ * device raise an interrupt, which has to arrive the way the guest set it up.
+ *
+ * @param   pDev                Function 0 of the device of the fake kernel.
+ */
+static void tstSlotFuzzCheckMsi(PTSTVFIODEV pDev)
+{
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 16, 0, 4); /* No vector is masked. */
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee02000), 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 8,  0, 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 12, 0x4051, 2);
+    uint32_t const fMsgCtrl = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2, 2);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2,
+                      (fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_QSIZE) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+
+    uint32_t const cMsisBefore = tstPdmMsiGetCount();
+    int rc = tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0);
+    TSTPDMMSI Msi;
+    RT_ZERO(Msi);
+    if (   RT_FAILURE(rc)
+        || !tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC)
+        || !tstPdmMsiGetLast(&Msi)
+        || Msi.uAddr != UINT64_C(0xfee02000)
+        || Msi.uData != 0x4051)
+        RTTestIFailed("the interrupt of the device did not arrive as the guest set it up (%Rrc, address %#RX64, data %#RX32)\n",
+                      rc, Msi.uAddr, Msi.uData);
+}
+
+
+/**
+ * Checks what has to hold for a passthrough device in a hot-plug capable slot
+ * whatever the guest, the host and the management do.
+ *
+ * @returns true if all is well, false if not (test failure reported).
+ * @param   pFuzz               What the test goes by.
+ */
+static bool tstSlotFuzzCheck(TSTSLOTFUZZ *pFuzz)
+{
+    /* The first access of the guest has what was left for an EMT to do done as well. */
+    uint32_t const uSltSta  = tstPortCfgRead(TSTPORT_SLTSTA, 2);
+    bool           fInUse   = false;
+    bool const     fPresent = tstSlotFuzzIsPresent(pFuzz, &fInUse);
+    uint32_t const cOpen    = tstVfioKrnlDevGetOpenCount(pFuzz->pDev);
+    uint32_t const cFds     = tstVfioKrnlGetOpenFdCount();
+    if (!fPresent && pFuzz->cFdsEmpty == UINT32_MAX)
+        pFuzz->cFdsEmpty = cFds;
+
+    const char *pszWhat = NULL;
+    if (cOpen != (fPresent ? 1U : 0U))
+        pszWhat = "how often the device is open";
+    else if (cFds != (fPresent ? pFuzz->cFdsOccupied : pFuzz->cFdsEmpty))
+        pszWhat = "the number of open file descriptors";
+    else if (tstVfioKrnlGetDmaMappedBytes() != pFuzz->cbDmaMapped)
+        pszWhat = "the guest memory mapped for DMA";
+    else if (RT_BOOL(uSltSta & VBOX_PCI_EXP_SLTSTA_PRES) != fPresent)
+        pszWhat = "what the slot tells the guest about a device being there";
+    else if (fInUse != (fPresent && devpciR3HotPlugSlotIsLinkUp(pFuzz->pDevInsPort)))
+        pszWhat = "the device being in use";
+    else if (!fPresent && tstPdmGetMmio2MappedCount() != 0)
+        pszWhat = "memory of an absent device being mapped into the guest";
+    else if (!fPresent && tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) != UINT32_C(0xffff))
+        pszWhat = "the guest finding a function of an absent device";
+    else if (tstVfioKrnlGetViolationCount() != 0)
+        pszWhat = "requests to the kernel which are out of bounds";
+    if (!pszWhat)
+        return true;
+    RTTestIFailed("wrong: %s (present %RTbool, in use %RTbool, open %u time(s), %u file descriptors, slot status %#RX32)\n",
+                  pszWhat, fPresent, fInUse, cOpen, cFds, uSltSta);
+    return false;
+}
+
+
+/**
+ * Random operations of the guest, the host and the management on a VM with a
+ * passthrough device in a hot-plug capable slot: accesses, devices which come
+ * and go in every way there is, resets, and states which are saved and
+ * loaded.  What has to hold is checked after each.
+ */
+static void tstSlotFuzz(void)
+{
+    RTTestISub("Hot-plug slot: random operations with devices coming and going");
+
+    uint32_t    cOps  = 150 * 20;
+    uint32_t    uSeed = UINT32_C(0x20261113);
+    const char *psz   = RTEnvGet("TSTDEVPCIVFIO_FUZZ_MODELS");
+    if (psz)
+        cOps = RT_MIN(RTStrToUInt32(psz), 5000) * 20;
+    psz = RTEnvGet("TSTDEVPCIVFIO_FUZZ_SEED");
+    if (psz)
+        uSeed = RTStrToUInt32(psz);
+
+    int rc = RTRandAdvCreateParkMiller(&g_hTstRand);
+    RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+    if (RT_FAILURE(rc))
+        return;
+    RTRandAdvSeed(g_hTstRand, uSeed);
+
+    /* The device, and another kind of device which gets plugged in where it was now and then. */
+    static TSTVFIODEVCFG   s_Model; /* Too big for the stack. */
+    static TSTVFIODEVCFG   s_Other;
+    static TSTLAYOUTVALUES s_Values;
+    static TSTLAYOUTVALUES s_Values2;
+    tstModelInitDefault(&s_Model);
+    tstModelInitDefault(&s_Other);
+    tstModelSetBar(&s_Other, 0, TST_BAR0_SIZE * 2, PCI_ADDRESS_SPACE_MEM);
+
+    TSTSLOTFUZZ Fuzz;
+    RT_ZERO(Fuzz);
+    PPDMDEVINS  pDevInsDev   = NULL;
+    void       *pvState      = NULL;
+    size_t      cbState      = 0;
+    uint32_t    cAttached    = 0;
+    uint32_t    cTakenByHost = 0;
+    uint32_t    cStatesSaved = 0;
+    uint32_t    cStatesLoaded = 0;
+    uint32_t    cInterrupts  = 0;
+    g_cMsTstGuestRelease = 20;
+    rc = tstSlotFixtureSetup(&s_Model, 1, &Fuzz.pDev, &Fuzz.pDevInsPort, &pDevInsDev);
+    g_cMsTstGuestRelease = 0;
+    if (RT_SUCCESS(rc))
+        Fuzz.pPort = tstDevGetPort(pDevInsDev);
+    if (RT_SUCCESS(rc) && Fuzz.pPort)
+    {
+        Fuzz.cFdsOccupied = tstVfioKrnlGetOpenFdCount();
+        Fuzz.cFdsEmpty    = UINT32_MAX;
+        Fuzz.cbDmaMapped  = tstVfioKrnlGetDmaMappedBytes();
+        RT_ZERO(s_Values);
+        RTTESTI_CHECK_RC(Fuzz.pPort->pfnQueryLayout(Fuzz.pPort, 0, tstDevLayoutValue, &s_Values), VINF_SUCCESS);
+
+        bool fKrnlThere = true;     /* Whether the host has the device. */
+        bool fOtherKind = false;    /* Whether it is the other kind of device. */
+        for (uint32_t iOp = 0; iOp < cOps; iOp++)
+        {
+            uint32_t const cErrorsBefore = RTTestIErrorCount();
+            bool           fInUse        = false;
+            bool const     fPresent      = tstSlotFuzzIsPresent(&Fuzz, &fInUse);
+            uint32_t const uOp           = tstRnd(0, 99);
+            if (uOp < 22)
+            {
+                /* The guest writes to the root port, mostly at and around the PCI express capability.
+                   The bus numbers are left alone, the checks need the secondary bus to be reachable. */
+                static const unsigned s_acb[] = { 1, 2, 4 };
+                unsigned const cb  = s_acb[tstRnd(0, 2)];
+                uint32_t       off = tstRndChance(70)
+                                   ? tstRnd(TSTPORT_EXP_CAP - 4, TSTPORT_EXP_CAP + TSTPORT_EXP_CAP_SIZE + 3)
+                                   : tstRnd(0, 0x100 - cb);
+                if (tstRndChance(80))
+                    off &= ~(uint32_t)(cb - 1);
+                if (   off + cb > VBOX_PCI_PRIMARY_BUS
+                    && off <= VBOX_PCI_SUBORDINATE_BUS)
+                    continue;
+                tstPortCfgWrite(off, tstRndValue(), cb);
+            }
+            else if (uOp < 42)
+            {
+                /* The guest accesses the config space of what is behind the port.  The BARs are left
+                   alone, the guest sets them up in its own time. */
+                static const unsigned s_acb[] = { 1, 2, 4 };
+                unsigned const cb     = s_acb[tstRnd(0, 2)];
+                uint32_t const off    = tstRnd(0, (tstRndChance(70) ? 0x100 : 0x1000) - cb) & ~(uint32_t)(cb - 1);
+                uint8_t const  uDevFn = tstRndChance(80) ? 0 : (uint8_t)tstRnd(1, 9);
+                if (tstRndChance(50))
+                    tstPdmPciCfgRead(TSTPORT_SEC_BUS, uDevFn, off, cb);
+                else if (   off + cb <= VBOX_PCI_BASE_ADDRESS_0
+                         || off >= VBOX_PCI_ROM_ADDRESS + 4)
+                    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, uDevFn, off, tstRndValue(), cb);
+            }
+            else if (uOp < 50)
+            {
+                /* The guest accesses the memory where it has put BAR0, whether something is there or not. */
+                uint32_t u32 = tstRndValue();
+                if (tstRndChance(50))
+                    tstPdmPhysRead(TST_BAR0_ADDR + (tstRnd(0, TST_BAR0_SIZE / 4 - 1) * 4), &u32, sizeof(u32));
+                else
+                    tstPdmPhysWrite(TST_BAR0_ADDR + (tstRnd(0, TST_BAR0_SIZE / 4 - 1) * 4), &u32, sizeof(u32));
+            }
+            else if (uOp < 57)
+            {
+                /* The guest sets everything up, and reaches the device if there is one. */
+                tstSlotFuzzGuestSetup();
+                if (fPresent && fKrnlThere)
+                {
+                    RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(Fuzz.pDev), ("the guest doesn't reach the device in the slot\n"));
+                    tstSlotFuzzCheckMsi(Fuzz.pDev);
+                    cInterrupts++;
+                }
+            }
+            else if (uOp < 61)
+                /* The guest switches the power of the slot. */
+                tstPortCfgWrite(TSTPORT_SLTCTL, tstPortCfgRead(TSTPORT_SLTCTL, 2) ^ VBOX_PCI_EXP_SLTCTL_PWRC, 2);
+            else if (uOp < 64)
+            {
+                /* The guest lets go of the device if it was asked to. */
+                if (tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB)
+                {
+                    tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+                    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+                }
+            }
+            else if (uOp < 73)
+            {
+                /* The management puts the device into the slot. */
+                rc = Fuzz.pPort->pfnAttach(Fuzz.pPort);
+                if (fPresent)
+                    RTTESTI_CHECK_MSG(rc == VERR_ALREADY_EXISTS, ("putting a device into the occupied slot: %Rrc\n", rc));
+                else if (!fKrnlThere)
+                    RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("putting a device in which isn't there: %Rrc\n", rc));
+                else if (fOtherKind)
+                    RTTESTI_CHECK_MSG(rc == VERR_MISMATCH, ("putting another kind of device in: %Rrc\n", rc));
+                else
+                {
+                    RTTESTI_CHECK_MSG(rc == VINF_SUCCESS, ("putting the device in: %Rrc\n", rc));
+                    cAttached++;
+                }
+                RTTESTI_CHECK_MSG(tstSlotFuzzIsPresent(&Fuzz, NULL) == (fPresent || (fKrnlThere && !fOtherKind)),
+                                  ("after putting a device in (%Rrc)\n", rc));
+            }
+            else if (uOp < 81)
+            {
+                /* The management takes the device out, insisting or not. */
+                bool const fForce = tstRndChance(50);
+                rc = Fuzz.pPort->pfnDetach(Fuzz.pPort, 0 /*cMsWait*/, fForce);
+                if (fInUse && !fForce)
+                    RTTESTI_CHECK_MSG(rc == VERR_TIMEOUT && tstSlotFuzzIsPresent(&Fuzz, NULL), ("taking a device out which is in use: %Rrc\n", rc));
+                else
+                    RTTESTI_CHECK_MSG(rc == VINF_SUCCESS && !tstSlotFuzzIsPresent(&Fuzz, NULL), ("taking the device out: %Rrc\n", rc));
+            }
+            else if (uOp < 84)
+            {
+                /* The host wants the device back, or reports an error of it. */
+                if (fPresent)
+                {
+                    if (tstRndChance(70))
+                        tstVfioKrnlDevRequest(Fuzz.pDev);
+                    else
+                        tstVfioKrnlDevSignalError(Fuzz.pDev);
+                    tstSlotFuzzWaitForEmpty(&Fuzz);
+                    cTakenByHost++;
+                }
+            }
+            else if (uOp < 86)
+            {
+                /* The device gets unplugged. */
+                if (fKrnlThere)
+                {
+                    tstVfioKrnlDevRemove(Fuzz.pDev);
+                    if (fPresent)
+                    {
+                        tstSlotFuzzWaitForEmpty(&Fuzz);
+                        cTakenByHost++;
+                    }
+                    fKrnlThere = false;
+                }
+            }
+            else if (uOp < 90)
+            {
+                /* A device gets plugged in where none is, or another one where one is which the VM doesn't have. */
+                if (!fPresent)
+                {
+                    fOtherKind = tstRndChance(25);
+                    RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(Fuzz.pDev, fOtherKind ? &s_Other : &s_Model), VINF_SUCCESS);
+                    fKrnlThere = true;
+                }
+            }
+            else if (uOp < 92)
+            {
+                /* A reset of the VM, usually followed by the guest setting things up again. */
+                tstPdmReset();
+                if (tstRndChance(90))
+                    tstSlotFuzzGuestSetup();
+            }
+            else if (uOp < 94)
+            {
+                /* The VM is suspended for a while, during which the management is at it. */
+                tstPdmSuspend();
+                if (tstRndChance(50))
+                    Fuzz.pPort->pfnAttach(Fuzz.pPort);
+                else
+                    Fuzz.pPort->pfnDetach(Fuzz.pPort, 0 /*cMsWait*/, true /*fForce*/);
+                tstPdmResume();
+            }
+            else if (uOp < 97)
+            {
+                /* The state is saved or the VM is teleported: with the slot empty only. */
+                void  *pvNew = NULL;
+                size_t cbNew = 0;
+                rc = tstPdmSaveState(tstRndChance(50) /*fLive*/, &pvNew, &cbNew);
+                if (fPresent)
+                    RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED && !pvNew, ("saving with the device in the slot: %Rrc\n", rc));
+                else
+                {
+                    RTTESTI_CHECK_MSG(rc == VINF_SUCCESS, ("saving with the slot empty: %Rrc - %s\n", rc, tstPdmGetLastError()));
+                    if (RT_SUCCESS(rc))
+                    {
+                        tstPdmFreeState(pvState);
+                        pvState = pvNew;
+                        cbState = cbNew;
+                        pvNew   = NULL;
+                        cStatesSaved++;
+                    }
+                }
+                tstPdmFreeState(pvNew);
+                if (!tstPdmIsRunning())
+                    tstPdmResume();
+            }
+            else if (uOp < 99)
+            {
+                /* A state which was saved before is loaded.  The memory of the device, if there is one,
+                   stays as it is, and a device which was in the slot is in it again afterwards. */
+                if (pvState)
+                {
+                    uint32_t * const pau32Bar0 = fKrnlThere
+                                               ? (uint32_t *)tstVfioKrnlDevGetRegionPtr(Fuzz.pDev, VFIO_PCI_BAR0_REGION_INDEX) : NULL;
+                    for (uint32_t i = 0; pau32Bar0 && i < TST_BAR0_SIZE / sizeof(uint32_t); i++)
+                        pau32Bar0[i] = UINT32_C(0xfeed0000) + i;
+
+                    tstPdmSuspend();
+                    rc = tstPdmLoadState(pvState, cbState);
+                    RTTESTI_CHECK_MSG(rc == VINF_SUCCESS, ("loading: %Rrc - %s\n", rc, tstPdmGetLastError()));
+                    if (RT_FAILURE(rc))
+                        break;
+                    tstPdmResume();
+                    cStatesLoaded++;
+
+                    for (uint32_t i = 0; pau32Bar0 && i < TST_BAR0_SIZE / sizeof(uint32_t); i++)
+                        if (pau32Bar0[i] != UINT32_C(0xfeed0000) + i)
+                        {
+                            RTTestIFailed("loading has changed the memory of the device at %#x\n", i * 4);
+                            break;
+                        }
+                    RTTESTI_CHECK_MSG(tstSlotFuzzIsPresent(&Fuzz, NULL) == fPresent, ("after loading, was present: %RTbool\n", fPresent));
+                }
+            }
+            else
+            {
+                /* The layout is what it was whatever has happened. */
+                RT_ZERO(s_Values2);
+                RTTESTI_CHECK_RC(Fuzz.pPort->pfnQueryLayout(Fuzz.pPort, 0, tstDevLayoutValue, &s_Values2), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(!memcmp(&s_Values, &s_Values2, sizeof(s_Values)), ("the layout has changed\n"));
+            }
+
+            if (   !tstSlotFuzzCheck(&Fuzz)
+                || RTTestIErrorCount() != cErrorsBefore)
+            {
+                RTTestIFailureDetails("operation %u (kind %u) with seed %#RX32 failed; run with TSTDEVPCIVFIO_FUZZ_SEED=%u to get it again\n",
+                                      iOp, uOp, uSeed, uSeed);
+                break;
+            }
+        }
+        RTTestIPrintf(RTTESTLVL_ALWAYS,
+                      "%u operation(s) with seed %#RX32: device put in %u time(s), taken by the host %u time(s), "
+                      "%u state(s) saved, %u loaded, %u interrupt(s) of the device\n",
+                      cOps, uSeed, cAttached, cTakenByHost, cStatesSaved, cStatesLoaded, cInterrupts);
+    }
+    tstPdmFreeState(pvState);
+    tstFixtureTeardown();
+
+    RTRandAdvDestroy(g_hTstRand);
+    g_hTstRand = NIL_RTRAND;
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -6363,6 +6812,7 @@ int main()
     tstSlotInterface();
     tstFuzz();
     tstPortFuzz();
+    tstSlotFuzz();
 
     return RTTestSummaryAndDestroy(hTest);
 }
