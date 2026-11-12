@@ -33,6 +33,7 @@
 
 #include <iprt/cdefs.h>
 #include <iprt/assertcompile.h>
+#include <VBox/types.h>
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
@@ -291,6 +292,11 @@ AssertCompileSize(struct vfio_device_detach_iommufd_pt, 3 * sizeof(uint32_t));
 #define VFIO_DEVICE_DETACH_IOMMUFD_PT   _IO(VFIO_TYPE, VFIO_BASE + 20)
 
 #define VFIO_DEVICE_DETACH_PASID        RT_BIT_32(0)
+
+/** @name What the device offers to whoever manages the VM.
+ * @{ */
+DECLHIDDEN(int) pciVfioR3SlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bool fForce);
+/** @} */
 
 RT_C_DECLS_END
 
