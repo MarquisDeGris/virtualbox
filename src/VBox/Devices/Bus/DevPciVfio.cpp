@@ -5628,7 +5628,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     }
 
     /* One device, which is there or not. */
-    if (cFunsPresent && cFunsAbsent)
+    if (cFunsPresent && cFunsAbsent && !cFunsPresent)
         return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                    N_("Some functions of the PCI device to pass through are there and others are not"));
 
