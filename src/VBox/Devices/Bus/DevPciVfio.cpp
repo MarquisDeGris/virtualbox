@@ -5165,12 +5165,7 @@ static DECLCALLBACK(int) pciVfioLoadPrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
     AssertRCReturn(rc, rc);
     pThis->fLoadUnitSeen = false;
     pThis->fLoadReattach = false;
-    if (!pciVfioIsOutOfService(pThis))
-    {
-        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded");
-        pThis->fLoadReattach = true;
-    }
-    if (pciVfioSlotIsEmptyForState(pThis))
+    if (pciVfioIsOutOfService(pThis) || pThis->pDevInsPort)
         pciVfioSlotEmptyComplete(pThis);
     else
         rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_NOT_SUPPORTED, RT_SRC_POS,
