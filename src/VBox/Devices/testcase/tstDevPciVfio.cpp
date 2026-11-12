@@ -4883,6 +4883,42 @@ static void tstSlotAttach(void)
     }
 
     /*
+     * A device with MSI-X: one which has the table somewhere else is another kind
+     * of device, although its BARs and the number of its interrupts are the same.
+     */
+    {
+        static TSTVFIODEVCFG s_ModelMsix; /* Too big for the stack. */
+        static TSTVFIODEVCFG s_OtherMsix;
+        tstModelInitMsixDedicatedBar(&s_ModelMsix, 8 /*cVectors*/);
+        tstModelInit(&s_OtherMsix, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+        tstModelSetBar(&s_OtherMsix, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+        tstModelSetBar(&s_OtherMsix, 2, _8K, PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&s_OtherMsix, TST_EXP_CAP_OFF);
+        tstModelAddMsixCap(&s_OtherMsix, TST_MSIX_CAP_OFF, 8 /*cVectors*/, 2 /*iBar*/, _4K /*offTable*/, 0 /*offPba*/);
+
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        int rc = tstSlotFixtureSetup(&s_ModelMsix, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_OtherMsix), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_MISMATCH);
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+            RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_ModelMsix), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
      * A device with two functions.
      */
     TSTVFIODEVCFG aModels[2];
