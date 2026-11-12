@@ -5090,7 +5090,7 @@ static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV
     pFun->Layout.cbRom      = pFun->cbRom;
     memcpy(pFun->Layout.acIrqVectors, pLayout->acIrqVectors, sizeof(pFun->Layout.acIrqVectors));
     pFun->Layout.iBarMsix   = pLayout->iBarMsix;
-    pFun->Layout.fMsix      = pLayout->fMsix;
+    pFun->Layout.fMsix      = false;
     if (pLayout->fMsix)
     {
         pFun->Layout.offMsixTbl = pLayout->offMsixTbl;
