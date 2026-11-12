@@ -336,6 +336,8 @@ typedef struct TSTPDM
     PTSTPDMTHREAD       apThreads[64];
     /** Number of PDM threads. */
     uint32_t            cThreads;
+    /** The PCI lock, which is the PDM lock with the real thing. */
+    RTCRITSECT          CritSectPci;
     /** Protects the interrupt log. */
     RTCRITSECT          CritSectIrq;
     /** Signalled whenever an MSI arrives. */
@@ -1341,7 +1343,7 @@ static DECLCALLBACK(void) tstPdmPciHlp_IoApicSendMsi(PPDMDEVINS pDevIns, PCIBDF 
 static DECLCALLBACK(int) tstPdmPciHlp_Lock(PPDMDEVINS pDevIns, int rc)
 {
     RT_NOREF(pDevIns, rc);
-    return VINF_SUCCESS;
+    return RTCritSectEnter(&g_Pdm.CritSectPci);
 }
 
 
@@ -1349,6 +1351,7 @@ static DECLCALLBACK(int) tstPdmPciHlp_Lock(PPDMDEVINS pDevIns, int rc)
 static DECLCALLBACK(void) tstPdmPciHlp_Unlock(PPDMDEVINS pDevIns)
 {
     RT_NOREF(pDevIns);
+    RTCritSectLeave(&g_Pdm.CritSectPci);
 }
 
 
@@ -1732,7 +1735,10 @@ int tstPdmInit(uint32_t cbRam)
     RT_ZERO(g_Pdm);
     tstPdmHlpInit();
 
-    int rc = RTCritSectInit(&g_Pdm.CritSectIrq);
+    int rc = RTCritSectInit(&g_Pdm.CritSectPci);
+    if (RT_FAILURE(rc))
+        return rc;
+    rc = RTCritSectInit(&g_Pdm.CritSectIrq);
     if (RT_SUCCESS(rc))
     {
         rc = RTSemEventCreate(&g_Pdm.hEvtMsi);
@@ -1752,6 +1758,7 @@ int tstPdmInit(uint32_t cbRam)
         }
         RTCritSectDelete(&g_Pdm.CritSectIrq);
     }
+    RTCritSectDelete(&g_Pdm.CritSectPci);
     return rc;
 }
 
@@ -1795,6 +1802,7 @@ void tstPdmTerm(void)
     RTMemPageFree(g_Pdm.pbRam, g_Pdm.cbRam);
     RTSemEventDestroy(g_Pdm.hEvtMsi);
     RTCritSectDelete(&g_Pdm.CritSectIrq);
+    RTCritSectDelete(&g_Pdm.CritSectPci);
     RT_ZERO(g_Pdm);
 }
 

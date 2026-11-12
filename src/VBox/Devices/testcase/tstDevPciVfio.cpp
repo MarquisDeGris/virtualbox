@@ -313,6 +313,10 @@ static const char *g_pszTstHostAddressFun0 = NULL;
 static bool     g_fTstLegacy          = false;
 
 
+/** The device instance of the passthrough device of the VM set up by tstFixtureSetup(). */
+static PPDMDEVINS g_pTstDevInsVfio    = NULL;
+
+
 /**
  * Sets up the fake kernel with the given PCI functions and a VM with the ICH9
  * PCI bus and one passthrough device using these functions.
@@ -383,7 +387,7 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
         if (i == 0 && g_fTstInterceptMmio)
             RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "InterceptMmio", 1), VINF_SUCCESS);
     }
-    rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, NULL);
+    rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, &g_pTstDevInsVfio);
     if (RT_SUCCESS(rc))
         rc = tstPdmInitComplete();
     return rc;
@@ -3378,10 +3382,15 @@ static DECLCALLBACK(void) tstPortLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
 }
 
 
+/** How long tstPortFixtureSetupEx() configures the passthrough device to give the guest for
+ * letting go of it when the host wants it back, in milliseconds; 0 for leaving it at the default. */
+static uint32_t g_cMsTstGuestRelease = 0;
+
+
 /**
  * Sets up a VM with the ICH9 PCI bus and a bridge on it, a PCI express root
- * port usually, and optionally the fake kernel with a PCI function and a
- * passthrough device for it behind the bridge.
+ * port usually, and optionally the fake kernel with PCI functions and a
+ * passthrough device for them behind the bridge.
  *
  * Completing the VM construction is left to the caller.  tstFixtureTeardown()
  * has to be called regardless of the result.
@@ -3389,13 +3398,14 @@ static DECLCALLBACK(void) tstPortLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
  * @returns Status code of the constructor which failed, or of whatever failed before.
  * @param   pszPortType         The "ExpressPortType" of the bridge, NULL for a bridge which is not PCI express.
  * @param   fHotPlug            Whether the bridge is configured to have a hot-plug capable slot.
- * @param   pModel              The PCI function to put behind the bridge, NULL for none.
- * @param   ppDev               Where to return the fake kernel handle of the function, NULL if there is none.
+ * @param   paModels            The PCI functions to put behind the bridge, the first one becomes function 0.
+ * @param   cModels             Number of PCI functions, 0 for nothing behind the bridge.
+ * @param   papDevs             Where to return the fake kernel handles of the functions.
  * @param   ppDevInsPort        Where to return the device instance of the bridge.
  * @param   ppDevInsDev         Where to return the device instance of the passthrough device, optional.
  */
-static int tstPortFixtureSetup(const char *pszPortType, bool fHotPlug, PCTSTVFIODEVCFG pModel, PTSTVFIODEV *ppDev,
-                               PPDMDEVINS *ppDevInsPort, PPDMDEVINS *ppDevInsDev)
+static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVFIODEVCFG paModels, uint32_t cModels,
+                                 PTSTVFIODEV *papDevs, PPDMDEVINS *ppDevInsPort, PPDMDEVINS *ppDevInsDev)
 {
     RT_ZERO(g_TstPortLink);
     *ppDevInsPort = NULL;
@@ -3406,9 +3416,9 @@ static int tstPortFixtureSetup(const char *pszPortType, bool fHotPlug, PCTSTVFIO
     RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
     if (RT_FAILURE(rc))
         return rc;
-    if (pModel)
+    for (uint32_t i = 0; i < cModels; i++)
     {
-        rc = tstVfioKrnlDevAdd(pModel, ppDev);
+        rc = tstVfioKrnlDevAdd(&paModels[i], &papDevs[i]);
         RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
         if (RT_FAILURE(rc))
             return rc;
@@ -3448,18 +3458,33 @@ static int tstPortFixtureSetup(const char *pszPortType, bool fHotPlug, PCTSTVFIO
         return rc;
 
     /* The passthrough device: the one thing on the secondary bus, which is the second PCI bus of the VM. */
-    if (pModel)
+    if (cModels)
     {
         pCfgInst = tstCfgNodeCreate(NULL, "0");
         RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIBusNo", 1), VINF_SUCCESS);
         RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIDeviceNo", 0), VINF_SUCCESS);
         RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIFunctionNo", 0), VINF_SUCCESS);
         pCfg = tstCfgNodeCreate(pCfgInst, "Config");
-        PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, "Fun0");
-        RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", pModel->szNode), VINF_SUCCESS);
+        if (g_cMsTstGuestRelease)
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "GuestReleaseTimeoutMs", g_cMsTstGuestRelease), VINF_SUCCESS);
+        for (uint32_t i = 0; i < cModels; i++)
+        {
+            char szName[16];
+            RTStrPrintf(szName, sizeof(szName), "Fun%u", i);
+            PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, szName);
+            RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", paModels[i].szNode), VINF_SUCCESS);
+        }
         rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, ppDevInsDev);
     }
     return rc;
+}
+
+
+/** tstPortFixtureSetupEx() with one PCI function behind the bridge or with none. */
+static int tstPortFixtureSetup(const char *pszPortType, bool fHotPlug, PCTSTVFIODEVCFG pModel, PTSTVFIODEV *ppDev,
+                               PPDMDEVINS *ppDevInsPort, PPDMDEVINS *ppDevInsDev)
+{
+    return tstPortFixtureSetupEx(pszPortType, fHotPlug, pModel, pModel ? 1 : 0, ppDev, ppDevInsPort, ppDevInsDev);
 }
 
 
@@ -4076,12 +4101,11 @@ static bool tstPortFuzzCheck(PPDMDEVINS pDevInsPort, uint8_t const *pabInitial, 
                                                          g_TstPortLink.fLinkUp ? "up" : "down"));
     RTTESTI_CHECK(devpciR3HotPlugSlotIsLinkUp(pDevInsPort) == fLinkUp);
 
-    /* The guest reaches the device while the link is up and at no other time. */
+    /* There is nothing behind the port which could answer, with the link up or down. */
     if (fBusNumbersSet)
     {
         uint32_t const idVendor = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2);
-        RTTESTI_CHECK_MSG(idVendor == (fLinkUp ? TST_VENDOR_ID : UINT32_C(0xffff)),
-                          ("vendor ID %#RX32 with the link %s\n", idVendor, fLinkUp ? "up" : "down"));
+        RTTESTI_CHECK_MSG(idVendor == UINT32_C(0xffff), ("vendor ID %#RX32 with the link %s\n", idVendor, fLinkUp ? "up" : "down"));
     }
 
     return RTTestIErrorCount() == cErrorsBefore;
@@ -4115,12 +4139,9 @@ static void tstPortFuzz(void)
         return;
     RTRandAdvSeed(g_hTstRand, uSeed);
 
-    /* The passthrough device is on the secondary bus, the test says whether it is in the slot. */
-    TSTVFIODEVCFG Model;
-    tstModelInitDefault(&Model);
-    PTSTVFIODEV pDev        = NULL;
-    PPDMDEVINS  pDevInsPort = NULL;
-    rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, &Model, &pDev, &pDevInsPort, NULL);
+    /* Nothing is configured to be behind the port, the test is the device which comes and goes. */
+    PPDMDEVINS pDevInsPort = NULL;
+    rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
     RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
     if (RT_SUCCESS(rc))
     {
@@ -4188,7 +4209,7 @@ static void tstPortFuzz(void)
                 tstPortCfgWrite(TSTPORT_SLTCTL, tstPortCfgRead(TSTPORT_SLTCTL, 2) ^ VBOX_PCI_EXP_SLTCTL_PWRC, 2);
             else if (uOp < 76)
             {
-                /* The guest accesses the device behind the port. */
+                /* The guest accesses what is behind the port, which is nothing. */
                 static const unsigned s_acb[] = { 1, 2, 4 };
                 unsigned const cb  = s_acb[tstRnd(0, 2)];
                 uint32_t const off = tstRnd(0, 0x1000 - cb) & ~(uint32_t)(cb - 1);
@@ -4249,6 +4270,435 @@ static void tstPortFuzz(void)
 }
 
 
+/*
+ *
+ * The passthrough device in the hot-plug capable slot of a root port.
+ *
+ */
+
+/**
+ * Sets up a VM with a passthrough device in the hot-plug capable slot of a root
+ * port, powers it on and has the guest get the port ready for native hot-plug:
+ * bus numbers, MSI and all slot events.
+ *
+ * tstFixtureTeardown() has to be called regardless of the result.
+ *
+ * @returns VBox status code, failures are reported.
+ * @param   paModels            The PCI functions of the device, the first one becomes function 0.
+ * @param   cModels             Number of PCI functions.
+ * @param   papDevs             Where to return the fake kernel handles of the functions.
+ * @param   ppDevInsPort        Where to return the device instance of the root port.
+ * @param   ppDevInsDev         Where to return the device instance of the passthrough device.
+ */
+static int tstSlotFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIODEV *papDevs,
+                               PPDMDEVINS *ppDevInsPort, PPDMDEVINS *ppDevInsDev)
+{
+    int rc = tstPortFixtureSetupEx("RootCmplxRootPort", true /*fHotPlug*/, paModels, cModels, papDevs, ppDevInsPort, ppDevInsDev);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        rc = tstPdmInitComplete();
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    }
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        tstPortGuestSetBusNumbers();
+        tstPortGuestEnableMsi();
+        tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 2);
+    }
+    return rc;
+}
+
+
+/**
+ * Does to function 0 of the device in the slot what a guest does to use it:
+ * BAR0 gets an address, memory decoding and bus mastering get enabled.
+ */
+static void tstSlotGuestEnableDevice(void)
+{
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+}
+
+
+/**
+ * Checks whether the guest reaches function 0 of the device in the slot: its
+ * config space and what it has in BAR0.
+ *
+ * @returns true if the guest reaches the device, false if not.
+ * @param   pDev                The PCI function of the fake kernel.
+ */
+static bool tstSlotGuestReachesDevice(PTSTVFIODEV pDev)
+{
+    if (tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) != TST_VENDOR_ID)
+        return false;
+    uint32_t *pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR0_REGION_INDEX);
+    if (!pau32Bar0)
+        return false;
+    pau32Bar0[5] = UINT32_C(0xc001d00d);
+    uint32_t u32 = 0;
+    int rc = tstPdmPhysRead(TST_BAR0_ADDR + 20, &u32, sizeof(u32));
+    return RT_SUCCESS(rc) && u32 == UINT32_C(0xc001d00d);
+}
+
+
+/**
+ * Plays a guest which lets go of the device in the slot when it is asked to:
+ * waits for the attention button and switches the slot off.
+ *
+ * @returns true if the button was pressed in time, false if not.
+ * @param   cMsTimeout          How long to wait for the button.
+ */
+static bool tstSlotGuestLetGoWhenAsked(RTMSINTERVAL cMsTimeout)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB))
+    {
+        if (RTTimeMilliTS() - msStart >= cMsTimeout)
+            return false;
+        RTThreadSleep(1);
+    }
+    tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+    return true;
+}
+
+
+/**
+ * Waits for the device to have let go of a function of the fake kernel.
+ *
+ * @returns true if the function is no longer open, false if the time is up.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   cMsTimeout          How long to wait at most.
+ */
+static bool tstSlotWaitForRelease(PTSTVFIODEV pDev, RTMSINTERVAL cMsTimeout)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (tstVfioKrnlDevGetOpenCount(pDev) != 0)
+    {
+        if (RTTimeMilliTS() - msStart >= cMsTimeout)
+            return false;
+        RTThreadSleep(1);
+    }
+    return true;
+}
+
+
+/**
+ * Checks that the slot is empty for the guest and that it was told so.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   pDevInsPort         The device instance of the root port.
+ */
+static void tstSlotCheckEmpty(unsigned uLine, PPDMDEVINS pDevInsPort)
+{
+    /* The first access of the guest has what the device left for an EMT to do done as well. */
+    uint32_t const uSltSta = tstPortCfgRead(TSTPORT_SLTSTA, 2);
+    if (   (uSltSta & VBOX_PCI_EXP_SLTSTA_PRES)
+        || !(uSltSta & VBOX_PCI_EXP_SLTSTA_PRSD))
+        RTTestIFailed("line %u: slot status %#RX32\n", uLine, uSltSta);
+    if (   (tstPortCfgRead(TSTPORT_LNKSTA, 2) & VBOX_PCI_EXP_LNKSTA_DL_ACT)
+        || devpciR3HotPlugSlotIsLinkUp(pDevInsPort))
+        RTTestIFailed("line %u: the link is up\n", uLine);
+    if (tstPdmIsMmio2Mapped(TST_BAR0_ADDR))
+        RTTestIFailed("line %u: BAR0 is mapped into the guest\n", uLine);
+
+    /* The guest switches the slot on to have a look. */
+    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+    for (uint8_t uDevFn = 0; uDevFn < 2; uDevFn++)
+    {
+        uint32_t const idVendor = tstPdmPciCfgRead(TSTPORT_SEC_BUS, uDevFn, VBOX_PCI_VENDOR_ID, 2);
+        if (idVendor != UINT32_C(0xffff))
+            RTTestIFailed("line %u: function %u has vendor ID %#RX32\n", uLine, uDevFn, idVendor);
+    }
+    if (tstVfioKrnlGetViolationCount() != 0)
+        RTTestIFailed("line %u: %u request(s) to the kernel which are out of bounds\n", uLine, tstVfioKrnlGetViolationCount());
+}
+
+
+/**
+ * The guest switches the slot with the device off and on, and disables the link:
+ * the device is disabled and reset, the guest reaches it only while the link
+ * is up, and has to set it up again afterwards.
+ */
+static void tstSlotPower(void)
+{
+    RTTestISub("Hot-plug slot: the guest switches the slot off and on");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    int rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        /* The device is what is in the slot, from the start and with the link up. */
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == VBOX_PCI_EXP_SLTSTA_PRES);
+        RTTESTI_CHECK(devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+        tstSlotGuestEnableDevice();
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+        RTTESTI_CHECK(pbCfg != NULL);
+        uint16_t const uLnkCtl = (uint16_t)tstPortCfgRead(TSTPORT_LNKCTL, 2);
+
+        for (unsigned iVariant = 0; iVariant < 2 && pbCfg; iVariant++)
+        {
+            RTTESTI_CHECK_MSG(pbCfg[VBOX_PCI_COMMAND] & VBOX_PCI_COMMAND_MASTER, ("variant %u\n", iVariant));
+
+            /* Link down: the device is disabled and reset, the guest doesn't get at it. */
+            uint32_t const cResetsBefore = tstVfioKrnlDevGetResetCount(pDev);
+            if (iVariant == 0)
+                tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+            else
+                tstPortCfgWrite(TSTPORT_LNKCTL, uLnkCtl | VBOX_PCI_EXP_LNKCTL_DISABLE, 2);
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore + 1,
+                              ("variant %u: %u reset(s)\n", iVariant, tstVfioKrnlDevGetResetCount(pDev) - cResetsBefore));
+            RTTESTI_CHECK_MSG(!(pbCfg[VBOX_PCI_COMMAND] & (VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER)),
+                              ("variant %u: command register of the device %#x\n", iVariant, pbCfg[VBOX_PCI_COMMAND]));
+            RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 1, ("variant %u\n", iVariant));
+
+            /* Link up: the device is there as it is after a reset, and works once the guest has set it up. */
+            if (iVariant == 0)
+                tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+            else
+                tstPortCfgWrite(TSTPORT_LNKCTL, uLnkCtl, 2);
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!(  tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, 2)
+                                & (VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER)), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore + 1, ("variant %u\n", iVariant));
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+        }
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+}
+
+
+/** Arguments and result of tstSlotDetachThread(). */
+typedef struct TSTSLOTDETACH
+{
+    /** The device instance of the passthrough device. */
+    PPDMDEVINS      pDevIns;
+    /** How long to wait for the guest. */
+    RTMSINTERVAL    cMsWait;
+    /** Whether to take the device away if the guest didn't let go of it. */
+    bool            fForce;
+    /** The result. */
+    int             rc;
+} TSTSLOTDETACH;
+
+
+/**
+ * Thread detaching the device from the slot, while the thread of the test plays
+ * the guest.
+ */
+static DECLCALLBACK(int) tstSlotDetachThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    TSTSLOTDETACH *pArgs = (TSTSLOTDETACH *)pvUser;
+    RT_NOREF(hThreadSelf);
+    pArgs->rc = pciVfioR3SlotDetach(pArgs->pDevIns, pArgs->cMsWait, pArgs->fForce);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * The device is detached from the slot on request: the guest is asked to let go
+ * of it and does, or doesn't, or has done so already.
+ */
+static void tstSlotDetach(void)
+{
+    RTTestISub("Hot-plug slot: the device is detached");
+
+    /*
+     * A device which is not in a hot-plug capable slot stays where it is.
+     */
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(g_pTstDevInsVfio, 0 /*cMsWait*/, true /*fForce*/), VERR_NOT_SUPPORTED);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
+    }
+    tstFixtureTeardown();
+
+    /*
+     * In the slot.
+     */
+    for (unsigned iVariant = 0; iVariant < 4; iVariant++)
+    {
+        PPDMDEVINS pDevInsPort = NULL;
+        PPDMDEVINS pDevInsDev  = NULL;
+        pDev = NULL;
+        rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+            uint32_t const cResetsBefore = tstVfioKrnlDevGetResetCount(pDev);
+
+            switch (iVariant)
+            {
+                case 0:
+                {
+                    /* The guest lets go of the device when it is asked to. */
+                    TSTSLOTDETACH Args     = { pDevInsDev, RT_MS_30SEC, false /*fForce*/, VERR_INTERNAL_ERROR };
+                    RTTHREAD      hThread  = NIL_RTTHREAD;
+                    rc = RTThreadCreate(&hThread, tstSlotDetachThread, &Args, 0 /*cbStack*/, RTTHREADTYPE_DEFAULT,
+                                        RTTHREADFLAGS_WAITABLE, "tstDetach");
+                    RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+                    if (RT_SUCCESS(rc))
+                    {
+                        RTTESTI_CHECK_MSG(tstSlotGuestLetGoWhenAsked(RT_MS_5SEC), ("the guest was not asked\n"));
+                        RTTESTI_CHECK_RC(RTThreadWait(hThread, RT_MS_30SEC, NULL), VINF_SUCCESS);
+                        RTTESTI_CHECK_RC(Args.rc, VINF_SUCCESS);
+                    }
+                    /* The device was reset when the guest switched the slot off. */
+                    RTTESTI_CHECK(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore + 1);
+                    break;
+                }
+
+                case 1:
+                    /* The guest doesn't react: the device stays. */
+                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 200 /*cMsWait*/, false /*fForce*/), VERR_TIMEOUT);
+                    RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB);
+                    RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+                    RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+
+                    /* Once more right away: the button isn't pressed again, the guest would take that
+                       for the request being taken back. */
+                    tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 50 /*cMsWait*/, false /*fForce*/), VERR_TIMEOUT);
+                    RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB));
+                    RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+
+                    /* The one who asks insists: the device goes. */
+                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 50 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore);
+                    break;
+
+                case 2:
+                    /* The guest has the slot switched off: nobody to ask. */
+                    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+                    tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB));
+                    break;
+
+                default:
+                    /* Detached the hard way, and detached once more. */
+                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+                    break;
+            }
+
+            /* Whichever way: the device is let go of and the slot is empty. */
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u: the device is still open\n", iVariant));
+            tstSlotCheckEmpty(__LINE__, pDevInsPort);
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * The host wants a device back which is in the slot: the guest is asked first
+ * if there is a point, and the whole device goes, not only the function the
+ * host asked for.
+ */
+static void tstSlotHostRequest(void)
+{
+    RTTestISub("Hot-plug slot: the host wants the device back");
+
+    for (unsigned iVariant = 0; iVariant < 5; iVariant++)
+    {
+        TSTVFIODEVCFG aModels[2];
+        tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+        tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+        tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+        for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+        {
+            tstModelSetBar(&aModels[i], 0, _64K, PCI_ADDRESS_SPACE_MEM);
+            tstModelAddExpCap(&aModels[i], TST_EXP_CAP_OFF);
+        }
+
+        PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        g_cMsTstGuestRelease = iVariant == 1 ? 300 : RT_MS_1MIN;
+        int rc = tstSlotFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, &pDevInsPort, &pDevInsDev);
+        g_cMsTstGuestRelease = 0;
+        if (RT_SUCCESS(rc))
+        {
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1, ("variant %u\n", iVariant));
+            tstSlotGuestEnableDevice();
+
+            uint64_t const msStart = RTTimeMilliTS();
+            bool           fAsked  = false;
+            switch (iVariant)
+            {
+                case 0:
+                    /* The device is there and the guest uses it: the guest is asked and lets go. */
+                    tstVfioKrnlDevRequest(apDevs[1]);
+                    fAsked = tstSlotGuestLetGoWhenAsked(RT_MS_5SEC);
+                    RTTESTI_CHECK_MSG(fAsked, ("the guest was not asked\n"));
+                    break;
+
+                case 1:
+                    /* The same with a guest which doesn't react: its time is up after 300 ms. */
+                    tstVfioKrnlDevRequest(apDevs[1]);
+                    break;
+
+                case 2:
+                    /* The guest has the slot switched off: nobody to ask. */
+                    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+                    tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+                    tstVfioKrnlDevRequest(apDevs[1]);
+                    break;
+
+                case 3:
+                    /* The device was unplugged: no point in asking or waiting. */
+                    tstVfioKrnlDevRemove(apDevs[1]);
+                    break;
+
+                default:
+                    /* The host reports an error of the device. */
+                    tstVfioKrnlDevSignalError(apDevs[1]);
+                    break;
+            }
+
+            /* Both functions are let go of, in the time it takes. */
+            bool const fReleased =    tstSlotWaitForRelease(apDevs[1], RT_MS_10SEC)
+                                   && tstSlotWaitForRelease(apDevs[0], RT_MS_10SEC);
+            uint64_t const cMsElapsed = RTTimeMilliTS() - msStart;
+            RTTESTI_CHECK_MSG(fReleased, ("variant %u: function 0 is open %u time(s), function 1 %u time(s)\n", iVariant,
+                                          tstVfioKrnlDevGetOpenCount(apDevs[0]), tstVfioKrnlDevGetOpenCount(apDevs[1])));
+            if (iVariant == 1)
+                RTTESTI_CHECK_MSG(cMsElapsed >= 300, ("the guest got %RU64 ms only\n", cMsElapsed));
+
+            /* The guest was asked where there was a point. */
+            bool const fButton = RT_BOOL(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB);
+            RTTESTI_CHECK_MSG(fButton == (iVariant == 1), ("variant %u: fButton=%d fAsked=%d\n", iVariant, fButton, fAsked));
+
+            tstSlotCheckEmpty(__LINE__, pDevInsPort);
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -4296,6 +4746,9 @@ int main()
     tstPortSlotEvents();
     tstPortDevice();
     tstPortSavedState();
+    tstSlotPower();
+    tstSlotDetach();
+    tstSlotHostRequest();
     tstFuzz();
     tstPortFuzz();
 

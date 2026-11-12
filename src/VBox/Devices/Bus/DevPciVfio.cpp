@@ -94,8 +94,26 @@
  * the BARs, and from there on the guest finds nothing where the function was. Other functions of
  * the device stay in service.
  *
- * The guest isn't asked and isn't told, for it this is hardware which stops answering. There is no
- * way back either: the function stays out of service until the VM is powered off.
+ * Unless the device is in a hot-plug capable slot, see below, the guest isn't asked and isn't told,
+ * for it this is hardware which stops answering. There is no way back either: the function stays
+ * out of service until the VM is powered off.
+ *
+ * @section sec_dev_vfio_hotplug        Hot-plug capable slot
+ *
+ * A device behind a PCI express root port with a hot-plug capable slot is the device in that slot,
+ * with all its functions. The port has such a slot with the HotPlug setting of ich9pcibridge, and
+ * the guest makes use of it if the ACPI device has the PciExpressNativeHotPlug setting. The guest
+ * can switch the slot off and on then, which disables and resets the device like a reset of the VM
+ * does.
+ *
+ * Before a device in such a slot is taken away from the guest, the guest is asked to let go of it
+ * by the attention button of the slot and gets time for it; it shows that it is done by switching
+ * the slot off. This is how it goes when the host wants the device back while the device still
+ * answers, and when the device is detached on request, see pciVfioR3SlotDetach(). A guest which
+ * doesn't react loses the device the hard way when the time is up, if it is the host which waits
+ * or if the one who made the request insists. The slot is empty afterwards and the guest is told
+ * so. An error of the device reported by the host and a device which no longer answers empty the
+ * slot at once.
  *
  * @section sec_dev_vfio_requirements
  *
@@ -265,6 +283,13 @@
 #define VFIO_PCI_VGA_MEM_START                UINT32_C(0x000a0000)
 /** Size of the legacy VGA memory range. */
 #define VFIO_PCI_VGA_MEM_SIZE                 UINT32_C(0x00020000)
+
+/** How long the attention button of a hot-plug capable slot is left alone after it was
+ * pressed, in milliseconds.  A guest takes five seconds from the button being pressed
+ * to doing something about it, and what it does takes time too.  Pressing the button
+ * again meanwhile takes the request back or, once the slot is off, asks for the
+ * opposite. */
+#define VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS       (10 * RT_MS_1SEC)
 
 
 /*********************************************************************************************************************************
@@ -526,6 +551,16 @@ typedef struct VFIOPCI
     int                  iFdWatcherWakeup;
     /** Flag telling the watcher thread to terminate. */
     bool volatile        fWatcherStop;
+
+    /** The root port with the hot-plug capable slot the device is in, NULL if the
+     * device is somewhere else. */
+    PPDMDEVINSR3         pDevInsPort;
+    /** How long the guest gets for letting go of the device before it is taken away
+     * from it because the host wants it back, in milliseconds. */
+    uint32_t             cMsGuestRelease;
+    /** When the attention button of the slot was pressed last to ask the guest to let
+     * go of the device, 0 if it wasn't since the link to the slot went down last. */
+    uint64_t volatile    msAttnPressed;
 } VFIOPCI;
 /** Pointer to the raw PCI instance data. */
 typedef VFIOPCI *PVFIOPCI;
@@ -3689,6 +3724,70 @@ static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszW
 
 
 /**
+ * Checks whether nothing of the device is in service.
+ *
+ * @returns true if all functions are out of service, false if one is in service at least.
+ * @param   pThis       The VFIO PCI device instance.
+ */
+static bool pciVfioIsOutOfService(PVFIOPCI pThis)
+{
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !pThis->aPciFuns[iPciFun].fGone)
+            return false;
+    return true;
+}
+
+
+/**
+ * Checks whether a function still answers, which it doesn't after it was unplugged.
+ *
+ * @returns true if the function answers, false if not.
+ * @param   pFun        The function.
+ */
+static bool pciVfioFunAnswers(PCVFIOPCIFUN pFun)
+{
+    uint16_t idVendor = UINT16_MAX;
+    int rc = pciVfioCfgSpaceReadU16(pFun, VBOX_PCI_VENDOR_ID, &idVendor);
+    return RT_SUCCESS(rc) && idVendor != UINT16_MAX;
+}
+
+
+/**
+ * Asks the guest to let go of the device in the hot-plug capable slot by pressing
+ * the attention button of the slot, unless that was done a moment ago.
+ *
+ * @param   pThis       The VFIO PCI device instance, in a hot-plug capable slot.
+ */
+static void pciVfioSlotAskGuest(PVFIOPCI pThis)
+{
+    uint64_t const msNow  = RT_MAX(RTTimeMilliTS(), 1);
+    uint64_t const msLast = ASMAtomicReadU64(&pThis->msAttnPressed);
+    if (   (   !msLast
+            || msNow - msLast >= VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS)
+        && ASMAtomicCmpXchgU64(&pThis->msAttnPressed, msNow, msLast))
+        devpciR3HotPlugSlotPressAttentionButton(pThis->pDevInsPort);
+}
+
+
+/**
+ * Takes all functions of the device out of service and the device out of the
+ * hot-plug capable slot it is in, see pciVfioFunSetGone().  The guest is told that
+ * the slot is empty.
+ *
+ * @param   pThis       The VFIO PCI device instance, in a hot-plug capable slot.
+ * @param   pszWhy      The reason, for the log.
+ */
+static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy)
+{
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+            pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy);
+    devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, false /*fPresent*/);
+}
+
+
+/**
  * The thread watching out for the host wanting a function back or reporting an
  * error on it.
  *
@@ -3703,6 +3802,9 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
 {
     PVFIOPCI pThis = (PVFIOPCI)pvUser;
     RT_NOREF(hThreadSelf);
+
+    /* When the time the guest got for letting go of the device is up, 0 if it wasn't asked. */
+    uint64_t msLetGoDeadline = 0;
 
     while (!ASMAtomicReadBool(&pThis->fWatcherStop))
     {
@@ -3742,7 +3844,8 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
             }
         }
 
-        int rcLnx = poll(&aFds[0], cFds, -1 /*timeout*/);
+        /* While the guest is given time, the link to the slot is looked at now and then. */
+        int rcLnx = poll(&aFds[0], cFds, msLetGoDeadline ? 50 : -1 /*timeout*/);
         if (rcLnx == -1)
         {
             if (errno == EINTR)
@@ -3757,9 +3860,34 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                 uint64_t      u64Ign = 0;
                 ssize_t const cbRead = read(aFds[i].fd, &u64Ign, sizeof(u64Ign));
                 RT_NOREF(cbRead);
-                pciVfioFunSetGone(pThis, &pThis->aPciFuns[aiPciFuns[i]],
-                                  afRequest[i] ? "the host wants the device back" : "the host reported an error of the device");
+                PVFIOPCIFUN const pFun = &pThis->aPciFuns[aiPciFuns[i]];
+                if (!pThis->pDevInsPort)
+                    /* Nobody to ask and nobody to tell. */
+                    pciVfioFunSetGone(pThis, pFun,
+                                      afRequest[i] ? "the host wants the device back" : "the host reported an error of the device");
+                else if (!afRequest[i])
+                    pciVfioSlotEmpty(pThis, "the host reported an error of the device");
+                else if (   !pciVfioFunAnswers(pFun)
+                         || !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort))
+                    /* Unplugged, or nothing the guest would have to let go of. */
+                    pciVfioSlotEmpty(pThis, "the host wants the device back");
+                else
+                {
+                    /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
+                    pciVfioSlotAskGuest(pThis);
+                    if (!msLetGoDeadline)
+                        msLetGoDeadline = RT_MAX(RTTimeMilliTS() + pThis->cMsGuestRelease, 1);
+                }
             }
+
+        /* The guest has let go of the device when the link to the slot is down. */
+        if (   msLetGoDeadline
+            && (   !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort)
+                || RTTimeMilliTS() >= msLetGoDeadline))
+        {
+            pciVfioSlotEmpty(pThis, "the host wants the device back");
+            msLetGoDeadline = 0;
+        }
     }
 
     return VINF_SUCCESS;
@@ -3975,6 +4103,75 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
 
 
 /**
+ * @callback_method_impl{FNDEVPCIHPSLOTLINK,
+ *      The link between the root port and the hot-plug capable slot the device is
+ *      in changed its state.}
+ */
+static DECLCALLBACK(void) pciVfioSlotLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+
+    if (!fLinkUp)
+    {
+        /*
+         * The guest switched the slot off or disabled the link, or the device was
+         * taken out of the slot.  The guest doesn't get at the device until the link
+         * is up again, and it expects a device which was reset then.  So what is in
+         * service of the device, which is nothing if it was taken out, is disabled
+         * and reset now.
+         */
+        pciVfioReset(pDevIns);
+        ASMAtomicWriteU64(&pThis->msAttnPressed, 0);
+    }
+    LogRelMax(256, ("VFIO#%d: The link to the device is %s\n", pThis->iInstance, fLinkUp ? "up" : "down"));
+}
+
+
+/**
+ * Takes the device out of the hot-plug capable slot it is in.
+ *
+ * The guest is asked to let go of the device first, by the attention button of
+ * the slot, if it has the slot switched on.  It shows that it did by switching
+ * the slot off, which a guest takes five seconds and more for.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_SUPPORTED if the device is not in a hot-plug capable slot.
+ * @retval  VERR_TIMEOUT if the guest didn't let go of the device in time and
+ *          fForce is clear.  The device is where it was.  The guest was asked and
+ *          can still switch the slot off, which leaves the device in the slot.
+ * @param   pDevIns     The device instance.
+ * @param   cMsWait     How long to wait for the guest to let go of the device.
+ * @param   fForce      Whether the device is taken away from the guest if it didn't
+ *                      let go of it in time.
+ *
+ * @thread  Any but an EMT, which is needed for the guest to do its part.
+ */
+DECLHIDDEN(int) pciVfioR3SlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bool fForce)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    if (!pThis->pDevInsPort)
+        return VERR_NOT_SUPPORTED;
+
+    uint64_t const msStart = RTTimeMilliTS();
+    while (   devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort)
+           && !pciVfioIsOutOfService(pThis))
+    {
+        pciVfioSlotAskGuest(pThis);
+        if (RTTimeMilliTS() - msStart >= cMsWait)
+        {
+            if (!fForce)
+                return VERR_TIMEOUT;
+            break;
+        }
+        RTThreadSleep(10);
+    }
+
+    pciVfioSlotEmpty(pThis, "it was detached");
+    return VINF_SUCCESS;
+}
+
+
+/**
  * @interface_method_impl{PDMDEVREG,pfnDestruct}
  */
 static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
@@ -4173,6 +4370,9 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->hThrdWatcher     = NIL_RTTHREAD;
     pThis->iFdWatcherWakeup = -1;
     pThis->fWatcherStop     = false;
+    pThis->pDevInsPort      = NULL;
+    pThis->cMsGuestRelease  = 15 * RT_MS_1SEC;
+    pThis->msAttnPressed    = 0;
 
     for (uint8_t i = 0; i < RT_ELEMENTS(pThis->aPciFuns); i++)
     {
@@ -4215,6 +4415,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                      "IommuPath\0"
                                      "VfioPath\0"
                                      "VfioGroupPath\0"
+                                     "GuestReleaseTimeoutMs\0"
                                      "Fun*\0"
                                     ))
         return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
@@ -4229,6 +4430,15 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                    N_("PCI passthrough requires the native execution engine (KVM), which this VM doesn't use. "
                                       "Select it with 'VBoxManage modifyvm --vm-execution-engine native-api'"));
+
+    /* How long the guest gets for letting go of the device when the host wants it back. */
+    uint64_t cMsGuestRelease = 0;
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "GuestReleaseTimeoutMs", &cMsGuestRelease, pThis->cMsGuestRelease);
+    if (   RT_FAILURE(rc)
+        || cMsGuestRelease > 5 * RT_MS_1MIN)
+        return PDMDevHlpVMSetError(pDevIns, RT_FAILURE(rc) ? rc : VERR_OUT_OF_RANGE, RT_SRC_POS,
+                                   N_("Configuration error: \"GuestReleaseTimeoutMs\" is not a number of milliseconds up to five minutes"));
+    pThis->cMsGuestRelease = (uint32_t)cMsGuestRelease;
 
     rc = pciVfioConfigureAccess(pDevIns, pThis, pHlp, pCfg);
     if (RT_FAILURE(rc))
@@ -4509,6 +4719,27 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         pThis->hThrdWatcher = NIL_RTTHREAD;
         return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS, N_("Failed to create the watcher thread"));
     }
+
+    /*
+     * Behind a root port with a hot-plug capable slot the device is what is in the
+     * slot.  This is the last thing which can fail, as the port keeps what it is told.
+     */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+        {
+            PPDMDEVINS const pDevInsPort = devpciR3HotPlugSlotFind(pDevIns, pDevIns->apPciDevs[iPciFun]);
+            if (pDevInsPort)
+            {
+                rc = devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevIns, pciVfioSlotLinkChanged, true /*fPresent*/);
+                if (RT_FAILURE(rc))
+                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                               N_("The hot-plug capable slot the passed through PCI device is configured "
+                                                  "to be in is taken by another device"));
+                pThis->pDevInsPort = pDevInsPort;
+                LogRel(("VFIO#%d: The device is in the hot-plug capable slot of PCI bridge #%u\n", iInstance, pDevInsPort->iInstance));
+            }
+            break;
+        }
 
     /* Need to fixup the header type for all functions. */
     if (fMultiFn)
