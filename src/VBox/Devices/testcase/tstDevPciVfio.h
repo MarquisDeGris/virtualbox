@@ -56,6 +56,10 @@ RT_C_DECLS_BEGIN
 
 /** The path of the fake IOMMUFD device node. */
 #define TSTVFIO_IOMMU_NODE          "/dev/iommu"
+/** The path of the fake VFIO container node (legacy interface). */
+#define TSTVFIO_CONTAINER_NODE      "/dev/vfio/vfio"
+/** The path of the fake VFIO group node all functions are in (legacy interface). */
+#define TSTVFIO_GROUP_NODE          "/dev/vfio/7"
 
 /**
  * Description of a single VFIO region of the device model.
@@ -121,6 +125,7 @@ typedef FNTSTVFIOCFGWRITE *PFNTSTVFIOCFGWRITE;
 
 int         tstVfioKrnlInit(void);
 void        tstVfioKrnlTerm(void);
+void        tstVfioKrnlSetLegacy(bool fLegacy);
 int         tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev);
 void       *tstVfioKrnlDevGetRegionPtr(PTSTVFIODEV pDev, uint32_t iRegion);
 int         tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVector);
