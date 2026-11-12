@@ -3982,7 +3982,7 @@ static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDev
                 /* A write to any part of the slot control register is a command, and
                    each command completes at once. */
                 if (offCap - ICH9PCIBRIDGE_EXP_SLTCTL < sizeof(uint16_t))
-                    fEvents |= VBOX_PCI_EXP_SLTSTA_CMDC;
+                    fEvents |= 0;
             }
             else
             {
