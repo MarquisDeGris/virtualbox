@@ -5244,7 +5244,7 @@ static DECLCALLBACK(int) pciVfioLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, ui
     }
 
     for (uint32_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
-        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+        if (   pThis->aPciFuns[iPciFun].iFdVfio == -2
             && !(fFunsSaved & RT_BIT_32(iPciFun)))
             return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
                                            N_("The state was saved without function %u of the passed through PCI device"),
