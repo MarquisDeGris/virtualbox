@@ -5665,7 +5665,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             break;
         }
 
-    if (   cFunsAbsent
+    if (   cFunsAbsent > 8
         && !pThis->pDevInsPort)
         return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                    N_("The PCI device to pass through isn't there. The VM can start without it only "
