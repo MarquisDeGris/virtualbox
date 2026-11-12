@@ -301,6 +301,9 @@ static bool     g_fTstInterceptMmio   = false;
 /** The host address tstFixtureSetup() configures for function 0 instead of the
  * device node, NULL for configuring the device node. */
 static const char *g_pszTstHostAddressFun0 = NULL;
+/** Whether tstFixtureSetup() sets things up for the legacy interface: the fake
+ * kernel has a container and a group only, and the device is told about the group. */
+static bool     g_fTstLegacy          = false;
 
 
 /**
@@ -322,8 +325,9 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
     RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
     if (RT_FAILURE(rc))
         return rc;
+    tstVfioKrnlSetLegacy(g_fTstLegacy);
     if (g_cTstFailIoasMapSkip != UINT32_MAX)
-        tstVfioKrnlFailIoctl(IOMMU_IOAS_MAP, g_cTstFailIoasMapSkip, ENOMEM);
+        tstVfioKrnlFailIoctl(g_fTstLegacy ? VFIO_IOMMU_MAP_DMA : IOMMU_IOAS_MAP, g_cTstFailIoasMapSkip, ENOMEM);
     for (uint32_t i = 0; i < cModels; i++)
     {
         rc = tstVfioKrnlDevAdd(&paModels[i], &papDevs[i]);
@@ -355,6 +359,8 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
     RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIDeviceNo", TST_PCI_DEV_NO), VINF_SUCCESS);
     RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIFunctionNo", 0), VINF_SUCCESS);
     pCfg = tstCfgNodeCreate(pCfgInst, "Config");
+    if (g_fTstLegacy)
+        RTTESTI_CHECK_RC(tstCfgSetString(pCfg, "VfioGroupPath", TSTVFIO_GROUP_NODE), VINF_SUCCESS);
     for (uint32_t i = 0; i < cModels; i++)
     {
         char szName[16];
@@ -2112,6 +2118,149 @@ static void tstDuplicateCaps(void)
 }
 
 
+/**
+ * Legacy interface: construction, guest memory, a BAR, MSI, a reset, and
+ * nothing being left for child processes.
+ */
+static void tstLegacyBasics(void)
+{
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        /* The guest RAM is mapped through the container. */
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == TST_RAM_SIZE - TSTPDM_RAM_HOLE_SIZE,
+                          ("%RU64 bytes mapped for DMA\n", tstVfioKrnlGetDmaMappedBytes()));
+        RTTESTI_CHECK(tstVfioKrnlIsIovaRangeMapped(0, TSTPDM_RAM_HOLE_START));
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+        tstPdmPowerOn();
+
+        /* The BAR. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+        uint32_t *pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_BAR0_REGION_INDEX);
+        RTTESTI_CHECK(pau32Bar0 != NULL);
+        if (pau32Bar0)
+        {
+            pau32Bar0[4] = UINT32_C(0xfeedface);
+            uint32_t u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + 16, &u32, sizeof(u32)), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(u32 == UINT32_C(0xfeedface), ("read %#RX32 from BAR0\n", u32));
+        }
+        uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+        RTTESTI_CHECK(pbCfg != NULL);
+        if (pbCfg)
+            RTTESTI_CHECK_MSG(pbCfg[VBOX_PCI_COMMAND] & VBOX_PCI_COMMAND_MASTER,
+                              ("command register of the device %#x\n", pbCfg[VBOX_PCI_COMMAND]));
+
+        /* MSI. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8,  0, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 0x4047, 2);
+        uint32_t const fMsgCtrl =   tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2)
+                                  & ~(uint32_t)(VBOX_PCI_MSI_FLAGS_QSIZE | VBOX_PCI_MSI_FLAGS_ENABLE);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+        uint32_t const cMsisBefore = tstPdmMsiGetCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI did not arrive\n"));
+        TSTPDMMSI Msi;
+        if (tstPdmMsiGet(cMsisBefore, &Msi))
+            RTTESTI_CHECK_MSG(Msi.uData == 0x4047, ("data %#RX32\n", Msi.uData));
+
+        /* Container, group, device and the eventfd are not for child processes. */
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetInheritableFdCount() == 0,
+                          ("%u file descriptor(s) would be inherited\n", tstVfioKrnlGetInheritableFdCount()));
+
+        /* A reset. */
+        uint32_t const cResetsBefore = tstVfioKrnlDevGetResetCount(pDev);
+        tstPdmReset();
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore + 1,
+                          ("%u device reset(s)\n", tstVfioKrnlDevGetResetCount(pDev) - cResetsBefore));
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 0);
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == TST_RAM_SIZE - TSTPDM_RAM_HOLE_SIZE,
+                          ("%RU64 bytes mapped for DMA after the reset\n", tstVfioKrnlGetDmaMappedBytes()));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Legacy interface: a part of the guest memory can't be mapped, so the VM
+ * doesn't start and nothing stays mapped.
+ */
+static void tstLegacyDmaMapFailure(void)
+{
+    for (uint32_t iFail = 0; iFail < 2; iFail++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        g_cTstFailIoasMapSkip = iFail;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_cTstFailIoasMapSkip = UINT32_MAX;
+        RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("request %u failing: the VM construction succeeded: %Rrc\n", iFail, rc));
+        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("request %u failing: no VM error was set\n", iFail));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == 0,
+                          ("request %u failing: %RU64 bytes left mapped for DMA\n", iFail, tstVfioKrnlGetDmaMappedBytes()));
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * Legacy interface: two functions which can't be reset on their own get reset
+ * through their bus, with the group showing that they are ours.
+ */
+static void tstLegacyBusReset(void)
+{
+    TSTVFIODEVCFG aModels[2];
+    tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+    tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+    tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+    for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+    {
+        tstModelSetBar(&aModels[i], 0, _64K, PCI_ADDRESS_SPACE_MEM);
+        aModels[i].acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+        tstModelAddExpCap(&aModels[i], TST_EXP_CAP_OFF);
+        aModels[i].fNoFunctionReset = true;
+    }
+
+    PTSTVFIODEV apDevs[2] = { NULL, NULL };
+    int rc = tstFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN + 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
+        tstPdmReset();
+        for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetBusResetCount(apDevs[i]) == 1,
+                              ("function %u: %u bus reset(s)\n", i, tstVfioKrnlDevGetBusResetCount(apDevs[i])));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * The legacy VFIO interface with a container and a group, which is what gets
+ * used on a host without IOMMUFD: things work the same way.
+ */
+static void tstLegacy(void)
+{
+    RTTestISub("Legacy interface with container and group");
+
+    g_fTstLegacy = true;
+    tstLegacyBasics();
+    tstLegacyDmaMapFailure();
+    tstLegacyBusReset();
+    g_fTstLegacy = false;
+}
+
+
 /*
  *
  * Random device models and random guest accesses.
@@ -2669,9 +2818,11 @@ static void tstFuzz(void)
         PTSTVFIODEV pDev = NULL;
         g_fTstExposeVga     = Info.fExposeVga;
         g_fTstInterceptMmio = tstRndChance(10);
+        g_fTstLegacy        = tstRndChance(10);
         rc = tstFixtureSetup(&s_Model, 1, &pDev, NULL);
         g_fTstExposeVga     = false;
         g_fTstInterceptMmio = false;
+        g_fTstLegacy        = false;
         if (RT_SUCCESS(rc))
         {
             cConstructed++;
@@ -2764,6 +2915,7 @@ int main()
     tstResetFallback();
     tstTrappedAccessMappingGone();
     tstDuplicateCaps();
+    tstLegacy();
     tstFuzz();
 
     return RTTestSummaryAndDestroy(hTest);
