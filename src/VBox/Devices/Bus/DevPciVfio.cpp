@@ -5023,7 +5023,7 @@ static int pciVfioSaveCheck(PPDMDEVINS pDevIns, bool fFinal)
     AssertRCReturn(rc, rc);
     if (!pciVfioSlotIsEmptyForState(pThis))
         rc = pciVfioRefuseSavingState(pDevIns);
-    else if (fFinal)
+    else if (fFinal && !pThis->pDevInsPort)
         pciVfioSlotEmptyComplete(pThis);
     RTCritSectLeave(&pThis->CritSectSlot);
     return rc;
