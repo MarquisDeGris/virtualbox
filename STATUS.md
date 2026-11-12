@@ -7,19 +7,19 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `f9f95548` (12 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `680a21c5` (14 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 hardening is done apart from the fuzz target: interrupt setup; MSI-X
-table and pending bits; memory BARs in segments; capability lists; MSI
-capability; config space writes; DMA mapping; guest access paths;
-configuration validation and cleanup; reset and command register;
-documentation block. The testcase also runs clean with AddressSanitizer,
-LeakSanitizer and UndefinedBehaviorSanitizer. Next: fuzz target, legacy
+WP2 hardening is done: interrupt setup; MSI-X table and pending bits; memory
+BARs in segments; capability lists; MSI capability; config space writes; DMA
+mapping; guest access paths; configuration validation and cleanup; reset and
+command register; documentation block. The testcase runs clean with
+AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer, including a
+fuzz test with random device models and guest accesses (T2). Next: legacy
 group/container API in the harness, then WP3 (removal of the device on the
 host).
 
@@ -115,13 +115,29 @@ host).
   compiled into it are built with AddressSanitizer and
   UndefinedBehaviorSanitizer; memory errors, leaks and undefined behaviour
   fail the run. All 29 tests pass with it (run 46).
+- WP2, part 10 (commit `f4691957`): a function's MSI and MSI-X capability
+  are taken once; further ones are left out of the guest's capability list.
+  Found by the fuzz test with the leak check.
+- T2 fuzz test (commit `680a21c5`): random device models (BARs, capability
+  lists including broken ones, MSI and MSI-X layouts, extended capabilities,
+  ROM, VGA ranges, devices without reset or IOMMU) with random guest
+  accesses, interrupts, resets and a device which stops answering. Checked:
+  the VM is constructed or nothing is left behind; guest memory mappings
+  never change; no request to the kernel beyond the vectors and regions a
+  function has; nothing left open or mapped afterwards. Model count and seed
+  come from the environment, CI runs 2000 models, 20000 with sanitizers.
+- The tests were checked against deliberate defects on throwaway branches:
+  an unlimited MSI vector count is caught by its unit test (run 51); an
+  off-by-one at the end of the MSI-X table was not caught at first (runs 52,
+  55), which led to unit checks at the ends of table and pending bits and to
+  the fuzz test aiming at such places; both now catch it (runs 54, 58).
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 43) |
+| Test | Before the fix | With fixes (run 68) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -152,6 +168,8 @@ Each new test was first run against the device without the fix it belongs to.
 | Guest mappings are gone before the device stops decoding | fails, 2 checks (run 44) | pass |
 | Reset of functions which can not be reset on their own | fails, 2 checks (run 44) | pass |
 | Trapped BAR accesses do not need the mapping of the BAR | the process crashes (run 44) | pass |
+| MSI and MSI-X capability more than once | fails, 8 checks, and leaks memory (run 64) | pass |
+| Random device models and guest accesses | found the above (run 57) | pass |
 
 ## Test harness (WP1)
 
@@ -179,9 +197,9 @@ device, saved-state stream, legacy group/container API.
 
 ## Next
 
-1. Fuzz target for guest accesses (T2).
-2. Harness: legacy group/container API, so those paths get covered too.
-3. WP3: removal of the device on the host while the VM runs.
+1. Harness: legacy group/container API, so those paths get covered too.
+2. WP3: removal of the device on the host while the VM runs.
+3. WP4: saved state policy.
 
 ## Decisions
 
@@ -203,13 +221,15 @@ device, saved-state stream, legacy group/container API.
 | 2026-11-11 | A device which does not answer never produces an error status in a guest access path | Same behaviour as an absent device; the guest cannot be blamed and the VM must keep running |
 | 2026-11-12 | Trapped BAR accesses go through the device file, the mapping of a BAR is only used for mapping it into the guest | The host kernel invalidates the mapping at times; a file access fails cleanly where touching the mapping raises a signal |
 | 2026-11-12 | A function which cannot be reset on its own is reset through its bus; without any reset it is left disabled | Devices with several functions usually have no function reset; state must not carry over a guest reboot unnoticed |
+| 2026-11-12 | The fuzz test is part of the testcase binary and generates device models itself instead of mutating bytes | Most random bytes are refused early; made-up models which are valid most of the time reach the code behind the checks. Deterministic by seed, so a failure can be repeated |
+| 2026-11-12 | Tests are checked against deliberate defects now and then | A test which cannot fail proves nothing |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 29 tests | `f9f95548` | all pass (run 45); clean with ASan, LSan and UBSan (run 46) |
-| T2 fuzz | not started | | |
+| T1 unit | running in CI, 30 tests | `680a21c5` | all pass (run 68); clean with ASan, LSan and UBSan (run 69) |
+| T2 fuzz | running in CI | `680a21c5` | 2000 models per run, 20000 with sanitizers (run 69); longer runs with other seeds now and then |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -254,5 +274,17 @@ device, saved-state stream, legacy group/container API.
 | 44 | `scratch/red-evidence-10` | tests | failed as intended | reset and command register tests against the driver before the change |
 | 45 | code branch @ `f9f95548` (as `scratch/docs`) | tests | passed | 29 tests |
 | 46 | code branch @ `f9f95548` (as `scratch/docs`) | sanitize | passed | 29 tests, no reports from the sanitizers |
+| 47 to 50 | `scratch/fuzz` | tests, sanitize | passed | first version of the fuzz test, up to 20000 models |
+| 51 | `scratch/mutant-1` | sanitize | failed as intended | deliberate defect, caught by a unit test |
+| 52, 55 | `scratch/mutant-2`, `-2b` | sanitize, tests | passed | deliberate defect not caught: tests improved |
+| 53 | `scratch/fuzz` | sanitize | failed | configure ran into a time limit on the runner; it gets three attempts now |
+| 54, 58 | `scratch/mutant-2c`, `-2d` | tests | failed as intended | the deliberate defect is caught by the unit test and by the fuzz test alone |
+| 56 | `scratch/fuzz` | sanitize | passed | fuzz test aiming at edges |
+| 57 | `scratch/fuzz` | sanitize | failed | the fuzz test found a leak with a capability being there twice |
+| 59 to 61 | `scratch/dupcaps`, `scratch/red-evidence-12` | tests, sanitize | failed | compile error in the new test |
+| 62, 63 | code branch @ `f4691957` (as `scratch/dupcaps`) | tests, sanitize | passed | 30 tests |
+| 64 | `scratch/red-evidence-12` | sanitize | failed as intended | duplicate capability test against the driver before the change |
+| 65 to 67 | `scratch/fuzz2` | tests, sanitize | failed, cancelled | a merge done wrong |
+| 68, 69 | code branch @ `680a21c5` (as `scratch/fuzz2`) | tests, sanitize | passed | 30 tests and the fuzz test |
 
 Run numbers are those GitHub shows for the `build` workflow.

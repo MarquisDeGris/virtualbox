@@ -92,7 +92,7 @@ administrator and host kernel are trusted.
 | S7 | A device that disappears is treated like a pulled card: reads return all ones, writes are dropped, no host signal can kill the VM process. | unit test, simulation |
 | S8 | Saved state with an attached device is refused with a clear error unless the device was detached first. | unit test |
 | S9 | No new privileges: the VM process needs nothing beyond access to the VFIO device node(s) and `/dev/iommu` (or the legacy group/container nodes). | review, documentation |
-| S10 | New code builds warning-free and passes with AddressSanitizer and UndefinedBehaviorSanitizer in the test runs. | CI |
+| S10 | New code builds warning-free and passes with AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer in the test runs. | CI, flavor `sanitize` |
 | S11 | The guest memory mapped for the device stays in place for the life of the VM; the device refuses to run where that is not guaranteed (constraint 5). | unit test |
 
 ## 5. Work packages
