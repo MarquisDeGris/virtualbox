@@ -383,6 +383,7 @@ DefinitionBlock ("DSDT.aml", "DSDT", 2, "VBOX  ", "VBOXBIOS", 2)
         NVMA,  32, // Primary NVMe controller PCI address
         IOMA,  32, // AMD IOMMU
         SIOA,  32, // Southbridge IO APIC (when AMD IOMMU is present)
+        PEHP,  32, // if PCI Express native hot-plug is granted
         Offset (0x200),
         VAIN, 32,
     }
@@ -746,7 +747,17 @@ DefinitionBlock ("DSDT.aml", "DSDT", 2, "VBOX  ", "VBOXBIOS", 2)
         Device (PCI0)
         {
 
-            Name (_HID, EisaId ("PNP0A03")) // PCI bus PNP id
+            // PCI bus PNP id.  With PCI Express native hot-plug it is the id of a
+            // PCI Express root bridge, with the one of a PCI bus as compatible id.
+            Method (_HID, 0, NotSerialized)
+            {
+                If (LEqual (PEHP, 0))
+                {
+                    Return (0x030AD041) // EisaId ("PNP0A03")
+                }
+                Return (0x080AD041) // EisaId ("PNP0A08")
+            }
+            Name (_CID, EisaId ("PNP0A03"))
             Method(_ADR, 0, NotSerialized)  // PCI address
             {
                  Return (HBCA)
@@ -1713,9 +1724,20 @@ DefinitionBlock ("DSDT.aml", "DSDT", 2, "VBOX  ", "VBOXBIOS", 2)
                     HEX4(CTRL)
                     DBG("\n")
 
-                    // Mask off the PCI Express Capability Structure control
-                    // Not emulated well enough to satisfy Windows (Vista and later)
-                    And(CTRL, 0x0F, CTRL)
+                    If (LEqual (PEHP, 0))
+                    {
+                        // Mask off the PCI Express Capability Structure control
+                        // Not emulated well enough to satisfy Windows (Vista and later)
+                        And(CTRL, 0x0F, CTRL)
+                    }
+                    Else
+                    {
+                        // There are root ports with hot-plug capable slots, which the
+                        // OS has to handle itself: it gets what it asks for of native
+                        // hot-plug, PME, AER and the capability structure.  The ports
+                        // have the capability structure it takes.
+                        And(CTRL, 0x1F, CTRL)
+                    }
 
                     // If capabilities were masked, set the Capabilities Masked flag (bit 4)
                     If (LNotEqual(CDW3, CTRL))
