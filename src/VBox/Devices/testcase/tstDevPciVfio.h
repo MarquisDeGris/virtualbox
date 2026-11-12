@@ -206,6 +206,7 @@ const char     *tstPdmGetLastError(void);
 const char     *tstPdmGetLastRuntimeErrorId(void);
 int             tstPdmSaveStatePrep(bool fLive);
 int             tstPdmLoadStatePrep(void);
+int             tstPdmLoadStateDone(int rcLoad);
 uint32_t        tstPdmMsiGetCount(void);
 bool            tstPdmMsiWait(uint32_t cExpected, RTMSINTERVAL cMsTimeout);
 bool            tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi);
