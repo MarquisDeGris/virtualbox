@@ -5110,8 +5110,8 @@ static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV
     if (pFun->iFdVfio == -1)
         return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                N_("Failed to create the file descriptor standing in for a removed device"));
-    ASMAtomicWriteBool(&pFun->fGone, true);
-    ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
+    ASMAtomicWriteBool(&pFun->fGone, false);
+    ASMAtomicWriteBool(&pFun->fGoneForGuest, false);
 
     /*
      * The PCI device.  The guest sees nothing of it before a device is put in,
