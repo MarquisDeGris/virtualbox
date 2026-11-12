@@ -2210,6 +2210,14 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
             case VBOX_PCI_CAP_ID_SLOTID: LogRel(("VFIO#%d.%u: Cap[%#x]: Slot Identification -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap)); break;
             case VBOX_PCI_CAP_ID_MSI:
             {
+                /* There is one per function.  Whatever a second one is, the guest doesn't get to see it. */
+                if (pFun->offMsiCtrl)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> unsupported, the function has one already\n",
+                            pThis->iInstance, pFun->uPciFun, offCap));
+                    break;
+                }
+
                 /* Read the message control from the device. */
                 uint16_t u16Mmc = 0;
                 rc = pciVfioCfgSpaceReadU16(pFun, offCap + 2, &u16Mmc);
@@ -2339,6 +2347,17 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
             }
             case VBOX_PCI_CAP_ID_MSIX:
             {
+                /* There is one per function.  Whatever a second one is, the guest doesn't get to see it. */
+                if (pFun->offMsixCtrl)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: MSI-X -> unsupported, the function has one already\n",
+                            pThis->iInstance, pFun->uPciFun, offCap));
+                    break;
+                }
+                if ((uint32_t)offCap + 12 > 256)
+                    return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
+                                               N_("The MSI-X capability at offset %#x doesn't fit into the PCI config space"), offCap);
+
                 LogRel(("VFIO#%d.%u: Cap[%#x]: MSI-X -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
                 rc = pciVfioTrySetupMsix(pThis, pFun, pPciDev, offCap);
                 if (RT_SUCCESS(rc))
@@ -2346,6 +2365,8 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                     fSupported = true;
                     cbCap      = 12;
                 }
+                else if (rc != VERR_NOT_SUPPORTED) /* Not supported means doing without it, anything else is a failure. */
+                    return rc;
                 break;
             }
             case VBOX_PCI_CAP_ID_SATA: LogRel(("VFIO#%d.%u: Cap[%#x]: Serial ATA HBA -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap));        break;
