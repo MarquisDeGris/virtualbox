@@ -4598,7 +4598,7 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
     if (RT_FAILURE(rc))
     {
         for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
-            if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+            if (pThis->aPciFuns[iPciFun].iFdVfio == -1)
                 pciVfioFunLetGo(pThis, &pThis->aPciFuns[iPciFun]);
         LogRel(("VFIO#%d: No device was put into the slot (%Rrc)\n", pThis->iInstance, rc));
         return rc;
