@@ -296,6 +296,7 @@ AssertCompileSize(struct vfio_device_detach_iommufd_pt, 3 * sizeof(uint32_t));
 /** @name What the device offers to whoever manages the VM.
  * @{ */
 DECLHIDDEN(int) pciVfioR3SlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bool fForce);
+DECLHIDDEN(int) pciVfioR3SlotAttach(PPDMDEVINS pDevIns);
 /** @} */
 
 RT_C_DECLS_END

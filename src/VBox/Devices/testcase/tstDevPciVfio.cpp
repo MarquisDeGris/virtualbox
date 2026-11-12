@@ -3416,6 +3416,7 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
     RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
     if (RT_FAILURE(rc))
         return rc;
+    tstVfioKrnlSetLegacy(g_fTstLegacy);
     for (uint32_t i = 0; i < cModels; i++)
     {
         rc = tstVfioKrnlDevAdd(&paModels[i], &papDevs[i]);
@@ -3467,6 +3468,8 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
         pCfg = tstCfgNodeCreate(pCfgInst, "Config");
         if (g_cMsTstGuestRelease)
             RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "GuestReleaseTimeoutMs", g_cMsTstGuestRelease), VINF_SUCCESS);
+        if (g_fTstLegacy)
+            RTTESTI_CHECK_RC(tstCfgSetString(pCfg, "VfioGroupPath", TSTVFIO_GROUP_NODE), VINF_SUCCESS);
         for (uint32_t i = 0; i < cModels; i++)
         {
             char szName[16];
@@ -4529,6 +4532,7 @@ static void tstSlotDetach(void)
     {
         tstPdmPowerOn();
         RTTESTI_CHECK_RC(pciVfioR3SlotDetach(g_pTstDevInsVfio, 0 /*cMsWait*/, true /*fForce*/), VERR_NOT_SUPPORTED);
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(g_pTstDevInsVfio), VERR_NOT_SUPPORTED);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
         RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
     }
@@ -4699,6 +4703,269 @@ static void tstSlotHostRequest(void)
 }
 
 
+/**
+ * Does to function 0 of the device in the slot what a guest does to get MSI
+ * from it, has the device raise an interrupt and checks that it arrives.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   pDev                The PCI function of the fake kernel.
+ */
+static void tstSlotCheckMsi(unsigned uLine, PTSTVFIODEV pDev)
+{
+    uint32_t const cMsisBefore = tstPdmMsiGetCount();
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 8,  0, 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 12, 0x4041, 2);
+    uint32_t const fMsgCtrl = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2, 2);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2,
+                      (fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_QSIZE) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+
+    int rc = tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0);
+    TSTPDMMSI Msi;
+    RT_ZERO(Msi);
+    if (   RT_FAILURE(rc)
+        || !tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC)
+        || !tstPdmMsiGet(cMsisBefore, &Msi)
+        || Msi.uAddr != UINT64_C(0xfee00000)
+        || Msi.uData != 0x4041)
+        RTTestIFailed("line %u: the interrupt of the device did not arrive as the guest set it up (%Rrc, address %#RX64, data %#RX32)\n",
+                      uLine, rc, Msi.uAddr, Msi.uData);
+}
+
+
+/**
+ * Has the guest switch the slot on, find the device which was put into it in
+ * the state after a reset, set it up and use it.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   pDevInsPort         The device instance of the root port.
+ * @param   pDev                The PCI function of the fake kernel which is function 0 of the device.
+ */
+static void tstSlotCheckDeviceArrived(unsigned uLine, PPDMDEVINS pDevInsPort, PTSTVFIODEV pDev)
+{
+    uint32_t const uSltSta = tstPortCfgRead(TSTPORT_SLTSTA, 2);
+    if ((uSltSta & (VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD)) != (VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD))
+        RTTestIFailed("line %u: slot status %#RX32\n", uLine, uSltSta);
+    if (tstVfioKrnlDevGetOpenCount(pDev) != 1)
+        RTTestIFailed("line %u: the device is open %u time(s)\n", uLine, tstVfioKrnlDevGetOpenCount(pDev));
+
+    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+    tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+    if (!devpciR3HotPlugSlotIsLinkUp(pDevInsPort))
+        RTTestIFailed("line %u: the link is down\n", uLine);
+
+    uint32_t const idVendor = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2);
+    uint32_t const uCmd     = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, 2);
+    if (   idVendor != TST_VENDOR_ID
+        || (uCmd & (VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER))
+        || tstPdmIsMmio2Mapped(TST_BAR0_ADDR))
+        RTTestIFailed("line %u: vendor ID %#RX32, command %#RX32, BAR0 %s\n", uLine, idVendor, uCmd,
+                      tstPdmIsMmio2Mapped(TST_BAR0_ADDR) ? "mapped" : "not mapped");
+
+    tstSlotGuestEnableDevice();
+    if (!tstSlotGuestReachesDevice(pDev))
+        RTTestIFailed("line %u: the guest doesn't reach the device\n", uLine);
+}
+
+
+/**
+ * A device is put into the empty slot while the VM runs: the same one again
+ * and again, one which isn't there, and one of another kind.
+ */
+static void tstSlotAttach(void)
+{
+    RTTestISub("Hot-plug slot: a device is put into the slot");
+
+    /* With IOMMUFD and with the legacy interface, where the group stays with the VM. */
+    for (unsigned iVariant = 0; iVariant < 2; iVariant++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        g_fTstLegacy = iVariant == 1;
+        int rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_fTstLegacy = false;
+        if (RT_SUCCESS(rc))
+        {
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+            uint32_t const cFdsOccupied = tstVfioKrnlGetOpenFdCount();
+            uint64_t const cbDmaMapped  = tstVfioKrnlGetDmaMappedBytes();
+
+            /* There is a device in the slot. */
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_ALREADY_EXISTS);
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+
+            for (unsigned iRound = 0; iRound < 3; iRound++)
+            {
+                /* Out: from under the guest in the first round, with the slot switched off afterwards. */
+                if (iRound > 0)
+                    tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+                RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u, round %u\n", iVariant, iRound));
+                RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbDmaMapped,
+                                  ("variant %u, round %u: %RU64 bytes mapped for DMA\n", iVariant, iRound, tstVfioKrnlGetDmaMappedBytes()));
+
+                /* In the last round the device comes back before an EMT got around to what was
+                   left for it to do about the old one; in the others the guest has a look first. */
+                if (iRound < 2)
+                {
+                    RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u, round %u\n", iVariant, iRound));
+                    tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+                }
+
+                /* A device which isn't there: nothing is put in, nothing is left behind. */
+                if (iRound == 1)
+                {
+                    tstVfioKrnlDevSetGone(pDev, true);
+                    rc = pciVfioR3SlotAttach(pDevInsDev);
+                    RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("variant %u: %Rrc\n", iVariant, rc));
+                    RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u\n", iVariant));
+                    RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+                    tstVfioKrnlDevSetGone(pDev, false);
+                }
+
+                /* In. */
+                RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied,
+                                  ("variant %u, round %u: %u file descriptors open, were %u\n", iVariant, iRound,
+                                   tstVfioKrnlGetOpenFdCount(), cFdsOccupied));
+                tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+                tstSlotCheckMsi(__LINE__, pDev);
+                RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbDmaMapped, ("variant %u, round %u\n", iVariant, iRound));
+            }
+
+            /*
+             * Another kind of device where this one was: refused, and nothing is left behind.
+             */
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            for (unsigned iKind = 0; iKind < 3; iKind++)
+            {
+                static TSTVFIODEVCFG s_Other; /* Too big for the stack next to the other one. */
+                tstModelInitDefault(&s_Other);
+                if (iKind == 0)
+                    tstModelSetBar(&s_Other, 0, TST_BAR0_SIZE * 2, PCI_ADDRESS_SPACE_MEM);  /* BAR0 has another size. */
+                else if (iKind == 1)
+                    tstModelSetBar(&s_Other, 2, _4K, PCI_ADDRESS_SPACE_MEM);                /* One BAR more. */
+                else
+                    s_Other.acIrqs[VFIO_PCI_MSI_IRQ_INDEX] = 1;                             /* Fewer interrupts. */
+                RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Other), VINF_SUCCESS);
+                rc = pciVfioR3SlotAttach(pDevInsDev);
+                RTTESTI_CHECK_MSG(rc == VERR_MISMATCH, ("variant %u, kind %u: %Rrc\n", iVariant, iKind, rc));
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u, kind %u\n", iVariant, iKind));
+                RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & (VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD)),
+                                  ("variant %u, kind %u\n", iVariant, iKind));
+            }
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &Model), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+
+            /*
+             * The device gets unplugged and plugged in again.
+             */
+            tstVfioKrnlDevRemove(pDev);
+            RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &Model), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            tstSlotCheckMsi(__LINE__, pDev);
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied, ("variant %u\n", iVariant));
+
+            /* Once more: the device which was put in is watched like the one the VM started with,
+               also by a watcher which has seen the one before go. */
+            tstVfioKrnlDevRemove(pDev);
+            RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u: the second unplugging went unnoticed\n", iVariant));
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                              ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * A device with MSI-X: one which has the table somewhere else is another kind
+     * of device, although its BARs and the number of its interrupts are the same.
+     */
+    {
+        static TSTVFIODEVCFG s_ModelMsix; /* Too big for the stack. */
+        static TSTVFIODEVCFG s_OtherMsix;
+        tstModelInitMsixDedicatedBar(&s_ModelMsix, 8 /*cVectors*/);
+        tstModelInit(&s_OtherMsix, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+        tstModelSetBar(&s_OtherMsix, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+        tstModelSetBar(&s_OtherMsix, 2, _8K, PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&s_OtherMsix, TST_EXP_CAP_OFF);
+        tstModelAddMsixCap(&s_OtherMsix, TST_MSIX_CAP_OFF, 8 /*cVectors*/, 2 /*iBar*/, _4K /*offTable*/, 0 /*offPba*/);
+
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        int rc = tstSlotFixtureSetup(&s_ModelMsix, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_OtherMsix), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_MISMATCH);
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+            RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_ModelMsix), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * A device with two functions.
+     */
+    TSTVFIODEVCFG aModels[2];
+    tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+    tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+    tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+    for (uint32_t i = 0; i < RT_ELEMENTS(aModels); i++)
+    {
+        tstModelSetBar(&aModels[i], 0, _64K, PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&aModels[i], TST_EXP_CAP_OFF);
+    }
+    PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    int rc = tstSlotFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 0);
+        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+
+        /* The second function isn't there: neither is put in. */
+        tstVfioKrnlDevSetGone(apDevs[1], true);
+        rc = pciVfioR3SlotAttach(pDevInsDev);
+        RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("%Rrc\n", rc));
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+        tstVfioKrnlDevSetGone(apDevs[1], false);
+
+        /* Both are there: both are put in. */
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[1]) == 1);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, apDevs[0]);
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_HEADER_TYPE, 1) & 0x80);
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -4749,6 +5016,7 @@ int main()
     tstSlotPower();
     tstSlotDetach();
     tstSlotHostRequest();
+    tstSlotAttach();
     tstFuzz();
     tstPortFuzz();
 
