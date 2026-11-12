@@ -3932,9 +3932,9 @@ static void tstPortLoadState(PPDMDEVINS pDevInsPort, bool fOccupied)
     tstPortLoadU16(pDevInsPort, TSTPORT_SLTCTL, (fOccupied ? TSTPORT_SLTCTL_OCCUPIED : TSTPORT_SLTCTL_EMPTY) | TSTPORT_SLTCTL_ENABLES);
     tstPortLoadU16(pDevInsPort, TSTPORT_SLTSTA, fOccupied ? VBOX_PCI_EXP_SLTSTA_PRES : 0);
     if (fOccupied)
-        pbCfg[TSTPORT_LNKSTA + 1] |= RT_HI_U8(VBOX_PCI_EXP_LNKSTA_DL_ACT);
+        pbCfg[TSTPORT_LNKSTA + 1] |= (uint8_t)(VBOX_PCI_EXP_LNKSTA_DL_ACT >> 8);
     else
-        pbCfg[TSTPORT_LNKSTA + 1] &= ~RT_HI_U8(VBOX_PCI_EXP_LNKSTA_DL_ACT);
+        pbCfg[TSTPORT_LNKSTA + 1] &= (uint8_t)~(VBOX_PCI_EXP_LNKSTA_DL_ACT >> 8);
 }
 
 
@@ -3982,7 +3982,7 @@ static void tstPortSavedState(void)
             RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VERR_SSM_LOAD_CONFIG_MISMATCH);
             pbCfg[TSTPORT_SLTCAP] = bSaved0;
             uint8_t const   bSaved1 = pbCfg[TSTPORT_EXP_FLAGS + 1];
-            pbCfg[TSTPORT_EXP_FLAGS + 1] &= ~RT_HI_U8(VBOX_PCI_EXP_FLAGS_SLOT);
+            pbCfg[TSTPORT_EXP_FLAGS + 1] &= (uint8_t)~(VBOX_PCI_EXP_FLAGS_SLOT >> 8);
             RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VERR_SSM_LOAD_CONFIG_MISMATCH);
             pbCfg[TSTPORT_EXP_FLAGS + 1] = bSaved1;
             tstPortCheck(__LINE__, fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0, fPresentNow, cCalls, 0);
