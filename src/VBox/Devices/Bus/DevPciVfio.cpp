@@ -4791,7 +4791,7 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
 static DECLCALLBACK(int) pciVfioPortAttach(PPDMIPCIPASSTHROUGHPORT pInterface)
 {
     PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
-    if (!pThis->pDevInsPort)
+    if (!pThis->pDevIns)
         return VERR_NOT_SUPPORTED;
 
     /* On an EMT, so nothing of the VM gets in the way.  See pciVfioFunCheckLayout() for what the device has to be like. */
