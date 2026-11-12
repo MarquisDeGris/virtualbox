@@ -152,6 +152,12 @@ typedef struct TSTPDMDEV
     size_t              cbDevIns;
     /** The instance node of the configuration (the parent of "Config"). */
     PCFGMNODE           pCfgInst;
+    /** Saved state: the callback preparing for a live save, optional. */
+    PFNSSMDEVLIVEPREP   pfnLivePrep;
+    /** Saved state: the callback preparing for saving, optional. */
+    PFNSSMDEVSAVEPREP   pfnSavePrep;
+    /** Saved state: the callback preparing for loading, optional. */
+    PFNSSMDEVLOADPREP   pfnLoadPrep;
 } TSTPDMDEV;
 /** Pointer to a device instance record. */
 typedef TSTPDMDEV *PTSTPDMDEV;
@@ -356,6 +362,8 @@ typedef struct TSTPDM
     uint32_t volatile   cHeapAllocs;
     /** The last VM error message. */
     char                szLastError[512];
+    /** The ID of the last runtime error. */
+    char                szLastRuntimeErrorId[64];
     /** The NOP critical section handed to the devices. */
     PDMCRITSECT         NopCritSect;
 } TSTPDM;
@@ -1526,6 +1534,38 @@ static DECLCALLBACK(int) tstPdmHlp_VMSetErrorV(PPDMDEVINS pDevIns, int rc, RT_SR
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnVMSetRuntimeErrorV} */
+static DECLCALLBACK(int) tstPdmHlp_VMSetRuntimeErrorV(PPDMDEVINS pDevIns, uint32_t fFlags, const char *pszErrorId,
+                                                      const char *pszFormat, va_list va)
+{
+    RT_NOREF(pDevIns, fFlags);
+    RTStrCopy(g_Pdm.szLastRuntimeErrorId, sizeof(g_Pdm.szLastRuntimeErrorId), pszErrorId);
+    RTStrPrintfV(g_Pdm.szLastError, sizeof(g_Pdm.szLastError), pszFormat, va);
+    return VINF_SUCCESS;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMSetLoadErrorV} */
+static DECLCALLBACK(int) tstPdmHlp_SSMSetLoadErrorV(PSSMHANDLE pSSM, int rc, RT_SRC_POS_DECL, const char *pszFormat, va_list va)
+{
+    RT_NOREF(pSSM);
+    RT_SRC_POS_NOREF();
+    RTStrPrintfV(g_Pdm.szLastError, sizeof(g_Pdm.szLastError), pszFormat, va);
+    return rc;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMSetLoadError} */
+static DECLCALLBACK(int) tstPdmHlp_SSMSetLoadError(PSSMHANDLE pSSM, int rc, RT_SRC_POS_DECL, const char *pszFormat, ...)
+{
+    va_list va;
+    va_start(va, pszFormat);
+    rc = tstPdmHlp_SSMSetLoadErrorV(pSSM, rc, RT_SRC_POS_ARGS, pszFormat, va);
+    va_end(va);
+    return rc;
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnCritSectGetNop} */
 static DECLCALLBACK(PPDMCRITSECT) tstPdmHlp_CritSectGetNop(PPDMDEVINS pDevIns)
 {
@@ -1551,9 +1591,13 @@ static DECLCALLBACK(int) tstPdmHlp_SSMRegister(PPDMDEVINS pDevIns, uint32_t uVer
                                                PFNSSMDEVLOADPREP pfnLoadPrep, PFNSSMDEVLOADEXEC pfnLoadExec,
                                                PFNSSMDEVLOADDONE pfnLoadDone)
 {
-    /* Saved state is not exercised yet. */
-    RT_NOREF(pDevIns, uVersion, cbGuess, pszBefore, pfnLivePrep, pfnLiveExec, pfnLiveVote);
-    RT_NOREF(pfnSavePrep, pfnSaveExec, pfnSaveDone, pfnLoadPrep, pfnLoadExec, pfnLoadDone);
+    /* Only what comes before anything is saved or loaded is played through. */
+    RT_NOREF(uVersion, cbGuess, pszBefore, pfnLiveExec, pfnLiveVote, pfnSaveExec, pfnSaveDone, pfnLoadExec, pfnLoadDone);
+    PTSTPDMDEV pDev = (PTSTPDMDEV)pDevIns->Internal.s.pDev;
+    AssertReturn(pDev, VERR_INTERNAL_ERROR_3);
+    pDev->pfnLivePrep = pfnLivePrep;
+    pDev->pfnSavePrep = pfnSavePrep;
+    pDev->pfnLoadPrep = pfnLoadPrep;
     return VINF_SUCCESS;
 }
 
@@ -1623,6 +1667,9 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnPCISetIrqNoWait                 = tstPdmHlp_PCISetIrq;
     g_tstPdmDevHlpR3.pfnThreadCreate                    = tstPdmHlp_ThreadCreate;
     g_tstPdmDevHlpR3.pfnVMSetErrorV                     = tstPdmHlp_VMSetErrorV;
+    g_tstPdmDevHlpR3.pfnVMSetRuntimeErrorV              = tstPdmHlp_VMSetRuntimeErrorV;
+    g_tstPdmDevHlpR3.pfnSSMSetLoadError                 = tstPdmHlp_SSMSetLoadError;
+    g_tstPdmDevHlpR3.pfnSSMSetLoadErrorV                = tstPdmHlp_SSMSetLoadErrorV;
     g_tstPdmDevHlpR3.pfnCritSectGetNop                  = tstPdmHlp_CritSectGetNop;
     g_tstPdmDevHlpR3.pfnSetDeviceCritSect               = tstPdmHlp_SetDeviceCritSect;
     g_tstPdmDevHlpR3.pfnSSMRegister                     = tstPdmHlp_SSMRegister;
@@ -2252,6 +2299,64 @@ void tstPdmPciCfgWrite(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, uint32_t u
 const char *tstPdmGetLastError(void)
 {
     return g_Pdm.szLastError;
+}
+
+
+/**
+ * Returns the ID of the last runtime error a device has raised.
+ *
+ * @returns The ID, an empty string if there was none.
+ */
+const char *tstPdmGetLastRuntimeErrorId(void)
+{
+    return g_Pdm.szLastRuntimeErrorId;
+}
+
+
+/**
+ * Asks the devices whether the state of the VM can be saved, the way it is
+ * done before anything gets saved.
+ *
+ * @returns VBox status code, the first failure a device reports.
+ * @param   fLive               Whether this is for a live save (teleportation) or an ordinary one.
+ */
+int tstPdmSaveStatePrep(bool fLive)
+{
+    AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
+    g_Pdm.szLastError[0]          = '\0';
+    g_Pdm.szLastRuntimeErrorId[0] = '\0';
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+    {
+        int rc = VINF_SUCCESS;
+        if (fLive && g_Pdm.aDevs[i].pfnLivePrep)
+            rc = g_Pdm.aDevs[i].pfnLivePrep(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+        else if (!fLive && g_Pdm.aDevs[i].pfnSavePrep)
+            rc = g_Pdm.aDevs[i].pfnSavePrep(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Asks the devices whether a saved state can be loaded, the way it is done
+ * before anything gets loaded.
+ *
+ * @returns VBox status code, the first failure a device reports.
+ */
+int tstPdmLoadStatePrep(void)
+{
+    AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
+    g_Pdm.szLastError[0] = '\0';
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+        if (g_Pdm.aDevs[i].pfnLoadPrep)
+        {
+            int rc = g_Pdm.aDevs[i].pfnLoadPrep(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+            if (RT_FAILURE(rc))
+                return rc;
+        }
+    return VINF_SUCCESS;
 }
 
 
