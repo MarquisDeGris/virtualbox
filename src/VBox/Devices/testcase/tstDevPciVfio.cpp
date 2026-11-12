@@ -5763,6 +5763,7 @@ static void tstSlotSavedStateRefused(void)
         { "a function number which is out of range",     "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 8,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED },
         { "a function the VM doesn't have",              "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH },
         { "the same function twice",                     "pci-vfio",      TSTSTATE_VFIO_END,         4, 0,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED },
+        { "no function where the VM has one",            "pci-vfio",      TSTSTATE_VFIO_FUN,         4, UINT32_MAX, 0, VERR_SSM_LOAD_CONFIG_MISMATCH },
         { "another config space size",                   "pci-vfio",      TSTSTATE_VFIO_CFG_SIZE,    4, 12345,      0, VERR_SSM_LOAD_CONFIG_MISMATCH },
         { "another BAR size",                            "pci-vfio",      TSTSTATE_VFIO_BAR0_SIZE,   8, _1M,        0, VERR_SSM_LOAD_CONFIG_MISMATCH },
         { "MSI-X where the device has none",             "pci-vfio",      TSTSTATE_VFIO_MSIX,        1, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH },

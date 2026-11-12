@@ -53,6 +53,7 @@
 #include <VBox/pci.h>
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/err.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/critsect.h>
 #include <iprt/mem.h>
