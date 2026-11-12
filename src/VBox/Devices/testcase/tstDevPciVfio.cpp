@@ -49,6 +49,7 @@
 #include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/env.h>
+#include <iprt/mem.h>
 #include <iprt/rand.h>
 #include <iprt/string.h>
 #include <iprt/test.h>
@@ -5239,6 +5240,545 @@ static void tstSlotStartEmpty(void)
 }
 
 
+/*
+ *
+ * Saved states with the hot-plug capable slot being empty.
+ *
+ */
+
+/** @name Where things are in the saved state units, counted in items.
+ * @{ */
+/** pci-vfio: the number of the first function. */
+#define TSTSTATE_VFIO_FUN           0
+/** pci-vfio: the size of the config space of the first function. */
+#define TSTSTATE_VFIO_CFG_SIZE      1
+/** pci-vfio: the size of BAR0 of the first function. */
+#define TSTSTATE_VFIO_BAR0_SIZE     2
+/** pci-vfio: whether the first function has MSI-X. */
+#define TSTSTATE_VFIO_MSIX          34
+/** pci-vfio: the number of MSI vectors of the first function. */
+#define TSTSTATE_VFIO_MSI_VECTORS   37
+/** pci-vfio: what ends the unit if there is one function. */
+#define TSTSTATE_VFIO_END           41
+/** ich9pcibridge: the offset of the MSI capability the PCI bus takes care of for the first device. */
+#define TSTSTATE_BUS_MSI_CAP_OFF    5
+/** @} */
+
+/** What somebody has found who tried to put the device into the slot while a
+ * state was being saved or loaded, see tstSlotStateHook(). */
+static struct
+{
+    /** The device instance of the passthrough device. */
+    PPDMDEVINS          pDevInsDev;
+    /** Function 0 of the device of the fake kernel. */
+    PTSTVFIODEV         pDev;
+    /** How often this was tried. */
+    uint32_t            cCalls;
+    /** How often the device was open at that time. */
+    uint32_t            cOpen;
+    /** How it went. */
+    int                 rcAttach;
+} g_TstSlotStateHook;
+
+
+/**
+ * @callback_method_impl{FNTSTPDMSTATEHOOK,
+ *      Somebody tries to put the device into the slot while a state is being saved or loaded.}
+ */
+static DECLCALLBACK(void) tstSlotStateHook(void *pvUser)
+{
+    RT_NOREF(pvUser);
+    g_TstSlotStateHook.cCalls++;
+    g_TstSlotStateHook.cOpen    = tstVfioKrnlDevGetOpenCount(g_TstSlotStateHook.pDev);
+    g_TstSlotStateHook.rcAttach = pciVfioR3SlotAttach(g_TstSlotStateHook.pDevInsDev);
+}
+
+
+/**
+ * Gets ready for somebody trying to put the device into the slot while a state
+ * is being saved or loaded.
+ *
+ * @param   pDevInsDev          The device instance of the passthrough device.
+ * @param   pDev                Function 0 of the device of the fake kernel.
+ */
+static void tstSlotStateHookArm(PPDMDEVINS pDevInsDev, PTSTVFIODEV pDev)
+{
+    g_TstSlotStateHook.pDevInsDev = pDevInsDev;
+    g_TstSlotStateHook.pDev       = pDev;
+    g_TstSlotStateHook.cCalls     = 0;
+    g_TstSlotStateHook.cOpen      = UINT32_MAX;
+    g_TstSlotStateHook.rcAttach   = VERR_IPE_UNINITIALIZED_STATUS;
+    tstPdmSetStateHook(tstSlotStateHook, NULL);
+}
+
+
+/**
+ * Checks that somebody tried to put the device into the slot while a state was
+ * being saved or loaded, that this was refused, and that the device was not in
+ * use at that time.
+ *
+ * @param   uLine               The line of the caller.
+ */
+static void tstSlotStateHookCheck(unsigned uLine)
+{
+    tstPdmSetStateHook(NULL, NULL);
+    if (   g_TstSlotStateHook.cCalls != 1
+        || g_TstSlotStateHook.cOpen != 0
+        || g_TstSlotStateHook.rcAttach != VERR_VM_INVALID_VM_STATE)
+        RTTestIFailed("line %u: putting the device in meanwhile: tried %u time(s), device open %u time(s), %Rrc\n",
+                      uLine, g_TstSlotStateHook.cCalls, g_TstSlotStateHook.cOpen, g_TstSlotStateHook.rcAttach);
+}
+
+
+/**
+ * Sets up a VM with a passthrough device for the hot-plug capable slot of a root
+ * port which is constructed and not powered on, which is how a VM is when a
+ * saved state gets loaded into it.
+ *
+ * tstFixtureTeardown() has to be called regardless of the result.
+ *
+ * @returns VBox status code, failures are reported.
+ * @param   paModels            The PCI functions of the device, the first one becomes function 0.
+ * @param   cModels             Number of PCI functions.
+ * @param   paLayouts           The layouts for the configuration of the functions, which makes the
+ *                              VM start without the device.  NULL for a VM which starts with it.
+ * @param   papDevs             Where to return the fake kernel handles of the functions.
+ * @param   ppDevInsPort        Where to return the device instance of the root port.
+ * @param   ppDevInsDev         Where to return the device instance of the passthrough device.
+ */
+static int tstSlotStateFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PCPCIVFIOFUNLAYOUT paLayouts,
+                                    PTSTVFIODEV *papDevs, PPDMDEVINS *ppDevInsPort, PPDMDEVINS *ppDevInsDev)
+{
+    g_paTstLayouts      = paLayouts;
+    g_fTstDevicesAbsent = paLayouts ? RT_BIT_32(cModels) - 1 : 0;
+    int rc = tstPortFixtureSetupEx("RootCmplxRootPort", true /*fHotPlug*/, paModels, cModels, papDevs, ppDevInsPort, ppDevInsDev);
+    g_paTstLayouts      = NULL;
+    g_fTstDevicesAbsent = 0;
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        rc = tstPdmInitComplete();
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    }
+    return rc;
+}
+
+
+/**
+ * Has a VM with an empty slot save its state: one which was started without the
+ * device, or one which was started with it and had it taken away from under the
+ * guest just before.  The guest has set the root port up for native hot-plug.
+ *
+ * @returns VBox status code, failures are reported.
+ * @param   paModels            The PCI functions of the device, the first one becomes function 0.
+ * @param   cModels             Number of PCI functions.
+ * @param   paLayouts           The layouts for a VM which starts without the device, NULL for
+ *                              one which starts with it.
+ * @param   fLive               Whether the state is saved by a live save.
+ * @param   ppvState            Where to return the saved state, to be freed with tstPdmFreeState().
+ * @param   pcbState            Where to return its size.
+ */
+static int tstSlotStateSave(PCTSTVFIODEVCFG paModels, uint32_t cModels, PCPCIVFIOFUNLAYOUT paLayouts, bool fLive,
+                            void **ppvState, size_t *pcbState)
+{
+    *ppvState = NULL;
+    *pcbState = 0;
+    PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    AssertReturn(cModels <= RT_ELEMENTS(apDevs), VERR_INVALID_PARAMETER);
+
+    g_paTstLayouts      = paLayouts;
+    g_fTstDevicesAbsent = paLayouts ? RT_BIT_32(cModels) - 1 : 0;
+    int rc = tstSlotFixtureSetup(paModels, cModels, apDevs, &pDevInsPort, &pDevInsDev);
+    g_paTstLayouts      = NULL;
+    g_fTstDevicesAbsent = 0;
+    if (RT_SUCCESS(rc))
+    {
+        if (!paLayouts)
+        {
+            /* What is left for an EMT to do about the device stays undone until the state is saved. */
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK(tstSlotGuestReachesDevice(apDevs[0]));
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        }
+
+        tstSlotStateHookArm(pDevInsDev, apDevs[0]);
+        rc = tstPdmSaveState(fLive, ppvState, pcbState);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("fLive=%RTbool: %Rrc - %s\n", fLive, rc, tstPdmGetLastError()));
+        tstSlotStateHookCheck(__LINE__);
+        RTTESTI_CHECK(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+    return rc;
+}
+
+
+/**
+ * Loads a saved state into a new VM and checks what the guest finds: an empty
+ * slot if the VM was started without the device, and a device which was just
+ * plugged in if the VM was started with it.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   paModels            The PCI functions of the device, the first one becomes function 0.
+ * @param   cModels             Number of PCI functions.
+ * @param   paLayouts           The layouts for a VM which starts without the device, NULL for
+ *                              one which starts with it.
+ * @param   fMsi                Whether function 0 has MSI the way tstSlotCheckMsi() needs it.
+ * @param   fEventSaved         Whether the state was saved with the guest not having dealt with
+ *                              the slot having become empty.
+ * @param   pvState             The saved state.
+ * @param   cbState             Its size.
+ */
+static void tstSlotStateLoadAndCheck(unsigned uLine, PCTSTVFIODEVCFG paModels, uint32_t cModels, PCPCIVFIOFUNLAYOUT paLayouts,
+                                     bool fMsi, bool fEventSaved, const void *pvState, size_t cbState)
+{
+    PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    AssertReturnVoid(cModels <= RT_ELEMENTS(apDevs));
+    int rc = tstSlotStateFixtureSetup(paModels, cModels, paLayouts, apDevs, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        /* Something in the memory of the device, which loading the state is not to touch. */
+        uint32_t * const pau32Bar0 = (uint32_t *)tstVfioKrnlDevGetRegionPtr(apDevs[0], VFIO_PCI_BAR0_REGION_INDEX);
+        uint32_t const   cItems    = pau32Bar0
+                                   ? (uint32_t)(paModels[0].aRegions[VFIO_PCI_BAR0_REGION_INDEX].cb / sizeof(uint32_t)) : 0;
+        if (!pau32Bar0)
+            RTTestIFailed("line %u: the device has no BAR0\n", uLine);
+        for (uint32_t i = 0; i < cItems; i++)
+            pau32Bar0[i] = UINT32_C(0xdead0000) + i;
+
+        tstSlotStateHookArm(pDevInsDev, apDevs[0]);
+        rc = tstPdmLoadState(pvState, cbState);
+        if (RT_FAILURE(rc))
+            RTTestIFailed("line %u: loading failed with %Rrc - %s\n", uLine, rc, tstPdmGetLastError());
+        tstSlotStateHookCheck(uLine);
+
+        uint32_t cItemsChanged = 0;
+        for (uint32_t i = 0; i < cItems; i++)
+            if (pau32Bar0[i] != UINT32_C(0xdead0000) + i)
+                cItemsChanged++;
+        if (cItemsChanged)
+            RTTestIFailed("line %u: loading the state has changed %u item(s) in the memory of the device\n", uLine, cItemsChanged);
+
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmResume();
+            if (paLayouts)
+            {
+                /* The slot is as empty as it was, with what the guest had left to deal with. */
+                uint32_t const uSltSta = tstPortCfgRead(TSTPORT_SLTSTA, 2);
+                if (   (uSltSta & VBOX_PCI_EXP_SLTSTA_PRES)
+                    || RT_BOOL(uSltSta & VBOX_PCI_EXP_SLTSTA_PRSD) != fEventSaved)
+                    RTTestIFailed("line %u: slot status %#RX32\n", uLine, uSltSta);
+                if (   devpciR3HotPlugSlotIsLinkUp(pDevInsPort)
+                    || tstPdmIsMmio2Mapped(TST_BAR0_ADDR)
+                    || tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) != UINT32_C(0xffff)
+                    || tstVfioKrnlDevGetOpenCount(apDevs[0]) != 0)
+                    RTTestIFailed("line %u: the slot is not empty\n", uLine);
+                if (tstPdmMsiGetCount() != 0)
+                    RTTestIFailed("line %u: %u interrupt(s)\n", uLine, tstPdmMsiGetCount());
+
+                /* The device gets plugged in and put into the slot. */
+                for (uint32_t i = 0; i < cModels; i++)
+                    tstVfioKrnlDevSetGone(apDevs[i], false);
+                rc = pciVfioR3SlotAttach(pDevInsDev);
+                if (RT_FAILURE(rc))
+                    RTTestIFailed("line %u: putting the device into the slot failed with %Rrc\n", uLine, rc);
+            }
+            else
+            {
+                /* The device was put back into the slot.  The guest gets an interrupt for it unless it
+                   has the one for the slot having become empty left to deal with. */
+                TSTPDMMSI Msi;
+                RT_ZERO(Msi);
+                if (   tstPdmMsiGetCount() != (fEventSaved ? 0U : 1U)
+                    || (   !fEventSaved
+                        && (   !tstPdmMsiGet(0, &Msi)
+                            || Msi.uAddr != TSTPORT_MSI_ADDR
+                            || Msi.uData != TSTPORT_MSI_DATA)))
+                    RTTestIFailed("line %u: %u interrupt(s), address %#RX64, data %#RX32\n",
+                                  uLine, tstPdmMsiGetCount(), Msi.uAddr, Msi.uData);
+            }
+            tstSlotCheckDeviceArrived(uLine, pDevInsPort, apDevs[0]);
+            if (fMsi)
+                tstSlotCheckMsi(uLine, apDevs[0]);
+            if (cModels > 1)
+            {
+                uint32_t const idDevice = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 1, VBOX_PCI_DEVICE_ID, 2);
+                if (   idDevice != TST_DEVICE_ID + 1
+                    || tstVfioKrnlDevGetOpenCount(apDevs[1]) != 1)
+                    RTTestIFailed("line %u: function 1 has device ID %#RX32 and is open %u time(s)\n",
+                                  uLine, idDevice, tstVfioKrnlDevGetOpenCount(apDevs[1]));
+            }
+            if (tstVfioKrnlGetViolationCount() != 0)
+                RTTestIFailed("line %u: %u request(s) to the kernel which are out of bounds\n", uLine, tstVfioKrnlGetViolationCount());
+        }
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * The state of a VM is saved while the hot-plug capable slot is empty, and
+ * loaded into a VM again: each by a VM which was started with the device and by
+ * one which was started without it, with different kinds of devices.
+ */
+static void tstSlotSavedState(void)
+{
+    RTTestISub("Hot-plug slot: saved state with the slot being empty");
+
+    static TSTVFIODEVCFG s_aModels[2]; /* Too big for the stack. */
+    for (unsigned iVariant = 0; iVariant < 4; iVariant++)
+    {
+        /* The device: a memory BAR with MSI, MSI-X with the table and the pending bits in a BAR
+           of their own, two functions, and the first kind again with the legacy interface. */
+        uint32_t cModels = 1;
+        bool     fMsi    = true;
+        if (iVariant == 1)
+        {
+            tstModelInitMsixDedicatedBar(&s_aModels[0], 8 /*cVectors*/);
+            fMsi = false;
+        }
+        else
+            tstModelInitDefault(&s_aModels[0]);
+        if (iVariant == 2)
+        {
+            tstModelInit(&s_aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+            tstModelSetU16(&s_aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+            tstModelSetBar(&s_aModels[1], 0, _16K, PCI_ADDRESS_SPACE_MEM);
+            tstModelAddExpCap(&s_aModels[1], TST_EXP_CAP_OFF);
+            cModels = 2;
+        }
+        g_fTstLegacy = iVariant == 3;
+
+        /* What a VM which is started with the device is built from. */
+        PCIVFIOFUNLAYOUT aLayouts[2];
+        RT_ZERO(aLayouts);
+        PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        int rc = tstSlotFixtureSetup(s_aModels, cModels, apDevs, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+            for (uint32_t i = 0; i < cModels; i++)
+                RTTESTI_CHECK_RC(rc = pciVfioR3QueryLayout(pDevInsDev, i, &aLayouts[i]), VINF_SUCCESS);
+        tstFixtureTeardown();
+
+        /* Saved by a VM which was started with the device or without, loaded by one of each kind. */
+        for (unsigned iSaver = 0; iSaver < 2 && RT_SUCCESS(rc); iSaver++)
+        {
+            void  *pvState = NULL;
+            size_t cbState = 0;
+            rc = tstSlotStateSave(s_aModels, cModels, iSaver == 1 ? &aLayouts[0] : NULL, RT_BOOL((iVariant + iSaver) & 1) /*fLive*/,
+                                  &pvState, &cbState);
+            if (RT_SUCCESS(rc))
+            {
+                RTTestIPrintf(RTTESTLVL_ALWAYS, "variant %u, saved by a VM started %s the device: %zu bytes\n",
+                              iVariant, iSaver == 1 ? "without" : "with", cbState);
+                tstSlotStateLoadAndCheck(__LINE__, s_aModels, cModels, NULL /*paLayouts*/, fMsi, iSaver == 0 /*fEventSaved*/,
+                                         pvState, cbState);
+                tstSlotStateLoadAndCheck(__LINE__, s_aModels, cModels, &aLayouts[0], fMsi, iSaver == 0 /*fEventSaved*/,
+                                         pvState, cbState);
+            }
+            tstPdmFreeState(pvState);
+        }
+        g_fTstLegacy = false;
+    }
+}
+
+
+/**
+ * States which are not saved and states which are not loaded: no state is
+ * saved while the device is in the slot, no device gets into the slot unless
+ * the VM is running or suspended, and a state which doesn't go with the VM is
+ * refused, as is one which makes no sense.
+ */
+static void tstSlotSavedStateRefused(void)
+{
+    RTTestISub("Hot-plug slot: saved states which are refused");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    void       *pvState     = NULL;
+    size_t      cbState     = 0;
+
+    /*
+     * With the device in the slot nothing is saved, and the device is left alone.
+     */
+    int rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        tstSlotGuestEnableDevice();
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+        uint32_t const cResets = tstVfioKrnlDevGetResetCount(pDev);
+        for (unsigned fLive = 0; fLive < 2; fLive++)
+        {
+            tstSlotStateHookArm(pDevInsDev, pDev);
+            rc = tstPdmSaveState(RT_BOOL(fLive), &pvState, &cbState);
+            tstPdmSetStateHook(NULL, NULL);
+            RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("fLive=%u: %Rrc\n", fLive, rc));
+            RTTESTI_CHECK_MSG(!strcmp(tstPdmGetLastRuntimeErrorId(), "PciVfioNoSavedState"),
+                              ("fLive=%u: runtime error '%s'\n", fLive, tstPdmGetLastRuntimeErrorId()));
+            RTTESTI_CHECK_MSG(g_TstSlotStateHook.cCalls == 0, ("fLive=%u: saving got to the units\n", fLive));
+            RTTESTI_CHECK_MSG(!pvState, ("fLive=%u\n", fLive));
+            tstPdmFreeState(pvState);
+
+            /* A VM which is saved the ordinary way was suspended for it. */
+            if (!fLive)
+                tstPdmResume();
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("fLive=%u\n", fLive));
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 1, ("fLive=%u\n", fLive));
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResets, ("fLive=%u\n", fLive));
+        }
+
+        /*
+         * With the device taken out the state gets saved.  The VM is suspended then,
+         * which doesn't keep a device from being put in: the guest finds it when it
+         * runs again.
+         */
+        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        tstSlotCheckEmpty(__LINE__, pDevInsPort);
+        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+        tstSlotStateHookArm(pDevInsDev, pDev);
+        RTTESTI_CHECK_RC(rc = tstPdmSaveState(false /*fLive*/, &pvState, &cbState), VINF_SUCCESS);
+        tstSlotStateHookCheck(__LINE__);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        tstPdmResume();
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+        tstSlotCheckMsi(__LINE__, pDev);
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+    if (RT_FAILURE(rc))
+    {
+        tstPdmFreeState(pvState);
+        return;
+    }
+
+    /*
+     * A VM which was not powered on yet gets no device put into its slot, as a
+     * state might get loaded into it.
+     */
+    PCIVFIOFUNLAYOUT Layout;
+    RT_ZERO(Layout);
+    rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+        RTTESTI_CHECK_RC(pciVfioR3QueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
+    tstFixtureTeardown();
+    rc = tstSlotStateFixtureSetup(&Model, 1, &Layout, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        tstVfioKrnlDevSetGone(pDev, false);
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_VM_INVALID_VM_STATE);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        tstPdmPowerOn();
+        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+    }
+    tstFixtureTeardown();
+
+    /*
+     * States which are not loaded.  The VM has the device, which stays out of
+     * the slot when loading fails.
+     */
+    static const struct
+    {
+        /** What is wrong with the state. */
+        const char *pszWhat;
+        /** The unit to change an item of, NULL for none. */
+        const char *pszUnit;
+        /** The item. */
+        uint32_t    idxItem;
+        /** Its size. */
+        uint32_t    cbItem;
+        /** The value to give it. */
+        uint64_t    uValue;
+        /** How many bytes to leave out at the end of the state. */
+        uint32_t    cbCutOff;
+        /** How loading has to go, VERR_IPE_UNINITIALIZED_STATUS for any failure. */
+        int         rcExpected;
+    } s_aBadStates[] =
+    {
+        { "a function number which is out of range",     "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 8,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED },
+        { "a function the VM doesn't have",              "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH },
+        { "the same function twice",                     "pci-vfio",      TSTSTATE_VFIO_END,         4, 0,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED },
+        { "another config space size",                   "pci-vfio",      TSTSTATE_VFIO_CFG_SIZE,    4, 12345,      0, VERR_SSM_LOAD_CONFIG_MISMATCH },
+        { "another BAR size",                            "pci-vfio",      TSTSTATE_VFIO_BAR0_SIZE,   8, _1M,        0, VERR_SSM_LOAD_CONFIG_MISMATCH },
+        { "MSI-X where the device has none",             "pci-vfio",      TSTSTATE_VFIO_MSIX,        1, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH },
+        { "another number of MSI vectors",               "pci-vfio",      TSTSTATE_VFIO_MSI_VECTORS, 4, 32,         0, VERR_SSM_LOAD_CONFIG_MISMATCH },
+        { "an MSI capability the PCI bus takes care of", "ich9pcibridge", TSTSTATE_BUS_MSI_CAP_OFF,  1, 0x50,       0, VERR_SSM_LOAD_CONFIG_MISMATCH },
+        { "the end missing",                             NULL,            0,                         0, 0,          8, VERR_IPE_UNINITIALIZED_STATUS },
+        { "most of it missing",                          NULL,            0,                         0, 0, UINT32_MAX, VERR_IPE_UNINITIALIZED_STATUS },
+    };
+    for (unsigned iState = 0; iState < RT_ELEMENTS(s_aBadStates); iState++)
+    {
+        void *pvBadState = RTMemDup(pvState, cbState);
+        RTTESTI_CHECK_BREAK(pvBadState);
+        size_t const cbBadState = s_aBadStates[iState].cbCutOff == UINT32_MAX ? 100 : cbState - s_aBadStates[iState].cbCutOff;
+        if (s_aBadStates[iState].pszUnit)
+            RTTESTI_CHECK_RC(tstPdmStatePatchItem(pvBadState, cbState, s_aBadStates[iState].pszUnit, 0 /*uInstance*/,
+                                                  s_aBadStates[iState].idxItem, &s_aBadStates[iState].uValue,
+                                                  s_aBadStates[iState].cbItem), VINF_SUCCESS);
+
+        rc = tstSlotStateFixtureSetup(&Model, 1, NULL /*paLayouts*/, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            rc = tstPdmLoadState(pvBadState, cbBadState);
+            if (   s_aBadStates[iState].rcExpected == VERR_IPE_UNINITIALIZED_STATUS
+                 ? RT_SUCCESS(rc)
+                 : rc != s_aBadStates[iState].rcExpected)
+                RTTestIFailed("a state with %s: %Rrc - %s\n", s_aBadStates[iState].pszWhat, rc, tstPdmGetLastError());
+            if (   rc == VERR_SSM_LOAD_CONFIG_MISMATCH
+                && *tstPdmGetLastError() == '\0')
+                RTTestIFailed("a state with %s: no message\n", s_aBadStates[iState].pszWhat);
+            if (tstVfioKrnlDevGetOpenCount(pDev) != 0)
+                RTTestIFailed("a state with %s: the device is open %u time(s)\n", s_aBadStates[iState].pszWhat,
+                              tstVfioKrnlDevGetOpenCount(pDev));
+            if (tstVfioKrnlGetViolationCount() != 0)
+                RTTestIFailed("a state with %s: %u request(s) to the kernel which are out of bounds\n",
+                              s_aBadStates[iState].pszWhat, tstVfioKrnlGetViolationCount());
+        }
+        tstFixtureTeardown();
+        RTMemFree(pvBadState);
+    }
+    tstPdmFreeState(pvState);
+
+    /*
+     * The state of a VM which has the root port and no device for the slot is not
+     * loaded into a VM with the device.
+     */
+    pvState = NULL;
+    rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        tstPortGuestSetBusNumbers();
+        RTTESTI_CHECK_RC(rc = tstPdmSaveState(false /*fLive*/, &pvState, &cbState), VINF_SUCCESS);
+    }
+    tstFixtureTeardown();
+    if (RT_SUCCESS(rc))
+    {
+        rc = tstSlotStateFixtureSetup(&Model, 1, NULL /*paLayouts*/, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            rc = tstPdmLoadState(pvState, cbState);
+            RTTESTI_CHECK_MSG(rc == VERR_SSM_LOAD_CONFIG_MISMATCH, ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+            RTTESTI_CHECK(*tstPdmGetLastError() != '\0');
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        }
+        tstFixtureTeardown();
+    }
+    tstPdmFreeState(pvState);
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -5291,6 +5831,8 @@ int main()
     tstSlotHostRequest();
     tstSlotAttach();
     tstSlotStartEmpty();
+    tstSlotSavedState();
+    tstSlotSavedStateRefused();
     tstFuzz();
     tstPortFuzz();
 

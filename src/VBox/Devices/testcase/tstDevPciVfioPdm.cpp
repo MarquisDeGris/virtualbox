@@ -152,14 +152,6 @@ typedef struct TSTPDMDEV
     size_t              cbDevIns;
     /** The instance node of the configuration (the parent of "Config"). */
     PCFGMNODE           pCfgInst;
-    /** Saved state: the callback preparing for a live save, optional. */
-    PFNSSMDEVLIVEPREP   pfnLivePrep;
-    /** Saved state: the callback preparing for saving, optional. */
-    PFNSSMDEVSAVEPREP   pfnSavePrep;
-    /** Saved state: the callback preparing for loading, optional. */
-    PFNSSMDEVLOADPREP   pfnLoadPrep;
-    /** Saved state: the callback completing the loading, optional. */
-    PFNSSMDEVLOADDONE   pfnLoadDone;
 } TSTPDMDEV;
 /** Pointer to a device instance record. */
 typedef TSTPDMDEV *PTSTPDMDEV;
@@ -285,6 +277,90 @@ typedef struct TSTPDMTHREAD
 /** Pointer to a PDM thread. */
 typedef TSTPDMTHREAD *PTSTPDMTHREAD;
 
+/** @name The kinds of items in a saved state of the mock.
+ * The real thing doesn't tell them apart.  Here it shows when what is read isn't
+ * what was written.
+ * @{ */
+#define TSTPDM_SSM_ITEM_U8          UINT8_C(0x01)
+#define TSTPDM_SSM_ITEM_U32         UINT8_C(0x02)
+#define TSTPDM_SSM_ITEM_U64         UINT8_C(0x03)
+#define TSTPDM_SSM_ITEM_S32         UINT8_C(0x04)
+#define TSTPDM_SSM_ITEM_BOOL        UINT8_C(0x05)
+#define TSTPDM_SSM_ITEM_MEM         UINT8_C(0x06)
+/** @} */
+
+/**
+ * A saved state unit.
+ */
+typedef struct TSTPDMSSMUNIT
+{
+    /** The name, which is the name of the device. */
+    char                szName[32];
+    /** The instance. */
+    uint32_t            uInstance;
+    /** The version of the data. */
+    uint32_t            uVersion;
+    /** The device instance, NULL for the unit of the mock itself. */
+    PPDMDEVINS          pDevIns;
+    /** The callback preparing for a live save, optional. */
+    PFNSSMDEVLIVEPREP   pfnLivePrep;
+    /** The callback preparing for saving, optional. */
+    PFNSSMDEVSAVEPREP   pfnSavePrep;
+    /** The callback saving the data, optional. */
+    PFNSSMDEVSAVEEXEC   pfnSaveExec;
+    /** The callback completing the saving, optional. */
+    PFNSSMDEVSAVEDONE   pfnSaveDone;
+    /** The callback preparing for loading, optional. */
+    PFNSSMDEVLOADPREP   pfnLoadPrep;
+    /** The callback loading the data, optional. */
+    PFNSSMDEVLOADEXEC   pfnLoadExec;
+    /** The callback completing the loading, optional. */
+    PFNSSMDEVLOADDONE   pfnLoadDone;
+    /** Whether a callback of the unit was called during the current operation. */
+    bool                fCalled;
+} TSTPDMSSMUNIT;
+/** Pointer to a saved state unit. */
+typedef TSTPDMSSMUNIT *PTSTPDMSSMUNIT;
+
+/**
+ * The header of a unit in a saved state of the mock.
+ */
+typedef struct TSTPDMSSMUNITHDR
+{
+    /** The name of the unit, empty for the end of the state. */
+    char                szName[32];
+    /** The instance. */
+    uint32_t            uInstance;
+    /** The version of the data. */
+    uint32_t            uVersion;
+    /** Size of the data which follows. */
+    uint32_t            cbData;
+} TSTPDMSSMUNITHDR;
+
+/**
+ * A saved state which is being written or read.
+ */
+struct SSMHANDLE
+{
+    /** The data. */
+    uint8_t            *pb;
+    /** Size of the data. */
+    size_t              cb;
+    /** Size of the buffer when writing. */
+    size_t              cbAlloc;
+    /** The read position. */
+    size_t              off;
+    /** Where the data of the unit being read ends. */
+    size_t              offUnitEnd;
+    /** The status, a failure sticks. */
+    int                 rc;
+    /** Whether the state is being read. */
+    bool                fLoading;
+    /** Whether a unit is saving or loading its data right now, which is when data
+     * can be put and got. */
+    bool                fExec;
+};
+
 /**
  * The state of the mock.
  */
@@ -368,8 +444,16 @@ typedef struct TSTPDM
     char                szLastError[512];
     /** The ID of the last runtime error. */
     char                szLastRuntimeErrorId[64];
-    /** The status of the saved state operation the devices get to see. */
-    int                 rcSsm;
+    /** The state of the VM the devices get to see. */
+    VMSTATE             enmVmState;
+    /** The saved state units in the order in which they are saved. */
+    TSTPDMSSMUNIT       aSsmUnits[16];
+    /** Number of saved state units. */
+    uint32_t            cSsmUnits;
+    /** Called between the preparations for saving or loading a state and doing it, optional. */
+    PFNTSTPDMSTATEHOOK  pfnStateHook;
+    /** The user argument of the hook. */
+    void               *pvStateHookUser;
     /** The NOP critical section handed to the devices. */
     PDMCRITSECT         NopCritSect;
 } TSTPDM;
@@ -1580,7 +1664,9 @@ static DECLCALLBACK(int) tstPdmHlp_SSMSetLoadErrorV(PSSMHANDLE pSSM, int rc, RT_
 {
     RT_NOREF(pSSM);
     RT_SRC_POS_NOREF();
-    RTStrPrintfV(g_Pdm.szLastError, sizeof(g_Pdm.szLastError), pszFormat, va);
+    /* The first message is the one which gets shown. */
+    if (!g_Pdm.szLastError[0])
+        RTStrPrintfV(g_Pdm.szLastError, sizeof(g_Pdm.szLastError), pszFormat, va);
     return rc;
 }
 
@@ -1599,8 +1685,362 @@ static DECLCALLBACK(int) tstPdmHlp_SSMSetLoadError(PSSMHANDLE pSSM, int rc, RT_S
 /** @interface_method_impl{PDMDEVHLPR3,pfnSSMHandleGetStatus} */
 static DECLCALLBACK(int) tstPdmHlp_SSMHandleGetStatus(PSSMHANDLE pSSM)
 {
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    return pSSM->rc;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMHandleGetAfter} */
+static DECLCALLBACK(SSMAFTER) tstPdmHlp_SSMHandleGetAfter(PSSMHANDLE pSSM)
+{
     RT_NOREF(pSSM);
-    return g_Pdm.rcSsm;
+    return SSMAFTER_RESUME;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMSetCfgError} */
+static DECLCALLBACK(int) tstPdmHlp_SSMSetCfgError(PSSMHANDLE pSSM, RT_SRC_POS_DECL, const char *pszFormat, ...)
+{
+    va_list va;
+    va_start(va, pszFormat);
+    int rc = tstPdmHlp_SSMSetLoadErrorV(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS_ARGS, pszFormat, va);
+    va_end(va);
+    return rc;
+}
+
+
+/**
+ * Appends to a saved state.
+ *
+ * @returns VBox status code.
+ * @param   pSSM                The saved state.
+ * @param   pv                  What to append.
+ * @param   cb                  Number of bytes.
+ */
+static int tstPdmSsmWrite(PSSMHANDLE pSSM, const void *pv, size_t cb)
+{
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    AssertReturn(!pSSM->fLoading, VERR_SSM_INVALID_STATE);
+    if (RT_FAILURE(pSSM->rc))
+        return pSSM->rc;
+    if (cb > pSSM->cbAlloc - pSSM->cb)
+    {
+        size_t const cbNew = RT_ALIGN_Z(pSSM->cb + cb + _1M, _1M);
+        void        *pvNew = RTMemRealloc(pSSM->pb, cbNew);
+        if (!pvNew)
+            return pSSM->rc = VERR_NO_MEMORY;
+        pSSM->pb      = (uint8_t *)pvNew;
+        pSSM->cbAlloc = cbNew;
+    }
+    memcpy(&pSSM->pb[pSSM->cb], pv, cb);
+    pSSM->cb += cb;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Reads from a saved state, up to where the current unit ends.
+ *
+ * @returns VBox status code.
+ * @param   pSSM                The saved state.
+ * @param   pv                  Where to put what is read.
+ * @param   cb                  Number of bytes.
+ */
+static int tstPdmSsmRead(PSSMHANDLE pSSM, void *pv, size_t cb)
+{
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    AssertReturn(pSSM->fLoading, VERR_SSM_INVALID_STATE);
+    if (RT_FAILURE(pSSM->rc))
+        return pSSM->rc;
+    if (cb > pSSM->offUnitEnd - pSSM->off)
+        return pSSM->rc = VERR_SSM_LOADED_TOO_MUCH;
+    memcpy(pv, &pSSM->pb[pSSM->off], cb);
+    pSSM->off += cb;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Puts an item of a unit into a saved state.
+ *
+ * @returns VBox status code.
+ * @param   pSSM                The saved state.
+ * @param   bKind               TSTPDM_SSM_ITEM_XXX.
+ * @param   pv                  The item.
+ * @param   cb                  Its size.
+ */
+static int tstPdmSsmPutItem(PSSMHANDLE pSSM, uint8_t bKind, const void *pv, size_t cb)
+{
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    AssertReturn(pSSM->fExec, VERR_SSM_INVALID_STATE);
+    tstPdmSsmWrite(pSSM, &bKind, sizeof(bKind));
+    if (bKind == TSTPDM_SSM_ITEM_MEM)
+    {
+        uint32_t const cb32 = (uint32_t)cb;
+        tstPdmSsmWrite(pSSM, &cb32, sizeof(cb32));
+    }
+    return tstPdmSsmWrite(pSSM, pv, cb);
+}
+
+
+/**
+ * Gets an item of a unit from a saved state.
+ *
+ * @returns VBox status code.
+ * @param   pSSM                The saved state.
+ * @param   bKind               TSTPDM_SSM_ITEM_XXX, has to be what was put.
+ * @param   pv                  Where to put the item.
+ * @param   cb                  Its size, has to be what was put.
+ */
+static int tstPdmSsmGetItem(PSSMHANDLE pSSM, uint8_t bKind, void *pv, size_t cb)
+{
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    AssertReturn(pSSM->fExec, VERR_SSM_INVALID_STATE);
+    uint8_t bKindSaved = 0;
+    int rc = tstPdmSsmRead(pSSM, &bKindSaved, sizeof(bKindSaved));
+    if (RT_SUCCESS(rc) && bKindSaved != bKind)
+        rc = pSSM->rc = VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    if (RT_SUCCESS(rc) && bKind == TSTPDM_SSM_ITEM_MEM)
+    {
+        uint32_t cb32 = 0;
+        rc = tstPdmSsmRead(pSSM, &cb32, sizeof(cb32));
+        if (RT_SUCCESS(rc) && cb32 != cb)
+            rc = pSSM->rc = VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    }
+    if (RT_SUCCESS(rc))
+        rc = tstPdmSsmRead(pSSM, pv, cb);
+    return rc;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMPutU8} */
+static DECLCALLBACK(int) tstPdmHlp_SSMPutU8(PSSMHANDLE pSSM, uint8_t u8)
+{
+    return tstPdmSsmPutItem(pSSM, TSTPDM_SSM_ITEM_U8, &u8, sizeof(u8));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMPutU32} */
+static DECLCALLBACK(int) tstPdmHlp_SSMPutU32(PSSMHANDLE pSSM, uint32_t u32)
+{
+    return tstPdmSsmPutItem(pSSM, TSTPDM_SSM_ITEM_U32, &u32, sizeof(u32));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMPutU64} */
+static DECLCALLBACK(int) tstPdmHlp_SSMPutU64(PSSMHANDLE pSSM, uint64_t u64)
+{
+    return tstPdmSsmPutItem(pSSM, TSTPDM_SSM_ITEM_U64, &u64, sizeof(u64));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMPutS32} */
+static DECLCALLBACK(int) tstPdmHlp_SSMPutS32(PSSMHANDLE pSSM, int32_t i32)
+{
+    return tstPdmSsmPutItem(pSSM, TSTPDM_SSM_ITEM_S32, &i32, sizeof(i32));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMPutBool} */
+static DECLCALLBACK(int) tstPdmHlp_SSMPutBool(PSSMHANDLE pSSM, bool fBool)
+{
+    uint8_t const u8 = fBool;
+    return tstPdmSsmPutItem(pSSM, TSTPDM_SSM_ITEM_BOOL, &u8, sizeof(u8));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMPutMem} */
+static DECLCALLBACK(int) tstPdmHlp_SSMPutMem(PSSMHANDLE pSSM, const void *pv, size_t cb)
+{
+    return tstPdmSsmPutItem(pSSM, TSTPDM_SSM_ITEM_MEM, pv, cb);
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetU8} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetU8(PSSMHANDLE pSSM, uint8_t *pu8)
+{
+    return tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_U8, pu8, sizeof(*pu8));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetU32} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetU32(PSSMHANDLE pSSM, uint32_t *pu32)
+{
+    return tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_U32, pu32, sizeof(*pu32));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetU32V} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetU32V(PSSMHANDLE pSSM, uint32_t volatile *pu32)
+{
+    return tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_U32, (void *)pu32, sizeof(*pu32));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetU64} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetU64(PSSMHANDLE pSSM, uint64_t *pu64)
+{
+    return tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_U64, pu64, sizeof(*pu64));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetS32} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetS32(PSSMHANDLE pSSM, int32_t *pi32)
+{
+    return tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_S32, pi32, sizeof(*pi32));
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetBool} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetBool(PSSMHANDLE pSSM, bool *pfBool)
+{
+    uint8_t u8 = 0;
+    int rc = tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_BOOL, &u8, sizeof(u8));
+    if (RT_SUCCESS(rc))
+        *pfBool = u8 != 0;
+    return rc;
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMGetMem} */
+static DECLCALLBACK(int) tstPdmHlp_SSMGetMem(PSSMHANDLE pSSM, void *pv, size_t cb)
+{
+    return tstPdmSsmGetItem(pSSM, TSTPDM_SSM_ITEM_MEM, pv, cb);
+}
+
+
+/** @interface_method_impl{PDMDEVHLPR3,pfnVMState} */
+static DECLCALLBACK(VMSTATE) tstPdmHlp_VMState(PPDMDEVINS pDevIns)
+{
+    RT_NOREF(pDevIns);
+    return g_Pdm.enmVmState;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVSAVEEXEC,
+ *      Plays the part of PGM: each MMIO2 range is saved with what identifies it and
+ *      page by page\, which reads all of it.}
+ */
+static DECLCALLBACK(int) tstPdmPgmSaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    RT_NOREF(pDevIns);
+    for (uint32_t i = 0; i < g_Pdm.cMmio2; i++)
+    {
+        char szName[32];
+        RT_ZERO(szName);
+        RTStrCopy(szName, sizeof(szName), g_Pdm.aMmio2[i].pDevIns->pReg->szName);
+        tstPdmHlp_SSMPutU32(pSSM, i);
+        tstPdmHlp_SSMPutMem(pSSM, szName, sizeof(szName));
+        tstPdmHlp_SSMPutU32(pSSM, g_Pdm.aMmio2[i].pDevIns->iInstance);
+        tstPdmHlp_SSMPutU32(pSSM, g_Pdm.aMmio2[i].iSubDev);
+        tstPdmHlp_SSMPutU32(pSSM, g_Pdm.aMmio2[i].iRegion);
+        tstPdmHlp_SSMPutU64(pSSM, g_Pdm.aMmio2[i].cbRegion);
+        for (RTGCPHYS off = 0; off < g_Pdm.aMmio2[i].cbRegion; off += GUEST_PAGE_SIZE)
+        {
+            uint8_t const *pbPage = &g_Pdm.aMmio2[i].pbBacking[off];
+            bool const     fZero  = ASMMemIsZero(pbPage, GUEST_PAGE_SIZE);
+            tstPdmHlp_SSMPutBool(pSSM, fZero);
+            if (!fZero)
+                tstPdmHlp_SSMPutMem(pSSM, pbPage, GUEST_PAGE_SIZE);
+        }
+    }
+    return tstPdmHlp_SSMPutU32(pSSM, UINT32_MAX);
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADEXEC,
+ *      Plays the part of PGM: each saved MMIO2 range has to be there\, and each of
+ *      its pages gets written to\, the ones which were zero included.}
+ */
+static DECLCALLBACK(int) tstPdmPgmLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t uPass)
+{
+    RT_NOREF(pDevIns, uVersion, uPass);
+    for (;;)
+    {
+        uint32_t idSaved = 0;
+        int rc = tstPdmHlp_SSMGetU32(pSSM, &idSaved);
+        if (RT_FAILURE(rc))
+            return rc;
+        if (idSaved == UINT32_MAX)
+            return VINF_SUCCESS;
+
+        char     szName[32];
+        uint32_t uInstance = 0;
+        uint32_t iSubDev   = 0;
+        uint32_t iRegion   = 0;
+        uint64_t cbRegion  = 0;
+        RT_ZERO(szName);
+        tstPdmHlp_SSMGetMem(pSSM, szName, sizeof(szName));
+        tstPdmHlp_SSMGetU32(pSSM, &uInstance);
+        tstPdmHlp_SSMGetU32(pSSM, &iSubDev);
+        tstPdmHlp_SSMGetU32(pSSM, &iRegion);
+        rc = tstPdmHlp_SSMGetU64(pSSM, &cbRegion);
+        if (RT_FAILURE(rc))
+            return rc;
+        szName[sizeof(szName) - 1] = '\0';
+
+        uint32_t idx;
+        for (idx = 0; idx < g_Pdm.cMmio2; idx++)
+            if (   g_Pdm.aMmio2[idx].iSubDev == iSubDev
+                && g_Pdm.aMmio2[idx].iRegion == iRegion
+                && g_Pdm.aMmio2[idx].pDevIns->iInstance == uInstance
+                && !strcmp(g_Pdm.aMmio2[idx].pDevIns->pReg->szName, szName))
+                break;
+        if (idx >= g_Pdm.cMmio2)
+            return tstPdmHlp_SSMSetCfgError(pSSM, RT_SRC_POS, "Failed to locate a MMIO2 range owned by %s/%u, region %u/%u",
+                                            szName, uInstance, iSubDev, iRegion);
+        if (cbRegion != g_Pdm.aMmio2[idx].cbRegion)
+            return tstPdmHlp_SSMSetCfgError(pSSM, RT_SRC_POS, "MMIO2 region %u/%u of %s/%u size mismatch: saved=%RX64 config=%RGp",
+                                            iSubDev, iRegion, szName, uInstance, cbRegion, g_Pdm.aMmio2[idx].cbRegion);
+
+        for (RTGCPHYS off = 0; off < g_Pdm.aMmio2[idx].cbRegion; off += GUEST_PAGE_SIZE)
+        {
+            uint8_t *pbPage = &g_Pdm.aMmio2[idx].pbBacking[off];
+            bool     fZero  = false;
+            rc = tstPdmHlp_SSMGetBool(pSSM, &fZero);
+            if (RT_FAILURE(rc))
+                return rc;
+            if (fZero)
+                RT_BZERO(pbPage, GUEST_PAGE_SIZE);
+            else
+            {
+                rc = tstPdmHlp_SSMGetMem(pSSM, pbPage, GUEST_PAGE_SIZE);
+                if (RT_FAILURE(rc))
+                    return rc;
+            }
+        }
+    }
+}
+
+
+/**
+ * Registers a saved state unit.
+ *
+ * @returns VBox status code.
+ * @param   pUnit               The unit.
+ * @param   pszBefore           The name of the unit to put it in front of, NULL for putting
+ *                              it last.  It goes last too if there is no such unit.
+ */
+static int tstPdmSsmRegisterUnit(TSTPDMSSMUNIT const *pUnit, const char *pszBefore)
+{
+    AssertReturn(g_Pdm.cSsmUnits < RT_ELEMENTS(g_Pdm.aSsmUnits), VERR_OUT_OF_RESOURCES);
+    uint32_t idx = g_Pdm.cSsmUnits;
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+    {
+        AssertReturn(   g_Pdm.aSsmUnits[i].uInstance != pUnit->uInstance
+                     || strcmp(g_Pdm.aSsmUnits[i].szName, pUnit->szName),
+                     VERR_SSM_UNIT_EXISTS);
+        if (   pszBefore
+            && idx == g_Pdm.cSsmUnits
+            && !strcmp(g_Pdm.aSsmUnits[i].szName, pszBefore))
+            idx = i;
+    }
+    memmove(&g_Pdm.aSsmUnits[idx + 1], &g_Pdm.aSsmUnits[idx], (g_Pdm.cSsmUnits - idx) * sizeof(g_Pdm.aSsmUnits[0]));
+    g_Pdm.aSsmUnits[idx] = *pUnit;
+    g_Pdm.cSsmUnits++;
+    return VINF_SUCCESS;
 }
 
 
@@ -1629,16 +2069,22 @@ static DECLCALLBACK(int) tstPdmHlp_SSMRegister(PPDMDEVINS pDevIns, uint32_t uVer
                                                PFNSSMDEVLOADPREP pfnLoadPrep, PFNSSMDEVLOADEXEC pfnLoadExec,
                                                PFNSSMDEVLOADDONE pfnLoadDone)
 {
-    /* What comes before anything is saved or loaded and what comes after loading is
-       played through, the tests put what was loaded where it belongs. */
-    RT_NOREF(uVersion, cbGuess, pszBefore, pfnLiveExec, pfnLiveVote, pfnSaveExec, pfnSaveDone, pfnLoadExec);
-    PTSTPDMDEV pDev = (PTSTPDMDEV)pDevIns->Internal.s.pDev;
-    AssertReturn(pDev, VERR_INTERNAL_ERROR_3);
-    pDev->pfnLivePrep = pfnLivePrep;
-    pDev->pfnSavePrep = pfnSavePrep;
-    pDev->pfnLoadPrep = pfnLoadPrep;
-    pDev->pfnLoadDone = pfnLoadDone;
-    return VINF_SUCCESS;
+    /* The passes of a live save while the VM runs are not played through. */
+    RT_NOREF(cbGuess, pfnLiveExec, pfnLiveVote);
+    TSTPDMSSMUNIT Unit;
+    RT_ZERO(Unit);
+    RTStrCopy(Unit.szName, sizeof(Unit.szName), pDevIns->pReg->szName);
+    Unit.uInstance   = pDevIns->iInstance;
+    Unit.uVersion    = uVersion;
+    Unit.pDevIns     = pDevIns;
+    Unit.pfnLivePrep = pfnLivePrep;
+    Unit.pfnSavePrep = pfnSavePrep;
+    Unit.pfnSaveExec = pfnSaveExec;
+    Unit.pfnSaveDone = pfnSaveDone;
+    Unit.pfnLoadPrep = pfnLoadPrep;
+    Unit.pfnLoadExec = pfnLoadExec;
+    Unit.pfnLoadDone = pfnLoadDone;
+    return tstPdmSsmRegisterUnit(&Unit, pszBefore);
 }
 
 
@@ -1712,6 +2158,22 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnSSMSetLoadError                 = tstPdmHlp_SSMSetLoadError;
     g_tstPdmDevHlpR3.pfnSSMSetLoadErrorV                = tstPdmHlp_SSMSetLoadErrorV;
     g_tstPdmDevHlpR3.pfnSSMHandleGetStatus              = tstPdmHlp_SSMHandleGetStatus;
+    g_tstPdmDevHlpR3.pfnSSMHandleGetAfter               = tstPdmHlp_SSMHandleGetAfter;
+    g_tstPdmDevHlpR3.pfnSSMSetCfgError                  = tstPdmHlp_SSMSetCfgError;
+    g_tstPdmDevHlpR3.pfnSSMPutU8                        = tstPdmHlp_SSMPutU8;
+    g_tstPdmDevHlpR3.pfnSSMPutU32                       = tstPdmHlp_SSMPutU32;
+    g_tstPdmDevHlpR3.pfnSSMPutU64                       = tstPdmHlp_SSMPutU64;
+    g_tstPdmDevHlpR3.pfnSSMPutS32                       = tstPdmHlp_SSMPutS32;
+    g_tstPdmDevHlpR3.pfnSSMPutBool                      = tstPdmHlp_SSMPutBool;
+    g_tstPdmDevHlpR3.pfnSSMPutMem                       = tstPdmHlp_SSMPutMem;
+    g_tstPdmDevHlpR3.pfnSSMGetU8                        = tstPdmHlp_SSMGetU8;
+    g_tstPdmDevHlpR3.pfnSSMGetU32                       = tstPdmHlp_SSMGetU32;
+    g_tstPdmDevHlpR3.pfnSSMGetU32V                      = tstPdmHlp_SSMGetU32V;
+    g_tstPdmDevHlpR3.pfnSSMGetU64                       = tstPdmHlp_SSMGetU64;
+    g_tstPdmDevHlpR3.pfnSSMGetS32                       = tstPdmHlp_SSMGetS32;
+    g_tstPdmDevHlpR3.pfnSSMGetBool                      = tstPdmHlp_SSMGetBool;
+    g_tstPdmDevHlpR3.pfnSSMGetMem                       = tstPdmHlp_SSMGetMem;
+    g_tstPdmDevHlpR3.pfnVMState                         = tstPdmHlp_VMState;
     g_tstPdmDevHlpR3.pfnCritSectGetNop                  = tstPdmHlp_CritSectGetNop;
     g_tstPdmDevHlpR3.pfnSetDeviceCritSect               = tstPdmHlp_SetDeviceCritSect;
     g_tstPdmDevHlpR3.pfnSSMRegister                     = tstPdmHlp_SSMRegister;
@@ -1775,7 +2237,16 @@ int tstPdmInit(uint32_t cbRam)
                 g_Pdm.bExecEngine  = VM_EXEC_ENGINE_NATIVE_API;
                 g_Pdm.fCreating    = true;
                 g_Pdm.fInitialized = true;
-                return VINF_SUCCESS;
+                g_Pdm.enmVmState   = VMSTATE_CREATING;
+
+                /* What takes care of the guest memory has its saved state unit before any device gets created. */
+                TSTPDMSSMUNIT Unit;
+                RT_ZERO(Unit);
+                RTStrCopy(Unit.szName, sizeof(Unit.szName), "pgm");
+                Unit.uVersion    = 1;
+                Unit.pfnSaveExec = tstPdmPgmSaveExec;
+                Unit.pfnLoadExec = tstPdmPgmLoadExec;
+                return tstPdmSsmRegisterUnit(&Unit, NULL /*pszBefore*/);
             }
             rc = VERR_NO_MEMORY;
             RTSemEventDestroy(g_Pdm.hEvtMsi);
@@ -1928,6 +2399,14 @@ int tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PP
     for (unsigned i = 0; i < RT_ELEMENTS(g_Pdm.aPciBuses); i++)
         if (g_Pdm.aPciBuses[i].pDevIns == pDevIns)
             g_Pdm.aPciBuses[i].pDevIns = NULL;
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits;)
+        if (g_Pdm.aSsmUnits[i].pDevIns == pDevIns)
+        {
+            g_Pdm.cSsmUnits--;
+            memmove(&g_Pdm.aSsmUnits[i], &g_Pdm.aSsmUnits[i + 1], (g_Pdm.cSsmUnits - i) * sizeof(g_Pdm.aSsmUnits[0]));
+        }
+        else
+            i++;
     g_Pdm.cDevs--;
 
     /* Ranges the device has registered still refer to the instance, so keep it until termination. */
@@ -1970,6 +2449,7 @@ int tstPdmInitComplete(void)
                 return rc;
         }
     }
+    g_Pdm.enmVmState = VMSTATE_CREATED;
     return VINF_SUCCESS;
 }
 
@@ -1997,7 +2477,8 @@ void tstPdmPowerOn(void)
         if (pDevIns->pReg->pfnPowerOn)
             pDevIns->pReg->pfnPowerOn(pDevIns);
     }
-    g_Pdm.fRunning = true;
+    g_Pdm.fRunning   = true;
+    g_Pdm.enmVmState = VMSTATE_RUNNING;
     for (uint32_t i = 0; i < g_Pdm.cThreads; i++)
         tstPdmThreadResume(g_Pdm.apThreads[i]);
 }
@@ -2008,7 +2489,9 @@ void tstPdmPowerOn(void)
  */
 void tstPdmPowerOff(void)
 {
-    if (!g_Pdm.fInitialized || !g_Pdm.fRunning)
+    if (   !g_Pdm.fInitialized
+        || (   !g_Pdm.fRunning
+            && g_Pdm.enmVmState != VMSTATE_SUSPENDED))
         return;
 
     for (uint32_t i = 0; i < g_Pdm.cThreads; i++)
@@ -2020,6 +2503,49 @@ void tstPdmPowerOff(void)
         if (pDevIns->pReg->pfnPowerOff)
             pDevIns->pReg->pfnPowerOff(pDevIns);
     }
+    g_Pdm.enmVmState = VMSTATE_OFF;
+}
+
+
+/**
+ * Suspends the running VM.  Requests for the EMT which are waiting keep waiting.
+ */
+void tstPdmSuspend(void)
+{
+    AssertReturnVoid(g_Pdm.fInitialized && g_Pdm.fRunning);
+
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+    {
+        PPDMDEVINS pDevIns = g_Pdm.aDevs[i].pDevIns;
+        if (pDevIns->pReg->pfnSuspend)
+            pDevIns->pReg->pfnSuspend(pDevIns);
+    }
+    for (uint32_t i = 0; i < g_Pdm.cThreads; i++)
+        tstPdmThreadSuspend(g_Pdm.apThreads[i]);
+    g_Pdm.fRunning   = false;
+    g_Pdm.enmVmState = VMSTATE_SUSPENDED;
+}
+
+
+/**
+ * Resumes the suspended VM, which is also how a VM gets going after a saved
+ * state was loaded into it.
+ */
+void tstPdmResume(void)
+{
+    AssertReturnVoid(g_Pdm.fInitialized && !g_Pdm.fRunning && g_Pdm.enmVmState == VMSTATE_SUSPENDED);
+
+    g_Pdm.fCreating = false;
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+    {
+        PPDMDEVINS pDevIns = g_Pdm.aDevs[i].pDevIns;
+        if (pDevIns->pReg->pfnResume)
+            pDevIns->pReg->pfnResume(pDevIns);
+    }
+    g_Pdm.fRunning   = true;
+    g_Pdm.enmVmState = VMSTATE_RUNNING;
+    for (uint32_t i = 0; i < g_Pdm.cThreads; i++)
+        tstPdmThreadResume(g_Pdm.apThreads[i]);
 }
 
 
@@ -2362,7 +2888,7 @@ const char *tstPdmGetLastRuntimeErrorId(void)
 
 /**
  * Asks the devices whether the state of the VM can be saved, the way it is
- * done before anything gets saved.
+ * done before anything gets saved.  Nothing else of saving a state is done.
  *
  * @returns VBox status code, the first failure a device reports.
  * @param   fLive               Whether this is for a live save (teleportation) or an ordinary one.
@@ -2372,13 +2898,16 @@ int tstPdmSaveStatePrep(bool fLive)
     AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
     g_Pdm.szLastError[0]          = '\0';
     g_Pdm.szLastRuntimeErrorId[0] = '\0';
-    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+    struct SSMHANDLE Handle;
+    RT_ZERO(Handle);
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
     {
+        PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
         int rc = VINF_SUCCESS;
-        if (fLive && g_Pdm.aDevs[i].pfnLivePrep)
-            rc = g_Pdm.aDevs[i].pfnLivePrep(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
-        else if (!fLive && g_Pdm.aDevs[i].pfnSavePrep)
-            rc = g_Pdm.aDevs[i].pfnSavePrep(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+        if (fLive && pUnit->pfnLivePrep)
+            rc = pUnit->pfnLivePrep(pUnit->pDevIns, &Handle);
+        else if (!fLive && pUnit->pfnSavePrep)
+            rc = pUnit->pfnSavePrep(pUnit->pDevIns, &Handle);
         if (RT_FAILURE(rc))
             return rc;
     }
@@ -2388,7 +2917,7 @@ int tstPdmSaveStatePrep(bool fLive)
 
 /**
  * Asks the devices whether a saved state can be loaded, the way it is done
- * before anything gets loaded.
+ * before anything gets loaded.  Nothing else of loading a state is done.
  *
  * @returns VBox status code, the first failure a device reports.
  */
@@ -2396,10 +2925,13 @@ int tstPdmLoadStatePrep(void)
 {
     AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
     g_Pdm.szLastError[0] = '\0';
-    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
-        if (g_Pdm.aDevs[i].pfnLoadPrep)
+    struct SSMHANDLE Handle;
+    RT_ZERO(Handle);
+    Handle.fLoading = true;
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+        if (g_Pdm.aSsmUnits[i].pfnLoadPrep)
         {
-            int rc = g_Pdm.aDevs[i].pfnLoadPrep(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+            int rc = g_Pdm.aSsmUnits[i].pfnLoadPrep(g_Pdm.aSsmUnits[i].pDevIns, &Handle);
             if (RT_FAILURE(rc))
                 return rc;
         }
@@ -2409,7 +2941,8 @@ int tstPdmLoadStatePrep(void)
 
 /**
  * Tells the devices that loading a saved state is over, the way it is done
- * after everything was loaded or loading has failed.
+ * after everything was loaded or loading has failed.  Nothing else of loading a
+ * state is done, the test puts what it wants to be loaded where it belongs.
  *
  * @returns VBox status code, the first failure a device reports.
  * @param   rcLoad              How loading went up to here, which the devices can ask for.
@@ -2418,17 +2951,371 @@ int tstPdmLoadStateDone(int rcLoad)
 {
     AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
     g_Pdm.szLastError[0] = '\0';
-    g_Pdm.rcSsm          = rcLoad;
+    struct SSMHANDLE Handle;
+    RT_ZERO(Handle);
+    Handle.fLoading = true;
+    Handle.rc       = rcLoad;
     int rc = VINF_SUCCESS;
-    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
-        if (g_Pdm.aDevs[i].pfnLoadDone)
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+        if (g_Pdm.aSsmUnits[i].pfnLoadDone)
         {
-            int rc2 = g_Pdm.aDevs[i].pfnLoadDone(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+            int rc2 = g_Pdm.aSsmUnits[i].pfnLoadDone(g_Pdm.aSsmUnits[i].pDevIns, &Handle);
             if (RT_FAILURE(rc2) && RT_SUCCESS(rc))
                 rc = rc2;
         }
-    g_Pdm.rcSsm = VINF_SUCCESS;
     return rc;
+}
+
+
+/**
+ * Sets a function which is called between the preparations for saving or
+ * loading a state and saving or loading the first unit, for doing what would
+ * come from another thread at that time.
+ *
+ * @param   pfnHook             The function, NULL for none.
+ * @param   pvUser              The user argument.
+ */
+void tstPdmSetStateHook(PFNTSTPDMSTATEHOOK pfnHook, void *pvUser)
+{
+    g_Pdm.pfnStateHook    = pfnHook;
+    g_Pdm.pvStateHookUser = pvUser;
+}
+
+
+/**
+ * Saves the state of the VM the way SSM does it: all units are asked to prepare,
+ * then each saves its data, then all are told that it is over, also if it
+ * failed.  A VM which runs is suspended on the way, a live save (teleportation)
+ * requires one; the passes of a live save while the VM runs are left out.
+ *
+ * @returns VBox status code.
+ * @param   fLive               Whether this is a live save or an ordinary one.
+ * @param   ppvState            Where to return the saved state on success, to be freed
+ *                              with tstPdmFreeState().
+ * @param   pcbState            Where to return its size.
+ */
+int tstPdmSaveState(bool fLive, void **ppvState, size_t *pcbState)
+{
+    *ppvState = NULL;
+    *pcbState = 0;
+    AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
+    AssertReturn(   g_Pdm.enmVmState == (fLive ? VMSTATE_RUNNING : VMSTATE_SUSPENDED)
+                 || (!fLive && g_Pdm.enmVmState == VMSTATE_RUNNING),
+                 VERR_VM_INVALID_VM_STATE);
+    g_Pdm.szLastError[0]          = '\0';
+    g_Pdm.szLastRuntimeErrorId[0] = '\0';
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+        g_Pdm.aSsmUnits[i].fCalled = false;
+
+    struct SSMHANDLE Handle;
+    RT_ZERO(Handle);
+    int rc = VINF_SUCCESS;
+
+    /* A live save starts while the VM runs.  The VM gets suspended for the rest. */
+    if (fLive)
+    {
+        g_Pdm.enmVmState = VMSTATE_RUNNING_LS;
+        for (uint32_t i = 0; i < g_Pdm.cSsmUnits && RT_SUCCESS(rc); i++)
+        {
+            PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
+            if (pUnit->pfnLivePrep)
+            {
+                pUnit->fCalled = true;
+                rc = pUnit->pfnLivePrep(pUnit->pDevIns, &Handle);
+                if (RT_FAILURE(rc) && RT_SUCCESS(Handle.rc))
+                    Handle.rc = rc;
+                else
+                    rc = Handle.rc;
+            }
+        }
+    }
+    bool const fWasRunning = g_Pdm.fRunning;
+    if (RT_SUCCESS(rc))
+    {
+        if (fWasRunning)
+            tstPdmSuspend();
+        g_Pdm.enmVmState = fLive ? VMSTATE_SUSPENDED_LS : VMSTATE_SAVING;
+
+        for (uint32_t i = 0; i < g_Pdm.cSsmUnits && RT_SUCCESS(rc); i++)
+        {
+            PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
+            if (pUnit->pfnSavePrep)
+            {
+                pUnit->fCalled = true;
+                rc = pUnit->pfnSavePrep(pUnit->pDevIns, &Handle);
+                if (RT_FAILURE(rc) && RT_SUCCESS(Handle.rc))
+                    Handle.rc = rc;
+                else
+                    rc = Handle.rc;
+            }
+        }
+
+        if (RT_SUCCESS(rc) && g_Pdm.pfnStateHook)
+            g_Pdm.pfnStateHook(g_Pdm.pvStateHookUser);
+
+        TSTPDMSSMUNITHDR Hdr;
+        for (uint32_t i = 0; i < g_Pdm.cSsmUnits && RT_SUCCESS(rc); i++)
+        {
+            PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
+            if (!pUnit->pfnSaveExec)
+                continue;
+
+            RT_ZERO(Hdr);
+            RTStrCopy(Hdr.szName, sizeof(Hdr.szName), pUnit->szName);
+            Hdr.uInstance = pUnit->uInstance;
+            Hdr.uVersion  = pUnit->uVersion;
+            size_t const offHdr = Handle.cb;
+            tstPdmSsmWrite(&Handle, &Hdr, sizeof(Hdr));
+
+            pUnit->fCalled = true;
+            Handle.fExec = true;
+            rc = pUnit->pfnSaveExec(pUnit->pDevIns, &Handle);
+            Handle.fExec = false;
+            if (RT_FAILURE(rc) && RT_SUCCESS(Handle.rc))
+                Handle.rc = rc;
+            else
+                rc = Handle.rc;
+            if (RT_SUCCESS(rc))
+            {
+                Hdr.cbData = (uint32_t)(Handle.cb - offHdr - sizeof(Hdr));
+                memcpy(&Handle.pb[offHdr], &Hdr, sizeof(Hdr));
+            }
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RT_ZERO(Hdr);
+            rc = tstPdmSsmWrite(&Handle, &Hdr, sizeof(Hdr));
+        }
+    }
+
+    Handle.rc = rc;
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+    {
+        PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
+        if (   pUnit->pfnSaveDone
+            && (   pUnit->fCalled
+                || (!pUnit->pfnSavePrep && !pUnit->pfnSaveExec)))
+        {
+            int rc2 = pUnit->pfnSaveDone(pUnit->pDevIns, &Handle);
+            if (RT_FAILURE(rc2) && RT_SUCCESS(rc))
+                rc = rc2;
+        }
+    }
+
+    g_Pdm.enmVmState = g_Pdm.fRunning ? VMSTATE_RUNNING : VMSTATE_SUSPENDED;
+    if (RT_SUCCESS(rc))
+    {
+        *ppvState = Handle.pb;
+        *pcbState = Handle.cb;
+    }
+    else
+        RTMemFree(Handle.pb);
+    return rc;
+}
+
+
+/**
+ * Frees a saved state.
+ *
+ * @param   pvState             The saved state, NULL is fine.
+ */
+void tstPdmFreeState(void *pvState)
+{
+    RTMemFree(pvState);
+}
+
+
+/**
+ * Loads a saved state into the VM the way SSM does it: all units are asked to
+ * prepare, then each unit of the state loads its data, then all are told that
+ * it is over, also if it failed.  The VM has to be constructed and not powered
+ * on yet, or suspended.  It is suspended afterwards, see tstPdmResume(), unless
+ * loading failed, which leaves it good for nothing but being destroyed.
+ *
+ * @returns VBox status code.
+ * @param   pvState             The saved state.
+ * @param   cbState             Its size.
+ */
+int tstPdmLoadState(const void *pvState, size_t cbState)
+{
+    AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
+    AssertReturn(   g_Pdm.enmVmState == VMSTATE_CREATED
+                 || g_Pdm.enmVmState == VMSTATE_SUSPENDED,
+                 VERR_VM_INVALID_VM_STATE);
+    g_Pdm.szLastError[0] = '\0';
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+        g_Pdm.aSsmUnits[i].fCalled = false;
+
+    struct SSMHANDLE Handle;
+    RT_ZERO(Handle);
+    Handle.pb       = (uint8_t *)(uintptr_t)pvState;
+    Handle.cb       = cbState;
+    Handle.fLoading = true;
+    g_Pdm.enmVmState = VMSTATE_LOADING;
+
+    int rc = VINF_SUCCESS;
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits && RT_SUCCESS(rc); i++)
+    {
+        PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
+        if (pUnit->pfnLoadPrep)
+        {
+            pUnit->fCalled = true;
+            rc = pUnit->pfnLoadPrep(pUnit->pDevIns, &Handle);
+            if (RT_FAILURE(rc) && RT_SUCCESS(Handle.rc))
+                Handle.rc = rc;
+            else
+                rc = Handle.rc;
+        }
+    }
+
+    if (RT_SUCCESS(rc) && g_Pdm.pfnStateHook)
+        g_Pdm.pfnStateHook(g_Pdm.pvStateHookUser);
+
+    while (RT_SUCCESS(rc))
+    {
+        TSTPDMSSMUNITHDR Hdr;
+        Handle.offUnitEnd = Handle.cb;
+        rc = tstPdmSsmRead(&Handle, &Hdr, sizeof(Hdr));
+        if (RT_FAILURE(rc) || !Hdr.szName[0])
+            break;
+        Hdr.szName[sizeof(Hdr.szName) - 1] = '\0';
+        if (Hdr.cbData > Handle.cb - Handle.off)
+        {
+            rc = Handle.rc = VERR_SSM_INTEGRITY_UNIT;
+            break;
+        }
+
+        PTSTPDMSSMUNIT pUnit = NULL;
+        for (uint32_t i = 0; i < g_Pdm.cSsmUnits && !pUnit; i++)
+            if (   g_Pdm.aSsmUnits[i].uInstance == Hdr.uInstance
+                && !strcmp(g_Pdm.aSsmUnits[i].szName, Hdr.szName))
+                pUnit = &g_Pdm.aSsmUnits[i];
+        if (   !pUnit
+            || !pUnit->pfnLoadExec)
+        {
+            if (!g_Pdm.szLastError[0])
+                RTStrPrintf(g_Pdm.szLastError, sizeof(g_Pdm.szLastError), "Found no handler for unit '%s' instance #%u",
+                            Hdr.szName, Hdr.uInstance);
+            rc = Handle.rc = VERR_SSM_INTEGRITY_UNIT_NOT_FOUND;
+            break;
+        }
+
+        Handle.offUnitEnd = Handle.off + Hdr.cbData;
+        pUnit->fCalled = true;
+        Handle.fExec = true;
+        rc = pUnit->pfnLoadExec(pUnit->pDevIns, &Handle, Hdr.uVersion, SSM_PASS_FINAL);
+        Handle.fExec = false;
+        if (RT_FAILURE(rc) && RT_SUCCESS(Handle.rc))
+            Handle.rc = rc;
+        else
+            rc = Handle.rc;
+        if (RT_SUCCESS(rc) && Handle.off != Handle.offUnitEnd)
+            rc = Handle.rc = VERR_SSM_LOADED_TOO_LITTLE;
+    }
+
+    Handle.rc = rc;
+    for (uint32_t i = 0; i < g_Pdm.cSsmUnits; i++)
+    {
+        PTSTPDMSSMUNIT pUnit = &g_Pdm.aSsmUnits[i];
+        if (   pUnit->pfnLoadDone
+            && (   pUnit->fCalled
+                || (!pUnit->pfnLoadPrep && !pUnit->pfnLoadExec)))
+        {
+            int const rcOld = Handle.rc;
+            int       rc2   = pUnit->pfnLoadDone(pUnit->pDevIns, &Handle);
+            if (RT_SUCCESS(rc2) && Handle.rc != rcOld)
+                rc2 = Handle.rc;
+            if (RT_FAILURE(rc2) && RT_SUCCESS(Handle.rc))
+                Handle.rc = rc2;
+        }
+    }
+    rc = Handle.rc;
+
+    g_Pdm.enmVmState = RT_SUCCESS(rc) ? VMSTATE_SUSPENDED : VMSTATE_LOAD_FAILURE;
+    return rc;
+}
+
+
+/**
+ * Changes an item in a saved state, for trying out states which don't go with
+ * the VM they are loaded into or which make no sense.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if the state has no such unit or the unit no such item.
+ * @retval  VERR_MISMATCH if the item has another size.
+ * @param   pvState             The saved state.
+ * @param   cbState             Its size.
+ * @param   pszUnit             The name of the unit.
+ * @param   uInstance           The instance of the unit.
+ * @param   idxItem             The item, counting what the unit has put from 0.
+ * @param   pvNew               The new value.
+ * @param   cbNew               Its size, which has to be the size of the item.
+ */
+int tstPdmStatePatchItem(void *pvState, size_t cbState, const char *pszUnit, uint32_t uInstance, uint32_t idxItem,
+                         const void *pvNew, size_t cbNew)
+{
+    uint8_t * const pb  = (uint8_t *)pvState;
+    size_t          off = 0;
+    for (;;)
+    {
+        TSTPDMSSMUNITHDR Hdr;
+        if (sizeof(Hdr) > cbState - off)
+            return VERR_NOT_FOUND;
+        memcpy(&Hdr, &pb[off], sizeof(Hdr));
+        off += sizeof(Hdr);
+        Hdr.szName[sizeof(Hdr.szName) - 1] = '\0';
+        if (   !Hdr.szName[0]
+            || Hdr.cbData > cbState - off)
+            return VERR_NOT_FOUND;
+        if (   Hdr.uInstance != uInstance
+            || strcmp(Hdr.szName, pszUnit))
+        {
+            off += Hdr.cbData;
+            continue;
+        }
+
+        size_t const offEnd = off + Hdr.cbData;
+        for (uint32_t i = 0; off < offEnd; i++)
+        {
+            uint8_t const bKind  = pb[off++];
+            size_t        cbItem = 0;
+            switch (bKind)
+            {
+                case TSTPDM_SSM_ITEM_U8:
+                case TSTPDM_SSM_ITEM_BOOL:
+                    cbItem = sizeof(uint8_t);
+                    break;
+                case TSTPDM_SSM_ITEM_U32:
+                case TSTPDM_SSM_ITEM_S32:
+                    cbItem = sizeof(uint32_t);
+                    break;
+                case TSTPDM_SSM_ITEM_U64:
+                    cbItem = sizeof(uint64_t);
+                    break;
+                case TSTPDM_SSM_ITEM_MEM:
+                {
+                    uint32_t cb32 = 0;
+                    AssertReturn(sizeof(cb32) <= offEnd - off, VERR_INTERNAL_ERROR_2);
+                    memcpy(&cb32, &pb[off], sizeof(cb32));
+                    off   += sizeof(cb32);
+                    cbItem = cb32;
+                    break;
+                }
+                default:
+                    AssertFailedReturn(VERR_INTERNAL_ERROR_3);
+            }
+            AssertReturn(cbItem <= offEnd - off, VERR_INTERNAL_ERROR_4);
+            if (i == idxItem)
+            {
+                if (cbItem != cbNew)
+                    return VERR_MISMATCH;
+                memcpy(&pb[off], pvNew, cbNew);
+                return VINF_SUCCESS;
+            }
+            off += cbItem;
+        }
+        return VERR_NOT_FOUND;
+    }
 }
 
 
