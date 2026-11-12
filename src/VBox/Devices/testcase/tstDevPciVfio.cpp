@@ -6305,6 +6305,79 @@ static void tstSuspendResume(void)
 }
 
 
+/**
+ * @callback_method_impl{FNTSTPDMSTATEHOOK,
+ *      Time passes between the preparations for loading a state and loading it.}
+ */
+static DECLCALLBACK(void) tstSlotStateDelayHook(void *pvUser)
+{
+    RT_NOREF(pvUser);
+    RTThreadSleep(250);
+}
+
+
+/**
+ * The host wants the device back, the guest is asked and takes its time, and
+ * before that is over a saved state is loaded.  The device is in the slot again
+ * afterwards.  The host asks again, which it does until it has the device, and
+ * this has to be noticed although the thread watching out for it has seen the
+ * device go meanwhile.
+ */
+static void tstSlotStateHostRequest(void)
+{
+    RTTestISub("Hot-plug slot: a state is loaded while the host waits for the device");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    void  *pvState = NULL;
+    size_t cbState = 0;
+    int rc = tstSlotStateSave(&Model, 1, NULL /*paLayouts*/, false /*fLive*/, &pvState, &cbState);
+    if (RT_SUCCESS(rc))
+    {
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        g_cMsTstGuestRelease = 30 * RT_MS_1SEC;
+        rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_cMsTstGuestRelease = 0;
+        if (RT_SUCCESS(rc))
+        {
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+
+            /* The host wants the device back.  The guest is asked and does nothing about it for now. */
+            tstVfioKrnlDevRequest(pDev);
+            uint64_t const msStart = RTTimeMilliTS();
+            while (   !(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB)
+                   && RTTimeMilliTS() - msStart < RT_MS_5SEC)
+                RTThreadSleep(1);
+            RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB);
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+
+            /* A state is loaded meanwhile, which takes a moment. */
+            tstPdmSuspend();
+            tstPdmSetStateHook(tstSlotStateDelayHook, NULL);
+            RTTESTI_CHECK_RC(rc = tstPdmLoadState(pvState, cbState), VINF_SUCCESS);
+            tstPdmSetStateHook(NULL, NULL);
+            if (RT_SUCCESS(rc))
+            {
+                tstPdmResume();
+                tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+
+                /* The host asks again: the guest is asked again, lets go this time, and the host gets the device. */
+                tstVfioKrnlDevRequest(pDev);
+                RTTESTI_CHECK_MSG(tstSlotGuestLetGoWhenAsked(RT_MS_10SEC), ("the guest was not asked to let go of the device\n"));
+                RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("the host didn't get the device\n"));
+                tstSlotCheckEmpty(__LINE__, pDevInsPort);
+            }
+            RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+        }
+        tstFixtureTeardown();
+    }
+    tstPdmFreeState(pvState);
+}
+
+
 /*
  *
  * Random operations on a VM with a device in a hot-plug capable slot.
@@ -6809,6 +6882,7 @@ int main()
     tstSlotStartEmpty();
     tstSlotSavedState();
     tstSlotSavedStateRefused();
+    tstSlotStateHostRequest();
     tstSlotInterface();
     tstFuzz();
     tstPortFuzz();
