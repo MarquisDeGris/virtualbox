@@ -1460,6 +1460,8 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
   	-Wl,--wrap=open \
   	-Wl,--wrap=open64 \
   	-Wl,--wrap=close \
+  	-Wl,--wrap=dup2 \
+  	-Wl,--wrap=dup3 \
   	-Wl,--wrap=ioctl \
   	-Wl,--wrap=pread \
   	-Wl,--wrap=pread64 \

@@ -139,8 +139,11 @@ typedef struct TSTVFIODEV
     bool                fBound;
     /** Whether the function was handed out by its group (legacy interface). */
     bool                fGroupDevice;
-    /** Whether the function was removed from the host. */
+    /** Whether the function doesn't answer any more. */
     bool                fGone;
+    /** Whether the function was removed from the host for good: once its user has let go of
+     * it, what the user still has mapped of it is no longer usable. */
+    bool                fRemoved;
     /** Whether INTx is masked. */
     bool                fIntxMasked;
 } TSTVFIODEV;
@@ -243,6 +246,8 @@ RT_C_DECLS_BEGIN
 int     __real_open(const char *pszPath, int fFlags, ...);
 int     __real_open64(const char *pszPath, int fFlags, ...);
 int     __real_close(int iFd);
+int     __real_dup2(int iFdOld, int iFdNew);
+int     __real_dup3(int iFdOld, int iFdNew, int fFlags);
 int     __real_ioctl(int iFd, unsigned long uReq, ...);
 ssize_t __real_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __real_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
@@ -255,6 +260,8 @@ void   *__real_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, o
 int     __wrap_open(const char *pszPath, int fFlags, ...);
 int     __wrap_open64(const char *pszPath, int fFlags, ...);
 int     __wrap_close(int iFd);
+int     __wrap_dup2(int iFdOld, int iFdNew);
+int     __wrap_dup3(int iFdOld, int iFdNew, int fFlags);
 int     __wrap_ioctl(int iFd, unsigned long uReq, ...);
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
@@ -384,6 +391,10 @@ static void tstVfioKrnlDevRelease(PTSTVFIODEV pDev)
     pDev->fBound       = false;
     pDev->fGroupDevice = false;
     pDev->idIoas       = 0;
+    if (pDev->fRemoved)
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+            if (g_Krnl.aMaps[i].pv && g_Krnl.aMaps[i].pDev == pDev)
+                mprotect(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb, PROT_NONE);
     pDev->fIntxMasked = false;
 }
 
@@ -1392,6 +1403,57 @@ void tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone)
 
 
 /**
+ * Signals one of the notifications of a PCI function to its user.
+ *
+ * @param   pDev                The PCI function.
+ * @param   uIrqIndex           VFIO_PCI_REQ_IRQ_INDEX or VFIO_PCI_ERR_IRQ_INDEX.
+ */
+static void tstVfioKrnlDevNotify(PTSTVFIODEV pDev, uint32_t uIrqIndex)
+{
+    if (   pDev->apaiIrqFds[uIrqIndex]
+        && pDev->apaiIrqFds[uIrqIndex][0] != -1)
+    {
+        uint64_t const uOne      = 1;
+        ssize_t const  cbWritten = write(pDev->apaiIrqFds[uIrqIndex][0], &uOne, sizeof(uOne));
+        RT_NOREF(cbWritten);
+    }
+}
+
+
+/**
+ * Removes a PCI function from the host for good, like pulling the plug: it
+ * stops answering, its user is asked to let go of it, and once that has
+ * happened what the user still has mapped of it is unusable.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevRemove(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    pDev->fGone    = true;
+    pDev->fRemoved = true;
+    if (!pDev->cOpens) /* Nobody to ask. */
+        tstVfioKrnlDevRelease(pDev);
+    else
+        tstVfioKrnlDevNotify(pDev, VFIO_PCI_REQ_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Reports an error of a PCI function which the host can't recover from to its user.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevSignalError(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    tstVfioKrnlDevNotify(pDev, VFIO_PCI_ERR_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
  * Returns the number of file descriptors of the fake kernel which are open.
  *
  * @returns Number of open file descriptors.
@@ -1568,7 +1630,13 @@ int __wrap_open64(const char *pszPath, int fFlags, ...)
 }
 
 
-int __wrap_close(int iFd)
+/**
+ * Forgets about a file descriptor which gets closed or replaced by something
+ * else, releasing what it stands for.
+ *
+ * @param   iFd                 The file descriptor.
+ */
+static void tstVfioKrnlFdForget(int iFd)
 {
     if (g_Krnl.fInitialized)
     {
@@ -1608,7 +1676,30 @@ int __wrap_close(int iFd)
         }
         RTCritSectLeave(&g_Krnl.CritSect);
     }
+}
+
+
+int __wrap_close(int iFd)
+{
+    tstVfioKrnlFdForget(iFd);
     return __real_close(iFd);
+}
+
+
+int __wrap_dup2(int iFdOld, int iFdNew)
+{
+    /* What the new file descriptor number stood for is closed by this. */
+    if (iFdOld != iFdNew)
+        tstVfioKrnlFdForget(iFdNew);
+    return __real_dup2(iFdOld, iFdNew);
+}
+
+
+int __wrap_dup3(int iFdOld, int iFdNew, int fFlags)
+{
+    if (iFdOld != iFdNew)
+        tstVfioKrnlFdForget(iFdNew);
+    return __real_dup3(iFdOld, iFdNew, fFlags);
 }
 
 
@@ -1790,6 +1881,12 @@ static void *tstVfioKrnlMmapRecord(int iFd, void *pv, size_t cb)
     if (pv != MAP_FAILED && g_Krnl.fInitialized)
     {
         RTCritSectEnter(&g_Krnl.CritSect);
+        /* Whatever was mapped there before is gone. */
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+            if (   g_Krnl.aMaps[i].pv
+                && (uintptr_t)g_Krnl.aMaps[i].pv >= (uintptr_t)pv
+                && (uintptr_t)g_Krnl.aMaps[i].pv + g_Krnl.aMaps[i].cb <= (uintptr_t)pv + cb)
+                RT_ZERO(g_Krnl.aMaps[i]);
         PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
         if (pFd && pFd->enmType == TSTVFIOFDTYPE_DEVICE)
             for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
