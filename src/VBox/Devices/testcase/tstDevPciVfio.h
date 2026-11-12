@@ -123,6 +123,15 @@ typedef DECLCALLBACKTYPE(void, FNTSTVFIOCFGWRITE,(PTSTVFIODEV pDev, uint32_t off
 /** Pointer to a config space write callback. */
 typedef FNTSTVFIOCFGWRITE *PFNTSTVFIOCFGWRITE;
 
+/**
+ * Callback before ordinary memory gets mapped at a given address.
+ *
+ * @param   pvUser              The user argument.
+ */
+typedef DECLCALLBACKTYPE(void, FNTSTVFIOMMAPHOOK,(void *pvUser));
+/** Pointer to a callback before ordinary memory gets mapped at a given address. */
+typedef FNTSTVFIOMMAPHOOK *PFNTSTVFIOMMAPHOOK;
+
 int         tstVfioKrnlInit(void);
 void        tstVfioKrnlTerm(void);
 void        tstVfioKrnlSetLegacy(bool fLegacy);
@@ -146,6 +155,8 @@ uint32_t    tstVfioKrnlGetViolationCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
+void        tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes);
+void        tstVfioKrnlSetPlaceholderMmapHook(PFNTSTVFIOMMAPHOOK pfnHook, void *pvUser);
 /** @} */
 
 
@@ -185,6 +196,15 @@ typedef struct TSTPDMMSI
 /** Pointer to a message signalled interrupt record. */
 typedef TSTPDMMSI *PTSTPDMMSI;
 
+/**
+ * Callback between the preparations for saving or loading a state and doing it.
+ *
+ * @param   pvUser              The user argument.
+ */
+typedef DECLCALLBACKTYPE(void, FNTSTPDMSTATEHOOK,(void *pvUser));
+/** Pointer to a callback between the preparations for saving or loading a state and doing it. */
+typedef FNTSTPDMSTATEHOOK *PFNTSTPDMSTATEHOOK;
+
 int             tstPdmInit(uint32_t cbRam);
 void            tstPdmTerm(void);
 int             tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PPDMDEVINS *ppDevIns);
@@ -192,6 +212,8 @@ void            tstPdmSetExecutionEngine(uint8_t bExecEngine);
 int             tstPdmInitComplete(void);
 void            tstPdmPowerOn(void);
 void            tstPdmPowerOff(void);
+void            tstPdmSuspend(void);
+void            tstPdmResume(void);
 void            tstPdmReset(void);
 void            tstPdmProcessRequests(void);
 uint32_t        tstPdmGetRequestCount(void);
@@ -209,6 +231,13 @@ const char     *tstPdmGetLastRuntimeErrorId(void);
 int             tstPdmSaveStatePrep(bool fLive);
 int             tstPdmLoadStatePrep(void);
 int             tstPdmLoadStateDone(int rcLoad);
+void            tstPdmSetStateHook(PFNTSTPDMSTATEHOOK pfnHook, void *pvUser);
+int             tstPdmSaveState(bool fLive, void **ppvState, size_t *pcbState);
+void            tstPdmFreeState(void *pvState);
+int             tstPdmLoadState(const void *pvState, size_t cbState);
+int             tstPdmStateDropUnit(void *pvState, size_t *pcbState, const char *pszUnit, uint32_t uInstance);
+int             tstPdmStatePatchItem(void *pvState, size_t cbState, const char *pszUnit, uint32_t uInstance, uint32_t idxItem,
+                                     size_t offItem, const void *pvNew, size_t cbNew);
 uint32_t        tstPdmMsiGetCount(void);
 bool            tstPdmMsiWait(uint32_t cExpected, RTMSINTERVAL cMsTimeout);
 bool            tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi);
