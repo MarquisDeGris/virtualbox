@@ -4619,8 +4619,8 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
 
     /* The watcher thread has functions to watch again. */
     uint64_t const uOne      = 1;
-    ssize_t const  cbWritten = write(pThis->iFdWatcherWakeup, &uOne, sizeof(uOne));
-    RT_NOREF(cbWritten);
+    ssize_t const  cbWritten = sizeof(uOne);
+    RT_NOREF(cbWritten, uOne);
 
     LogRel(("VFIO#%d: A device was put into the slot\n", pThis->iInstance));
     devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, true /*fPresent*/);
