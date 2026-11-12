@@ -74,8 +74,10 @@ typedef struct DEVPCIBUS
     DEVPCIBUSTYPE           enmType;
     /** Set if this is a pure bridge, i.e. not part of DEVPCIGLOBALS struct. */
     uint32_t                fPureBridge : 1;
+    /** Set if this is a PCI express port with a hot-plug capable slot, see DEVPCIHPSLOT. */
+    uint32_t                fHotPlugSlot : 1;
     /** Reserved for future config flags. */
-    uint32_t                uReservedConfigFlags : 31;
+    uint32_t                uReservedConfigFlags : 30;
 
     /** Array of bridges attached to the bus. */
     R3PTRTYPE(PPDMPCIDEV *) papBridgesR3;
@@ -90,6 +92,55 @@ AssertCompileMemberAlignment(DEVPCIBUS, apDevices, 64);
 
 
 /**
+ * Callback of the device in a hot-plug capable slot, called when the link
+ * between the port and the slot changes its state.
+ *
+ * The link is up while there is a device in the slot, the guest has the power
+ * of the slot switched on and has not disabled the link.  The guest can't reach
+ * the device while the link is down, and it expects a device coming back from
+ * that to be in the state it has after a reset.
+ *
+ * @param   pDevIns     The device instance which registered the callback.
+ * @param   fLinkUp     The new state of the link.
+ *
+ * @remarks Called with the PCI lock held: on an EMT if the guest is the cause,
+ *          on the thread which resets the VM or loads a saved state, and from
+ *          within devpciR3HotPlugSlotSetPresence() on the thread calling it.
+ */
+typedef DECLCALLBACKTYPE(void, FNDEVPCIHPSLOTLINK,(PPDMDEVINS pDevIns, bool fLinkUp));
+/** Pointer to a FNDEVPCIHPSLOTLINK callback. */
+typedef FNDEVPCIHPSLOTLINK *PFNDEVPCIHPSLOTLINK;
+
+/**
+ * The hot-plug capable slot of a PCI express port, ring-3 only.
+ *
+ * What the guest gets to see of the slot is kept in the PCI express capability
+ * of the port and with that part of the saved state of the bus the port is on.
+ */
+typedef struct DEVPCIHPSLOT
+{
+    /** The device instance taking care of what is in the slot, NULL if nobody registered. */
+    PPDMDEVINSR3            pDevInsClient;
+    /** Called when the state of the link changes, optional. */
+    R3PTRTYPE(PFNDEVPCIHPSLOTLINK) pfnLinkChanged;
+    /** Whether there is a device in the slot. */
+    bool                    fPresent;
+    /** Whether the link to the device in the slot is up. */
+    bool                    fLinkUp;
+    /** Whether the condition for the interrupt of the port was fulfilled when it was looked at last. */
+    bool                    fIrqRaised;
+    /** Whether the VM construction is complete, from where on the guest can be told about changes. */
+    bool                    fInitComplete;
+    /** Alignment padding. */
+    bool                    afPadding[4];
+    /** The config space as the constructor left it, for telling whether a saved state fits. */
+    uint8_t                 abCfgInit[256];
+} DEVPCIHPSLOT;
+/** Pointer to a hot-plug capable slot. */
+typedef DEVPCIHPSLOT *PDEVPCIHPSLOT;
+
+
+/**
  * PCI bus ring-3 instance data (common to both PCI buses).
  */
 typedef struct DEVPCIBUSR3
@@ -98,6 +149,8 @@ typedef struct DEVPCIBUSR3
     PPDMDEVINSR3            pDevInsR3;
     /** Pointer to the PCI R3  helpers. */
     PCPDMPCIHLPR3           pPciHlpR3;
+    /** The hot-plug capable slot, only used if DEVPCIBUS::fHotPlugSlot is set. */
+    DEVPCIHPSLOT            HotPlugSlot;
 } DEVPCIBUSR3;
 /** Pointer to PCI bus ring-3 instance data. */
 typedef DEVPCIBUSR3 *PDEVPCIBUSR3;
@@ -291,6 +344,12 @@ void devpciR3BiosInitSetRegionAddress(PPDMDEVINS pDevIns, PDEVPCIBUS pBus, PPDMP
 uint32_t devpciR3GetCfg(PPDMPCIDEV pPciDev, int32_t iRegister, int cb);
 void devpciR3SetCfg(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, int32_t iRegister, uint32_t u32, int cb);
 DECLHIDDEN(void) devpciR3CommonResetBridge(PPDMDEVINS pDevIns);
+DECLHIDDEN(PPDMDEVINS) devpciR3HotPlugSlotFind(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev);
+DECLHIDDEN(int)  devpciR3HotPlugSlotRegisterClient(PPDMDEVINS pDevInsPort, PPDMDEVINS pDevInsClient,
+                                                   PFNDEVPCIHPSLOTLINK pfnLinkChanged, bool fPresent);
+DECLHIDDEN(void) devpciR3HotPlugSlotSetPresence(PPDMDEVINS pDevInsPort, bool fPresent);
+DECLHIDDEN(void) devpciR3HotPlugSlotPressAttentionButton(PPDMDEVINS pDevInsPort);
+DECLHIDDEN(bool) devpciR3HotPlugSlotIsLinkUp(PPDMDEVINS pDevInsPort);
 DECL_HIDDEN_CALLBACK(int) devpciR3CommonSaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM);
 DECL_HIDDEN_CALLBACK(int) devpciR3CommonLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t uPass);
 
