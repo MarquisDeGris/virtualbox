@@ -265,6 +265,8 @@ int     __wrap_dup3(int iFdOld, int iFdNew, int fFlags);
 int     __wrap_ioctl(int iFd, unsigned long uReq, ...);
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __wrap___pread_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax);
+ssize_t __wrap___pread64_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax);
 ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
 ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
 void   *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
@@ -1813,6 +1815,25 @@ ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off)
     if (iErrno)
         return errno = iErrno, -1;
     return __real_pread64(iFd, pvBuf, cbBuf, off);
+}
+
+
+/*
+ * The C library has variants of pread which check the size of the buffer.  The
+ * compiler picks them where it knows the size of the buffer at run time only,
+ * which depends on the compiler options and is what happens with sanitizers.
+ */
+ssize_t __wrap___pread_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax)
+{
+    AssertRelease(cbBuf <= cbBufMax);
+    return __wrap_pread(iFd, pvBuf, cbBuf, off);
+}
+
+
+ssize_t __wrap___pread64_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax)
+{
+    AssertRelease(cbBuf <= cbBufMax);
+    return __wrap_pread64(iFd, pvBuf, cbBuf, off);
 }
 
 
