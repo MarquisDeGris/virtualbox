@@ -3388,6 +3388,154 @@ static DECLCALLBACK(void) tstPortLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
 static uint32_t g_cMsTstGuestRelease = 0;
 
 
+/**
+ * Gets the interface the passthrough device has for whoever manages the VM,
+ * the way that one gets it.
+ *
+ * @returns The interface, NULL if the device has none (test failure reported).
+ * @param   pDevIns             The device instance of the passthrough device.
+ */
+static PPDMIPCIPASSTHROUGHPORT tstDevGetPort(PPDMDEVINS pDevIns)
+{
+    PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+    if (pDevIns->IBase.pfnQueryInterface)
+        pPort = PDMIBASE_QUERY_INTERFACE(&pDevIns->IBase, PDMIPCIPASSTHROUGHPORT);
+    if (!pPort)
+        RTTestIFailed("the passthrough device has no interface for the management\n");
+    return pPort;
+}
+
+
+/** Takes the device out of its slot the way the management does it. */
+static int tstDevSlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bool fForce)
+{
+    PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(pDevIns);
+    return pPort ? pPort->pfnDetach(pPort, cMsWait, fForce) : VERR_PDM_MISSING_INTERFACE;
+}
+
+
+/** Puts the device into its slot the way the management does it. */
+static int tstDevSlotAttach(PPDMDEVINS pDevIns)
+{
+    PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(pDevIns);
+    return pPort ? pPort->pfnAttach(pPort) : VERR_PDM_MISSING_INTERFACE;
+}
+
+
+/**
+ * The values of a layout as the interface for the management tells them.
+ */
+typedef struct TSTLAYOUTVALUES
+{
+    /** Number of values. */
+    uint32_t            cValues;
+    /** Number of values the interface was to tell before the caller had enough, 0 for all. */
+    uint32_t            cStopAt;
+    /** The values. */
+    struct
+    {
+        /** The name. */
+        char            szName[32];
+        /** The value. */
+        uint64_t        u64Value;
+    }                   aValues[64];
+} TSTLAYOUTVALUES;
+
+
+/**
+ * @callback_method_impl{FNPDMPCIPASSTHROUGHLAYOUTVALUE, Takes note of a value of a layout.}
+ */
+static DECLCALLBACK(int) tstDevLayoutValue(void *pvUser, const char *pszName, uint64_t u64Value)
+{
+    TSTLAYOUTVALUES *pValues = (TSTLAYOUTVALUES *)pvUser;
+    if (pValues->cValues >= RT_ELEMENTS(pValues->aValues))
+        return VERR_BUFFER_OVERFLOW;
+    RTStrCopy(pValues->aValues[pValues->cValues].szName, sizeof(pValues->aValues[0].szName), pszName);
+    pValues->aValues[pValues->cValues].u64Value = u64Value;
+    pValues->cValues++;
+    return pValues->cValues == pValues->cStopAt ? VERR_CANCELLED : VINF_SUCCESS;
+}
+
+
+/**
+ * Looks up a value of a layout.
+ *
+ * @returns The value, the default if the layout has no value by that name.
+ * @param   pValues             The values.
+ * @param   pszName             The name.
+ * @param   u64Default          The default.
+ * @param   pcFound             Counts the values which were found.
+ */
+static uint64_t tstLayoutValueGet(TSTLAYOUTVALUES const *pValues, const char *pszName, uint64_t u64Default, uint32_t *pcFound)
+{
+    for (uint32_t i = 0; i < pValues->cValues; i++)
+        if (!strcmp(pValues->aValues[i].szName, pszName))
+        {
+            *pcFound += 1;
+            return pValues->aValues[i].u64Value;
+        }
+    return u64Default;
+}
+
+
+/**
+ * Queries the layout of a function the way the management does it, and puts
+ * the values where they belong in the structure the device and the tests work
+ * with.  What is not told has the value the device takes for it if the
+ * configuration doesn't have it.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns             The device instance of the passthrough device.
+ * @param   iFun                The function.
+ * @param   pLayout             Where to return the layout.
+ */
+static int tstDevQueryLayout(PPDMDEVINS pDevIns, uint32_t iFun, PPCIVFIOFUNLAYOUT pLayout)
+{
+    RT_ZERO(*pLayout);
+    PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(pDevIns);
+    if (!pPort)
+        return VERR_PDM_MISSING_INTERFACE;
+    static TSTLAYOUTVALUES s_Values; /* Too big for the stack next to the device models. */
+    RT_ZERO(s_Values);
+    int rc = pPort->pfnQueryLayout(pPort, iFun, tstDevLayoutValue, &s_Values);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    uint32_t cFound = 0;
+    pLayout->cbPciCfg = (uint32_t)tstLayoutValueGet(&s_Values, "ConfigSpaceSize", 256, &cFound);
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars); iBar++)
+    {
+        char szName[32];
+        RTStrPrintf(szName, sizeof(szName), "Bar%uSize", iBar);
+        pLayout->aBars[iBar].cb            = tstLayoutValueGet(&s_Values, szName, 0, &cFound);
+        RTStrPrintf(szName, sizeof(szName), "Bar%uIoPorts", iBar);
+        pLayout->aBars[iBar].fIoPorts      = tstLayoutValueGet(&s_Values, szName, 0, &cFound) != 0;
+        RTStrPrintf(szName, sizeof(szName), "Bar%u64Bit", iBar);
+        pLayout->aBars[iBar].f64Bit        = tstLayoutValueGet(&s_Values, szName, 0, &cFound) != 0;
+        RTStrPrintf(szName, sizeof(szName), "Bar%uPrefetchable", iBar);
+        pLayout->aBars[iBar].fPrefetchable = tstLayoutValueGet(&s_Values, szName, 0, &cFound) != 0;
+        RTStrPrintf(szName, sizeof(szName), "Bar%uMappable", iBar);
+        pLayout->aBars[iBar].fMappable     = tstLayoutValueGet(&s_Values, szName, 0, &cFound) != 0;
+    }
+    pLayout->cbRom           = tstLayoutValueGet(&s_Values, "RomSize", 0, &cFound);
+    pLayout->fVga            = tstLayoutValueGet(&s_Values, "Vga", 0, &cFound) != 0;
+    pLayout->fMsix           = tstLayoutValueGet(&s_Values, "Msix", 0, &cFound) != 0;
+    pLayout->iBarMsix        = (uint8_t)tstLayoutValueGet(&s_Values, "MsixBar", UINT8_MAX, &cFound);
+    pLayout->acIrqVectors[0] = (uint32_t)tstLayoutValueGet(&s_Values, "IntxVectors", 0, &cFound);
+    pLayout->acIrqVectors[1] = (uint32_t)tstLayoutValueGet(&s_Values, "MsiVectors", 0, &cFound);
+    pLayout->acIrqVectors[2] = (uint32_t)tstLayoutValueGet(&s_Values, "MsixVectors", 0, &cFound);
+    pLayout->offMsixTbl      = (uint32_t)tstLayoutValueGet(&s_Values, "MsixTableOffset", 0, &cFound);
+    pLayout->offMsixPba      = (uint32_t)tstLayoutValueGet(&s_Values, "MsixPbaOffset", 0, &cFound);
+    if (cFound != s_Values.cValues)
+        RTTestIFailed("the layout of function %u has %u value(s), %u of them under names which are known\n",
+                      iFun, s_Values.cValues, cFound);
+    return VINF_SUCCESS;
+}
+
+
+/** The values tstPortFixtureSetupEx() puts into the configuration of function 0 as its layout just as
+ * they are, NULL for none.  This is what the management does with what the interface tells it. */
+static TSTLAYOUTVALUES const *g_pTstLayoutValues = NULL;
 /** The layouts tstPortFixtureSetupEx() puts into the configuration of the functions, NULL for none. */
 static PCPCIVFIOFUNLAYOUT g_paTstLayouts = NULL;
 /** The functions which are not there when tstPortFixtureSetupEx() creates the VM, a bit for each. */
@@ -3524,6 +3672,13 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
             RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", paModels[i].szNode), VINF_SUCCESS);
             if (g_paTstLayouts)
                 tstCfgAddLayout(pCfgFun, &g_paTstLayouts[i]);
+            else if (g_pTstLayoutValues && i == 0)
+            {
+                PCFGMNODE pCfgLayout = tstCfgNodeCreate(pCfgFun, "Layout");
+                for (uint32_t iValue = 0; iValue < g_pTstLayoutValues->cValues; iValue++)
+                    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgLayout, g_pTstLayoutValues->aValues[iValue].szName,
+                                                      g_pTstLayoutValues->aValues[iValue].u64Value), VINF_SUCCESS);
+            }
         }
         rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, ppDevInsDev);
     }
@@ -4555,7 +4710,7 @@ static DECLCALLBACK(int) tstSlotDetachThread(RTTHREAD hThreadSelf, void *pvUser)
 {
     TSTSLOTDETACH *pArgs = (TSTSLOTDETACH *)pvUser;
     RT_NOREF(hThreadSelf);
-    pArgs->rc = pciVfioR3SlotDetach(pArgs->pDevIns, pArgs->cMsWait, pArgs->fForce);
+    pArgs->rc = tstDevSlotDetach(pArgs->pDevIns, pArgs->cMsWait, pArgs->fForce);
     return VINF_SUCCESS;
 }
 
@@ -4579,8 +4734,8 @@ static void tstSlotDetach(void)
     if (RT_SUCCESS(rc))
     {
         tstPdmPowerOn();
-        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(g_pTstDevInsVfio, 0 /*cMsWait*/, true /*fForce*/), VERR_NOT_SUPPORTED);
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(g_pTstDevInsVfio), VERR_NOT_SUPPORTED);
+        RTTESTI_CHECK_RC(tstDevSlotDetach(g_pTstDevInsVfio, 0 /*cMsWait*/, true /*fForce*/), VERR_NOT_SUPPORTED);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(g_pTstDevInsVfio), VERR_NOT_SUPPORTED);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
         RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
     }
@@ -4624,7 +4779,7 @@ static void tstSlotDetach(void)
 
                 case 1:
                     /* The guest doesn't react: the device stays. */
-                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 200 /*cMsWait*/, false /*fForce*/), VERR_TIMEOUT);
+                    RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 200 /*cMsWait*/, false /*fForce*/), VERR_TIMEOUT);
                     RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB);
                     RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
                     RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
@@ -4632,12 +4787,12 @@ static void tstSlotDetach(void)
                     /* Once more right away: the button isn't pressed again, the guest would take that
                        for the request being taken back. */
                     tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
-                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 50 /*cMsWait*/, false /*fForce*/), VERR_TIMEOUT);
+                    RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 50 /*cMsWait*/, false /*fForce*/), VERR_TIMEOUT);
                     RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB));
                     RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
 
                     /* The one who asks insists: the device goes. */
-                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 50 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 50 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
                     RTTESTI_CHECK(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore);
                     break;
 
@@ -4645,14 +4800,14 @@ static void tstSlotDetach(void)
                     /* The guest has the slot switched off: nobody to ask. */
                     tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
                     tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
-                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
                     RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB));
                     break;
 
                 default:
                     /* Detached the hard way, and detached once more. */
-                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
-                    RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                    RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
                     break;
             }
 
@@ -4843,7 +4998,7 @@ static void tstSlotAttach(void)
             uint64_t const cbDmaMapped  = tstVfioKrnlGetDmaMappedBytes();
 
             /* There is a device in the slot. */
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_ALREADY_EXISTS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_ALREADY_EXISTS);
             RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
 
             for (unsigned iRound = 0; iRound < 3; iRound++)
@@ -4851,7 +5006,7 @@ static void tstSlotAttach(void)
                 /* Out: from under the guest in the first round, with the slot switched off afterwards. */
                 if (iRound > 0)
                     tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
-                RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
                 RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u, round %u\n", iVariant, iRound));
                 RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbDmaMapped,
                                   ("variant %u, round %u: %RU64 bytes mapped for DMA\n", iVariant, iRound, tstVfioKrnlGetDmaMappedBytes()));
@@ -4868,7 +5023,7 @@ static void tstSlotAttach(void)
                 if (iRound == 1)
                 {
                     tstVfioKrnlDevSetGone(pDev, true);
-                    rc = pciVfioR3SlotAttach(pDevInsDev);
+                    rc = tstDevSlotAttach(pDevInsDev);
                     RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("variant %u: %Rrc\n", iVariant, rc));
                     RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u\n", iVariant));
                     RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
@@ -4876,7 +5031,7 @@ static void tstSlotAttach(void)
                 }
 
                 /* In. */
-                RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+                RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
                 RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied,
                                   ("variant %u, round %u: %u file descriptors open, were %u\n", iVariant, iRound,
                                    tstVfioKrnlGetOpenFdCount(), cFdsOccupied));
@@ -4888,7 +5043,7 @@ static void tstSlotAttach(void)
             /*
              * Another kind of device where this one was: refused, and nothing is left behind.
              */
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
             for (unsigned iKind = 0; iKind < 3; iKind++)
             {
@@ -4901,14 +5056,14 @@ static void tstSlotAttach(void)
                 else
                     s_Other.acIrqs[VFIO_PCI_MSI_IRQ_INDEX] = 1;                             /* Fewer interrupts. */
                 RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Other), VINF_SUCCESS);
-                rc = pciVfioR3SlotAttach(pDevInsDev);
+                rc = tstDevSlotAttach(pDevInsDev);
                 RTTESTI_CHECK_MSG(rc == VERR_MISMATCH, ("variant %u, kind %u: %Rrc\n", iVariant, iKind, rc));
                 RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u, kind %u\n", iVariant, iKind));
                 RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & (VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD)),
                                   ("variant %u, kind %u\n", iVariant, iKind));
             }
             RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &Model), VINF_SUCCESS);
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
 
             /*
@@ -4919,7 +5074,7 @@ static void tstSlotAttach(void)
             RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
             RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &Model), VINF_SUCCESS);
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
             tstSlotCheckMsi(__LINE__, pDev);
             RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied, ("variant %u\n", iVariant));
@@ -4956,16 +5111,16 @@ static void tstSlotAttach(void)
         int rc = tstSlotFixtureSetup(&s_ModelMsix, 1, &pDev, &pDevInsPort, &pDevInsDev);
         if (RT_SUCCESS(rc))
         {
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
 
             RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_OtherMsix), VINF_SUCCESS);
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_MISMATCH);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_MISMATCH);
             RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
             RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
 
             RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_ModelMsix), VINF_SUCCESS);
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
             RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
         }
@@ -4990,20 +5145,20 @@ static void tstSlotAttach(void)
     int rc = tstSlotFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, &pDevInsPort, &pDevInsDev);
     if (RT_SUCCESS(rc))
     {
-        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 0);
         tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
 
         /* The second function isn't there: neither is put in. */
         tstVfioKrnlDevSetGone(apDevs[1], true);
-        rc = pciVfioR3SlotAttach(pDevInsDev);
+        rc = tstDevSlotAttach(pDevInsDev);
         RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("%Rrc\n", rc));
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 0);
         RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
         tstVfioKrnlDevSetGone(apDevs[1], false);
 
         /* Both are there: both are put in. */
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[1]) == 1);
         tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, apDevs[0]);
         RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
@@ -5048,9 +5203,9 @@ static void tstSlotStartEmpty(void)
         int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
         if (RT_SUCCESS(rc))
         {
-            RTTESTI_CHECK_RC(pciVfioR3QueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevQueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
             PCIVFIOFUNLAYOUT Layout1;
-            RTTESTI_CHECK_RC(pciVfioR3QueryLayout(pDevInsDev, 1, &Layout1), VERR_NOT_FOUND);
+            RTTESTI_CHECK_RC(tstDevQueryLayout(pDevInsDev, 1, &Layout1), VERR_NOT_FOUND);
             RTTESTI_CHECK_MSG(Layout.cbPciCfg == s_Model.cbCfg, ("variant %u: %u\n", iVariant, Layout.cbPciCfg));
             RTTESTI_CHECK_MSG(   Layout.aBars[0].cb == TST_BAR0_SIZE
                               && !Layout.aBars[0].fIoPorts
@@ -5091,20 +5246,20 @@ static void tstSlotStartEmpty(void)
             uint32_t const cFdsEmpty = tstVfioKrnlGetOpenFdCount();
 
             /* Nothing to take out, a reset of the VM changes nothing, and the device still isn't there. */
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
             tstPdmReset();
             tstPortGuestSetBusNumbers();
             tstPortGuestEnableMsi();
             tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
             RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
-            rc = pciVfioR3SlotAttach(pDevInsDev);
+            rc = tstDevSlotAttach(pDevInsDev);
             RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("variant %u: %Rrc\n", iVariant, rc));
             RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsEmpty, ("variant %u\n", iVariant));
 
             /* It gets plugged in and put into the slot: the guest finds and uses it. */
             tstVfioKrnlDevSetGone(pDev, false);
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
             if (iVariant == 0)
                 tstSlotCheckMsi(__LINE__, pDev);
@@ -5139,10 +5294,10 @@ static void tstSlotStartEmpty(void)
             }
 
             /* Out and in once more. */
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
             RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsEmpty, ("variant %u\n", iVariant));
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
 
             RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
@@ -5229,11 +5384,11 @@ static void tstSlotStartEmpty(void)
     if (RT_SUCCESS(rc))
     {
         RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Other), VINF_SUCCESS);
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_MISMATCH);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_MISMATCH);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
         RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
         RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
     }
     tstFixtureTeardown();
@@ -5292,7 +5447,7 @@ static DECLCALLBACK(void) tstSlotStateHook(void *pvUser)
     RT_NOREF(pvUser);
     g_TstSlotStateHook.cCalls++;
     g_TstSlotStateHook.cOpen    = tstVfioKrnlDevGetOpenCount(g_TstSlotStateHook.pDev);
-    g_TstSlotStateHook.rcAttach = pciVfioR3SlotAttach(g_TstSlotStateHook.pDevInsDev);
+    g_TstSlotStateHook.rcAttach = tstDevSlotAttach(g_TstSlotStateHook.pDevInsDev);
 }
 
 
@@ -5451,7 +5606,7 @@ static int tstSlotStateSave(PCTSTVFIODEVCFG paModels, uint32_t cModels, PCPCIVFI
             /* What is left for an EMT to do about the device stays undone until the state is saved. */
             tstSlotGuestEnableDevice();
             RTTESTI_CHECK(tstSlotGuestReachesDevice(apDevs[0]));
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         }
 
         tstSlotStateHookArm(pDevInsDev, apDevs[0]);
@@ -5535,7 +5690,7 @@ static void tstSlotStateLoadAndCheck(unsigned uLine, PCTSTVFIODEVCFG paModels, u
                 /* The device gets plugged in and put into the slot. */
                 for (uint32_t i = 0; i < cModels; i++)
                     tstVfioKrnlDevSetGone(apDevs[i], false);
-                rc = pciVfioR3SlotAttach(pDevInsDev);
+                rc = tstDevSlotAttach(pDevInsDev);
                 if (RT_FAILURE(rc))
                     RTTestIFailed("line %u: putting the device into the slot failed with %Rrc\n", uLine, rc);
             }
@@ -5614,7 +5769,7 @@ static void tstSlotSavedState(void)
         int rc = tstSlotFixtureSetup(s_aModels, cModels, apDevs, &pDevInsPort, &pDevInsDev);
         if (RT_SUCCESS(rc))
             for (uint32_t i = 0; i < cModels; i++)
-                RTTESTI_CHECK_RC(rc = pciVfioR3QueryLayout(pDevInsDev, i, &aLayouts[i]), VINF_SUCCESS);
+                RTTESTI_CHECK_RC(rc = tstDevQueryLayout(pDevInsDev, i, &aLayouts[i]), VINF_SUCCESS);
         tstFixtureTeardown();
 
         /* Saved by a VM which was started with the device or without, loaded by one of each kind. */
@@ -5692,14 +5847,14 @@ static void tstSlotSavedStateRefused(void)
          * which doesn't keep a device from being put in: the guest finds it when it
          * runs again.
          */
-        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         tstSlotCheckEmpty(__LINE__, pDevInsPort);
         tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
         tstSlotStateHookArm(pDevInsDev, pDev);
         RTTESTI_CHECK_RC(rc = tstPdmSaveState(false /*fLive*/, &pvState, &cbState), VINF_SUCCESS);
         tstSlotStateHookCheck(__LINE__);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         tstPdmResume();
         tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
         tstSlotCheckMsi(__LINE__, pDev);
@@ -5720,16 +5875,16 @@ static void tstSlotSavedStateRefused(void)
     RT_ZERO(Layout);
     rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
     if (RT_SUCCESS(rc))
-        RTTESTI_CHECK_RC(pciVfioR3QueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevQueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
     tstFixtureTeardown();
     rc = tstSlotStateFixtureSetup(&Model, 1, &Layout, &pDev, &pDevInsPort, &pDevInsDev);
     if (RT_SUCCESS(rc))
     {
         tstVfioKrnlDevSetGone(pDev, false);
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VERR_VM_INVALID_VM_STATE);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_VM_INVALID_VM_STATE);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
         tstPdmPowerOn();
-        RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
     }
     tstFixtureTeardown();
@@ -5747,7 +5902,7 @@ static void tstSlotSavedStateRefused(void)
         g_TstSlotStateLetGo.hThread = NIL_RTTHREAD;
         g_TstSlotStateLetGo.rc      = VERR_IPE_UNINITIALIZED_STATUS;
         tstVfioKrnlSetPlaceholderMmapHook(tstSlotStateLetGoHook, NULL);
-        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         tstVfioKrnlSetPlaceholderMmapHook(NULL, NULL);
         RTTESTI_CHECK(g_TstSlotStateLetGo.hThread != NIL_RTTHREAD);
         if (g_TstSlotStateLetGo.hThread != NIL_RTTHREAD)
@@ -5778,7 +5933,7 @@ static void tstSlotSavedStateRefused(void)
             tstSlotGuestEnableDevice();
             RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("round %u\n", iRound));
             tstVfioKrnlFailPlaceholderMmap(1);
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
             tstVfioKrnlFailPlaceholderMmap(0);
             tstSlotCheckEmpty(__LINE__, pDevInsPort);
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
@@ -5792,16 +5947,16 @@ static void tstSlotSavedStateRefused(void)
             tstPdmFreeState(pvState2);
             tstPdmResume();
 
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
-            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
             tstSlotCheckEmpty(__LINE__, pDevInsPort);
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
             RTTESTI_CHECK_RC(tstPdmSaveState(false /*fLive*/, &pvState2, &cbState2), VINF_SUCCESS);
             tstPdmFreeState(pvState2);
             tstPdmResume();
 
-            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
             tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
         }
 
@@ -5940,6 +6095,151 @@ static void tstSlotSavedStateRefused(void)
 }
 
 
+/**
+ * Asks the passthrough device how things are with it and checks the answer.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   pPort               The interface for the management.
+ * @param   fHotPlugExpected    Whether the device is in a hot-plug capable slot.
+ * @param   fPresentExpected    Whether the PCI device of the host is in the VM.
+ * @param   fInUseExpected      Whether the guest can reach it.
+ */
+static void tstSlotCheckState(unsigned uLine, PPDMIPCIPASSTHROUGHPORT pPort, bool fHotPlugExpected, bool fPresentExpected,
+                              bool fInUseExpected)
+{
+    bool fHotPlug = !fHotPlugExpected;
+    bool fPresent = !fPresentExpected;
+    bool fInUse   = !fInUseExpected;
+    int rc = pPort->pfnQueryState(pPort, &fHotPlug, &fPresent, &fInUse);
+    if (   rc != VINF_SUCCESS
+        || fHotPlug != fHotPlugExpected
+        || fPresent != fPresentExpected
+        || fInUse != fInUseExpected)
+        RTTestIFailed("line %u: %Rrc, hot-plug %RTbool, present %RTbool, in use %RTbool\n", uLine, rc, fHotPlug, fPresent, fInUse);
+}
+
+
+/**
+ * The interface the passthrough device has for whoever manages the VM: how
+ * things are with the device, and the layout as values which go into the
+ * configuration of the next VM just as they are.
+ */
+static void tstSlotInterface(void)
+{
+    RTTestISub("Hot-plug slot: the interface for the management");
+
+    /*
+     * A device which is not in a hot-plug capable slot is there and in use, with
+     * no way to change that, until the host takes it back.
+     */
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(g_pTstDevInsVfio);
+        if (pPort)
+        {
+            tstSlotCheckState(__LINE__, pPort, false /*fHotPlug*/, true /*fPresent*/, true /*fInUse*/);
+            RTTESTI_CHECK_RC(pPort->pfnAttach(pPort), VERR_NOT_SUPPORTED);
+            RTTESTI_CHECK_RC(pPort->pfnDetach(pPort, 0 /*cMsWait*/, true /*fForce*/), VERR_NOT_SUPPORTED);
+            tstSlotCheckState(__LINE__, pPort, false /*fHotPlug*/, true /*fPresent*/, true /*fInUse*/);
+
+            tstVfioKrnlDevRequest(pDev);
+            RTTESTI_CHECK(tstSlotWaitForRelease(pDev, RT_MS_5SEC));
+            tstSlotCheckState(__LINE__, pPort, false /*fHotPlug*/, false /*fPresent*/, false /*fInUse*/);
+        }
+    }
+    tstFixtureTeardown();
+
+    /*
+     * A device in a hot-plug capable slot.
+     */
+    static TSTLAYOUTVALUES s_Values; /* Too big for the stack next to the device model. */
+    static TSTLAYOUTVALUES s_Values2;
+    RT_ZERO(s_Values);
+    PPDMDEVINS pDevInsPort = NULL;
+    PPDMDEVINS pDevInsDev  = NULL;
+    rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(pDevInsDev);
+        if (pPort)
+        {
+            /* In the slot, which the guest has switched on, then off. */
+            tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, true /*fPresent*/, true /*fInUse*/);
+            tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+            tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, true /*fPresent*/, false /*fInUse*/);
+
+            /* Taken out, put in, and the guest switches the slot on. */
+            RTTESTI_CHECK_RC(pPort->pfnDetach(pPort, 0 /*cMsWait*/, false /*fForce*/), VINF_SUCCESS);
+            tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, false /*fPresent*/, false /*fInUse*/);
+            RTTESTI_CHECK_RC(pPort->pfnAttach(pPort), VINF_SUCCESS);
+            tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, true /*fPresent*/, false /*fInUse*/);
+            tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES, 2);
+            tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, true /*fPresent*/, true /*fInUse*/);
+
+            /* The layout: function 0 has one, and there is no other function. */
+            RTTESTI_CHECK_RC(pPort->pfnQueryLayout(pPort, 0, tstDevLayoutValue, &s_Values), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(s_Values.cValues >= 14, ("%u values\n", s_Values.cValues));
+            static const uint32_t s_aiNoFuns[] = { 1, 7, 8, 9, 255, UINT32_MAX };
+            for (unsigned i = 0; i < RT_ELEMENTS(s_aiNoFuns); i++)
+            {
+                RT_ZERO(s_Values2);
+                rc = pPort->pfnQueryLayout(pPort, s_aiNoFuns[i], tstDevLayoutValue, &s_Values2);
+                RTTESTI_CHECK_MSG(rc == VERR_NOT_FOUND && s_Values2.cValues == 0,
+                                  ("function %#x: %Rrc, %u values\n", s_aiNoFuns[i], rc, s_Values2.cValues));
+            }
+
+            /* Somebody who has enough after some values is told no more, wherever that is. */
+            for (uint32_t cStopAt = 1; cStopAt <= s_Values.cValues; cStopAt++)
+            {
+                RT_ZERO(s_Values2);
+                s_Values2.cStopAt = cStopAt;
+                rc = pPort->pfnQueryLayout(pPort, 0, tstDevLayoutValue, &s_Values2);
+                RTTESTI_CHECK_MSG(rc == VERR_CANCELLED && s_Values2.cValues == cStopAt,
+                                  ("enough after %u values: %Rrc, %u values\n", cStopAt, rc, s_Values2.cValues));
+            }
+        }
+    }
+    tstFixtureTeardown();
+
+    /*
+     * A VM which has these values in its configuration starts without the device,
+     * tells the same values, and takes the device when it is there.
+     */
+    if (s_Values.cValues)
+    {
+        g_pTstLayoutValues  = &s_Values;
+        g_fTstDevicesAbsent = RT_BIT_32(0);
+        rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_pTstLayoutValues  = NULL;
+        g_fTstDevicesAbsent = 0;
+        if (RT_SUCCESS(rc))
+        {
+            PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(pDevInsDev);
+            if (pPort)
+            {
+                tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, false /*fPresent*/, false /*fInUse*/);
+                RT_ZERO(s_Values2);
+                RTTESTI_CHECK_RC(pPort->pfnQueryLayout(pPort, 0, tstDevLayoutValue, &s_Values2), VINF_SUCCESS);
+                RTTESTI_CHECK(!memcmp(&s_Values, &s_Values2, sizeof(s_Values)));
+
+                tstVfioKrnlDevSetGone(pDev, false);
+                RTTESTI_CHECK_RC(pPort->pfnAttach(pPort), VINF_SUCCESS);
+                tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+                tstSlotCheckMsi(__LINE__, pDev);
+                tstSlotCheckState(__LINE__, pPort, true /*fHotPlug*/, true /*fPresent*/, true /*fInUse*/);
+            }
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -5994,6 +6294,7 @@ int main()
     tstSlotStartEmpty();
     tstSlotSavedState();
     tstSlotSavedStateRefused();
+    tstSlotInterface();
     tstFuzz();
     tstPortFuzz();
 

@@ -335,13 +335,6 @@ typedef PCIVFIOFUNLAYOUT *PPCIVFIOFUNLAYOUT;
 /** Pointer to the const layout of a function. */
 typedef const PCIVFIOFUNLAYOUT *PCPCIVFIOFUNLAYOUT;
 
-/** @name What the device offers to whoever manages the VM.
- * @{ */
-DECLHIDDEN(int) pciVfioR3SlotDetach(PPDMDEVINS pDevIns, RTMSINTERVAL cMsWait, bool fForce);
-DECLHIDDEN(int) pciVfioR3SlotAttach(PPDMDEVINS pDevIns);
-DECLHIDDEN(int) pciVfioR3QueryLayout(PPDMDEVINS pDevIns, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout);
-/** @} */
-
 RT_C_DECLS_END
 
 #endif /* !VBOX_INCLUDED_SRC_Bus_DevPciVfio_h */
