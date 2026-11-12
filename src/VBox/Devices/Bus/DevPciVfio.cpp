@@ -5458,7 +5458,7 @@ static DECLCALLBACK(int) pciVfioPortQueryState(PPDMIPCIPASSTHROUGHPORT pInterfac
     *pfPresent = fPresent;
     *pfInUse   =    fPresent
                  && (   !pThis->pDevInsPort
-                     || devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort));
+                     || pThis->pDevIns);
     return VINF_SUCCESS;
 }
 
