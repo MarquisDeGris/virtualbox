@@ -120,6 +120,12 @@
  * the place of the MSI-X table, the size of the ROM and the interrupts. A device which is not is
  * refused. The guest is told that there is a device in the slot and takes it from there.
  *
+ * The VM can also start without the device and get it later. It has to know what to be built
+ * from then, which is the Layout node in the configuration of each function, see
+ * pciVfioFunLayoutFromCfg(). The values are those pciVfioR3QueryLayout() returns for a VM which
+ * was started with the device. A device which is there when the VM starts is what counts, the
+ * configured layout is not looked at then.
+ *
  * @section sec_dev_vfio_requirements
  *
  * The following requirements have to be met in order to support PCIe passthrough:
@@ -579,9 +585,10 @@ typedef struct VFIOPCI
     bool                 fGuestRamMapped;
     /** Flag whether the I/O address space was allocated (IOMMUFD only). */
     bool                 fIoasAllocated;
-    /** Flag whether the constructor is done.  A failure of setting up a device stops
-     * the VM construction before that and is a matter for the log afterwards. */
-    bool                 fConstructed;
+    /** Flag whether a failure of setting up a device is a matter for the log.  It is
+     * once the constructor is done, and when the constructor tries to open a device
+     * it can do without.  Otherwise it stops the VM construction. */
+    bool                 fSetupErrorsToLog;
 
     /** The thread watching for the host wanting a function back or reporting an error on it. */
     RTTHREAD             hThrdWatcher;
@@ -678,7 +685,7 @@ static int pciVfioSetError(PVFIOPCI pThis, int rc, RT_SRC_POS_DECL, const char *
 {
     va_list va;
     va_start(va, pszFormat);
-    if (!pThis->fConstructed)
+    if (!pThis->fSetupErrorsToLog)
         rc = pThis->pDevIns->pHlpR3->pfnVMSetErrorV(pThis->pDevIns, rc, RT_SRC_POS_ARGS, pszFormat, va);
     else
     {
@@ -1458,24 +1465,18 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioFill(PPDMDEVINS pDevIns, void *p
 }
 
 
-static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
+/**
+ * Creates the legacy VGA I/O port and memory ranges for a function.
+ *
+ * @returns VBox status code.
+ * @param   pFun        The function.
+ * @param   pDevIns     The device instance.
+ */
+static int pciVfioVgaCreateRanges(PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
 {
-    struct vfio_region_info RegionInfo; RT_ZERO(RegionInfo);
-    int rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_VGA_REGION_INDEX, &RegionInfo);
-    if (RT_FAILURE(rc))
-        return rc;
-
-    if (   !RegionInfo.flags
-        || !RegionInfo.size)
-        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
-                                   N_("The device has no legacy VGA ranges which could be exposed to the guest"));
-
-    pFun->offVga = RegionInfo.offset;
-
-    /* Register the legacy VGA I/O port and MMIO ranges. */
-    rc = PDMDevHlpIoPortCreateExAndMap(pDevIns, 0x3b0, 0x3bb - 0x3b0 + 1, IOM_IOPORT_F_ABS,
-                                       pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
-                                       "VFIO VGA #1", NULL /*paExtDescs*/, &pFun->hVgaIoPort1);
+    int rc = PDMDevHlpIoPortCreateExAndMap(pDevIns, 0x3b0, 0x3bb - 0x3b0 + 1, IOM_IOPORT_F_ABS,
+                                           pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
+                                           "VFIO VGA #1", NULL /*paExtDescs*/, &pFun->hVgaIoPort1);
     if (RT_FAILURE(rc))
         return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3b0 - 0x3bb failed");
 
@@ -1494,8 +1495,28 @@ static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
                                      pciVfioVgaMmioWrite, pciVfioVgaMmioRead, pciVfioVgaMmioFill, pFun,
                                      "VFIO VGA - VGA Video Buffer", &pFun->hVgaMmio);
     AssertRCReturn(rc, rc);
-
     return VINF_SUCCESS;
+}
+
+
+static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
+{
+    struct vfio_region_info RegionInfo; RT_ZERO(RegionInfo);
+    int rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_VGA_REGION_INDEX, &RegionInfo);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    if (   !RegionInfo.flags
+        || !RegionInfo.size)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("The device has no legacy VGA ranges which could be exposed to the guest"));
+
+    pFun->offVga = RegionInfo.offset;
+
+    rc = pciVfioVgaCreateRanges(pFun, pDevIns);
+    if (RT_SUCCESS(rc))
+        pFun->fVga = true;
+    return rc;
 }
 
 
@@ -1568,6 +1589,38 @@ DECLCALLBACK(int) pciVfioRomRegionMapUnmap(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDe
 }
 
 
+/**
+ * Creates the ROM of a function for the guest: memory which the ROM of the
+ * device gets copied to, and what it takes to keep the guest from writing to it.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the size of the ROM set.
+ * @param   pPciDev     The PCI device of the function.
+ */
+static int pciVfioRomCreate(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+
+    /** @todo Currently we will map the ROM as MMIO2 region as we lack the necessary
+     * infrastructure to register ROMs for PCI BARs. This is wrong because MMIO2 regions
+     * are mapped read/write. To protect against writes we put an access handler over the region,
+     * which will discard (and log) all writes.
+     */
+    int rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pPciDev, VBOX_PCI_ROM_SLOT, pFun->cbRom,
+                                               PCI_ADDRESS_SPACE_MEM_PREFETCH, 0 /*fFlags*/,
+                                               pciVfioRomRegionMapUnmap, "ROM",
+                                               &pFun->pvRom, &pFun->hRom);
+    AssertLogRelRCReturn(rc, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                                 N_("Failed to allocate %zu bytes of ROM"), pFun->cbRom));
+
+    rc = PDMDevHlpPGMHandlerPhysicalTypeRegister(pDevIns, PGMPHYSHANDLERKIND_WRITE,
+                                                 pciVfioRomWriteHandler, "VFIO ROM", &pFun->hRomAccHndType);
+    AssertRCReturn(rc, rc);
+    return VINF_SUCCESS;
+}
+
+
 static int pciVfioSetupRom(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, PPDMDEVINS pDevIns)
 {
     struct vfio_region_info RegionInfo; RT_ZERO(RegionInfo);
@@ -1580,30 +1633,17 @@ static int pciVfioSetupRom(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev,
         && RegionInfo.size == 0)
         return VINF_SUCCESS;
 
-    /** @todo Currently we will map the ROM as MMIO2 region as we lack the necessary
-     * infrastructure to register ROMs for PCI BARs. This is wrong because MMIO2 regions
-     * are mapped read/write. To protect against writes we put an access handler over the region,
-     * which will discard (and log) all writes.
-     */
-
     pFun->offRom = RegionInfo.offset;
     pFun->cbRom  = RegionInfo.size;
 
-    rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pPciDev, VBOX_PCI_ROM_SLOT, pFun->cbRom,
-                                           PCI_ADDRESS_SPACE_MEM_PREFETCH, 0 /*fFlags*/,
-                                           pciVfioRomRegionMapUnmap, "ROM",
-                                           &pFun->pvRom, &pFun->hRom);
-    AssertLogRelRCReturn(rc, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                                 N_("Failed to allocate %zu bytes of ROM"), pFun->cbRom));
+    rc = pciVfioRomCreate(pThis, pFun, pPciDev);
+    if (RT_FAILURE(rc))
+        return rc;
 
     ssize_t cbRead = pread(pFun->iFdVfio, pFun->pvRom, pFun->cbRom, pFun->offRom);
     if (cbRead != (ssize_t)pFun->cbRom)
         return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                    N_("Failed to read %zu bytes of ROM from the device"), pFun->cbRom);
-
-    rc = PDMDevHlpPGMHandlerPhysicalTypeRegister(pThis->pDevIns, PGMPHYSHANDLERKIND_WRITE,
-                                                 pciVfioRomWriteHandler, "VFIO ROM", &pFun->hRomAccHndType);
-    AssertRCReturn(rc, rc);
 
     return VINF_SUCCESS;
 }
@@ -1683,16 +1723,16 @@ static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
         aTraps[0].offEnd   = cbBarAligned;
         cTraps = 1;
     }
-    else if (   pFun->offMsixCtrl
-             && pFun->iBarMsix == iBar)
+    else if (   pFun->Layout.fMsix
+             && pFun->Layout.iBarMsix == iBar)
     {
-        uint64_t const offTblStart = pFun->offMsixTbl & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
-        uint64_t const offPbaStart = pFun->offMsixPba & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
+        uint64_t const offTblStart = pFun->Layout.offMsixTbl & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
+        uint64_t const offPbaStart = pFun->Layout.offMsixPba & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
         unsigned const iTbl        = offTblStart <= offPbaStart ? 0 : 1;
         aTraps[iTbl].offStart     = offTblStart;
-        aTraps[iTbl].offEnd       = RT_ALIGN_64((uint64_t)pFun->offMsixTbl + pFun->cbMsixTbl, GUEST_PAGE_SIZE);
+        aTraps[iTbl].offEnd       = RT_ALIGN_64((uint64_t)pFun->Layout.offMsixTbl + pFun->Layout.cbMsixTbl, GUEST_PAGE_SIZE);
         aTraps[iTbl ^ 1].offStart = offPbaStart;
-        aTraps[iTbl ^ 1].offEnd   = RT_ALIGN_64((uint64_t)pFun->offMsixPba + pFun->cbMsixPba, GUEST_PAGE_SIZE);
+        aTraps[iTbl ^ 1].offEnd   = RT_ALIGN_64((uint64_t)pFun->Layout.offMsixPba + pFun->Layout.cbMsixPba, GUEST_PAGE_SIZE);
         cTraps = 2;
         if (aTraps[1].offStart <= aTraps[0].offEnd)
         {
@@ -4833,6 +4873,367 @@ static DECLCALLBACK(int) pciVfioInitComplete(PPDMDEVINS pDevIns)
 
 
 /**
+ * Returns what the VM is built from for a function, in the form in which it
+ * can be configured for starting the VM without the device, see
+ * pciVfioFunLayoutFromCfg().
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if the function is not configured.
+ * @param   pDevIns     The device instance.
+ * @param   iPciFun     The function.
+ * @param   pLayout     Where to return the layout.
+ *
+ * @thread  Any.
+ */
+DECLHIDDEN(int) pciVfioR3QueryLayout(PPDMDEVINS pDevIns, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    AssertReturn(iPciFun < RT_ELEMENTS(pThis->aPciFuns), VERR_INVALID_PARAMETER);
+    PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+    if (pFun->iFdVfio == -1)
+        return VERR_NOT_FOUND;
+
+    RT_ZERO(*pLayout);
+    pLayout->cbPciCfg = (uint32_t)pFun->Layout.cbPciCfg;
+    AssertCompile(RT_ELEMENTS(pLayout->aBars) <= RT_ELEMENTS(pFun->aBars));
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars); iBar++)
+    {
+        PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        if (pBar->bType == 0)
+            continue;
+        pLayout->aBars[iBar].cb       = pBar->cbRegion;
+        pLayout->aBars[iBar].fIoPorts = pBar->bType == 1;
+        if (pBar->bType == 2)
+        {
+            pLayout->aBars[iBar].f64Bit        = RT_BOOL((uint32_t)pBar->enmAddrSpace & PCI_ADDRESS_SPACE_BAR64);
+            pLayout->aBars[iBar].fPrefetchable = RT_BOOL((uint32_t)pBar->enmAddrSpace & PCI_ADDRESS_SPACE_MEM_PREFETCH);
+            pLayout->aBars[iBar].fMappable     = pBar->pvMmio != NULL;
+        }
+    }
+    pLayout->cbRom    = pFun->Layout.cbRom;
+    pLayout->fVga     = pFun->fVga;
+    pLayout->fMsix    = pFun->Layout.fMsix;
+    pLayout->iBarMsix = pFun->Layout.iBarMsix;
+    AssertCompile(sizeof(pLayout->acIrqVectors) == sizeof(pFun->Layout.acIrqVectors));
+    memcpy(pLayout->acIrqVectors, pFun->Layout.acIrqVectors, sizeof(pLayout->acIrqVectors));
+    pLayout->offMsixTbl = pFun->Layout.offMsixTbl;
+    pLayout->offMsixPba = pFun->Layout.offMsixPba;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Reads what the VM is to be built from for a function from the configuration,
+ * for a device which isn't there when the VM starts, and checks that it makes
+ * sense.  This is what pciVfioR3QueryLayout() returns for a VM which was
+ * started with the device.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pCfgLayout  The "Layout" node of the configuration of the function.
+ * @param   pLayout     Where to return the layout.
+ */
+static int pciVfioFunLayoutFromCfg(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCFGMNODE pCfgLayout, PPCIVFIOFUNLAYOUT pLayout)
+{
+    PCPDMDEVHLPR3 const pHlp = pThis->pDevIns->pHlpR3;
+    RT_ZERO(*pLayout);
+
+    uint64_t u64 = 0;
+    bool     f   = false;
+    int rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "ConfigSpaceSize", &u64, 256);
+    pLayout->cbPciCfg = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars) && RT_SUCCESS(rc); iBar++)
+    {
+        char szName[32];
+        RTStrPrintf(szName, sizeof(szName), "Bar%uSize", iBar);
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, szName, &pLayout->aBars[iBar].cb, 0);
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%uIoPorts", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].fIoPorts, false);
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%u64Bit", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].f64Bit, false);
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%uPrefetchable", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].fPrefetchable, false);
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%uMappable", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].fMappable, false);
+        }
+    }
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "RomSize", &pLayout->cbRom, 0);
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, "Vga", &pLayout->fVga, false);
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, "Msix", &f, false);
+    pLayout->fMsix = f;
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "MsixBar", &u64, UINT8_MAX);
+    pLayout->iBarMsix = (uint8_t)RT_MIN(u64, UINT8_MAX);
+    static const char * const s_apszIrqs[] = { "IntxVectors", "MsiVectors", "MsixVectors" };
+    AssertCompile(RT_ELEMENTS(s_apszIrqs) == RT_ELEMENTS(pLayout->acIrqVectors));
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_apszIrqs) && RT_SUCCESS(rc); i++)
+    {
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, s_apszIrqs[i], &u64, 0);
+        pLayout->acIrqVectors[i] = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    }
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "MsixTableOffset", &u64, 0);
+    pLayout->offMsixTbl = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "MsixPbaOffset", &u64, 0);
+    pLayout->offMsixPba = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                               N_("Configuration error: Failed to read the layout of function %u (%Rrc)"), pFun->uPciFun, rc);
+
+    /*
+     * The same rules the constructor has for a device which is there, and what
+     * the VMM requires of the ranges.
+     */
+    const char *pszWhat = NULL;
+    if (   pLayout->cbPciCfg != 256
+        && pLayout->cbPciCfg != 4096)
+        pszWhat = "ConfigSpaceSize";
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars) && !pszWhat; iBar++)
+    {
+        uint64_t const cb = pLayout->aBars[iBar].cb;
+        if (!cb)
+            continue;
+        if (   !RT_IS_POWER_OF_TWO(cb)
+            || (pLayout->aBars[iBar].fIoPorts
+                ? cb < 4 || cb > _32K
+                :    cb < 16
+                  || cb > (pLayout->aBars[iBar].f64Bit ? UINT64_C(0x1000000000) : _2G)
+                  || (pLayout->aBars[iBar].fMappable && (cb & GUEST_PAGE_OFFSET_MASK)))
+            || (   !pLayout->aBars[iBar].fIoPorts
+                && pLayout->aBars[iBar].f64Bit
+                && (   iBar + 1 >= RT_ELEMENTS(pLayout->aBars)
+                    || pLayout->aBars[iBar + 1].cb != 0)))
+            pszWhat = "BARs";
+    }
+    if (   !pszWhat
+        && pLayout->cbRom
+        && (   !RT_IS_POWER_OF_TWO(pLayout->cbRom)
+            || (pLayout->cbRom & GUEST_PAGE_OFFSET_MASK)
+            || pLayout->cbRom > _256M))
+        pszWhat = "RomSize";
+    if (   !pszWhat
+        && (   pLayout->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX] > 1
+            || pLayout->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]  > VBOX_MSI_MAX_ENTRIES
+            || pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] > VBOX_MSIX_MAX_ENTRIES))
+        pszWhat = "interrupt vectors";
+    if (   !pszWhat
+        && pLayout->fMsix)
+    {
+        /* See pciVfioTrySetupMsix(). */
+        uint32_t const cVectors = pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX];
+        uint32_t const cbTbl    = cVectors * sizeof(MSIXTBLENTRY);
+        uint32_t const cbPba    = RT_ALIGN_32(cVectors, 64) / 8;
+        uint8_t const  iBar     = pLayout->iBarMsix;
+        if (   iBar >= RT_ELEMENTS(pLayout->aBars)
+            || !pLayout->aBars[iBar].cb
+            || pLayout->aBars[iBar].fIoPorts
+            || !cVectors
+            || (pLayout->offMsixTbl & 7)
+            || (pLayout->offMsixPba & 7)
+            || (uint64_t)pLayout->offMsixTbl + cbTbl > pLayout->aBars[iBar].cb
+            || (uint64_t)pLayout->offMsixPba + cbPba > pLayout->aBars[iBar].cb
+            || (   pLayout->offMsixTbl < (uint64_t)pLayout->offMsixPba + cbPba
+                && pLayout->offMsixPba < (uint64_t)pLayout->offMsixTbl + cbTbl))
+            pszWhat = "MSI-X";
+    }
+    if (pszWhat)
+        return pciVfioSetError(pThis, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                               N_("Configuration error: The layout of function %u is not a possible one (%s)"),
+                               pFun->uPciFun, pszWhat);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Builds the VM for a function whose device isn't there, from the layout the
+ * configuration has for it.  The function starts out of service, with the
+ * stand-in in the place of the device file and ordinary memory where the
+ * device memory goes, like a function whose device was taken away.  See
+ * pciVfioFunAttach() for how a device gets in.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   pLayout     What to build the VM from.
+ * @param   iPciDevNo   The PCI device number to register with.
+ * @param   fExposeVga  Whether the legacy VGA ranges are to be exposed if the function has them.
+ */
+static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, PCPCIVFIOFUNLAYOUT pLayout,
+                                    uint32_t iPciDevNo, bool fExposeVga)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+
+    /* What the constructor takes from the device otherwise. */
+    pFun->cbPciCfg          = pLayout->cbPciCfg;
+    pFun->cbRom             = (size_t)pLayout->cbRom;
+    pFun->iBarMsix          = pLayout->iBarMsix;
+    AssertCompile(sizeof(pFun->acIrqVectors) == sizeof(pLayout->acIrqVectors));
+    memcpy(pFun->acIrqVectors, pLayout->acIrqVectors, sizeof(pFun->acIrqVectors));
+    pFun->Layout.cbPciCfg   = pFun->cbPciCfg;
+    pFun->Layout.cbRom      = pFun->cbRom;
+    memcpy(pFun->Layout.acIrqVectors, pLayout->acIrqVectors, sizeof(pFun->Layout.acIrqVectors));
+    pFun->Layout.iBarMsix   = pLayout->iBarMsix;
+    pFun->Layout.fMsix      = pLayout->fMsix;
+    if (pLayout->fMsix)
+    {
+        pFun->Layout.offMsixTbl = pLayout->offMsixTbl;
+        pFun->Layout.cbMsixTbl  = pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] * sizeof(MSIXTBLENTRY);
+        pFun->Layout.offMsixPba = pLayout->offMsixPba;
+        pFun->Layout.cbMsixPba  = RT_ALIGN_32(pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX], 64) / 8;
+    }
+
+    /*
+     * The stand-in for the device file, and a file descriptor number for the
+     * function which refers to it until a device is put in.
+     */
+    int rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdInert);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Failed to create the file descriptor standing in for a removed device"));
+    pFun->iFdVfio = fcntl(pFun->iFdInert, F_DUPFD_CLOEXEC, 0);
+    if (pFun->iFdVfio == -1)
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                               N_("Failed to create the file descriptor standing in for a removed device"));
+    ASMAtomicWriteBool(&pFun->fGone, true);
+    ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
+
+    /*
+     * The PCI device.  The guest sees nothing of it before a device is put in,
+     * which is when the config space is put together.
+     */
+    PDMPciDevSetVendorId(pPciDev, UINT16_MAX);
+    PDMPciDevSetDeviceId(pPciDev, UINT16_MAX);
+    PDMPciDevSetInterruptPin(pPciDev, pLayout->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX] ? 0x01 /* A */ : 0);
+    rc = PDMDevHlpPCIRegisterEx(pDevIns, pPciDev, 0 /*fFlags*/, iPciDevNo, pFun->uPciFun, pFun->szName);
+    if (RT_FAILURE(rc))
+        return rc;
+    rc = PDMDevHlpPCIInterceptConfigAccesses(pDevIns, pPciDev, pciVfioConfigRead, pciVfioConfigWrite);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /*
+     * The BARs, see pciVfioSetupBar().  Ordinary memory keeps the place for the
+     * device memory of those which get mapped.
+     */
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars); iBar++)
+    {
+        PVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        pBar->iPciFun = (uint8_t)pFun->uPciFun;
+        if (!pLayout->aBars[iBar].cb)
+            continue;
+
+        pBar->cbRegion = pLayout->aBars[iBar].cb;
+        if (pLayout->aBars[iBar].fIoPorts)
+        {
+            pBar->bType = 1;
+            rc = PDMDevHlpPCIIORegionCreateIoEx(pDevIns, pPciDev, iBar, pBar->cbRegion,
+                                                pciVfioPioWrite, pciVfioPioRead, pBar,
+                                                "PIO", NULL /*paExtDescs*/, &pBar->hIoPort);
+            AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Cannot register PCI I/O region")));
+        }
+        else
+        {
+            pBar->bType  = 2;
+            pBar->pvMmio = NULL;
+            if (pLayout->aBars[iBar].fMappable)
+            {
+                void *pvMmio = mmap(NULL, pBar->cbRegion, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /*fd*/, 0 /*offset*/);
+                if (pvMmio == MAP_FAILED)
+                    return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                           N_("Reserving %RX64 bytes of address space for BAR%u failed with %d"),
+                                           pBar->cbRegion, iBar, errno);
+                pBar->pvMmio = pvMmio;
+            }
+
+            uint32_t enmAddrSpace = PCI_ADDRESS_SPACE_MEM;
+            if (pLayout->aBars[iBar].f64Bit)
+                enmAddrSpace |= PCI_ADDRESS_SPACE_BAR64;
+            if (pLayout->aBars[iBar].fPrefetchable)
+                enmAddrSpace |= PCI_ADDRESS_SPACE_MEM_PREFETCH;
+            pBar->fInterceptMmio = pFun->fInterceptMmio || !pBar->pvMmio;
+            pBar->enmAddrSpace   = (PCIADDRESSSPACE)enmAddrSpace;
+        }
+    }
+
+    /* The legacy VGA ranges and the ROM, which is empty until a device is put in. */
+    if (   fExposeVga
+        && pLayout->fVga)
+    {
+        rc = pciVfioVgaCreateRanges(pFun, pDevIns);
+        if (RT_FAILURE(rc))
+            return rc;
+        pFun->fVga = true;
+    }
+    if (pFun->cbRom)
+    {
+        rc = pciVfioRomCreate(pThis, pFun, pPciDev);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+
+    /* The eventfds for the interrupts, one for each vector of the interrupt type with the most vectors. */
+    uint32_t const cMaxVectors = RT_MAX(RT_MAX(pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX],
+                                               pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]),
+                                        pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+    if (cMaxVectors)
+    {
+        pFun->paFdEvts = (int *)RTMemAlloc(cMaxVectors * sizeof(pFun->paFdEvts[0]));
+        if (!pFun->paFdEvts)
+            return pciVfioSetError(pThis, VERR_NO_MEMORY, RT_SRC_POS,
+                                   N_("Failed to allocate memory for %u event file descriptors for interrupts"), cMaxVectors);
+        for (uint32_t i = 0; i < cMaxVectors; i++)
+            pFun->paFdEvts[i] = -1;
+        pFun->cFdEvts = cMaxVectors;
+        for (uint32_t i = 0; i < cMaxVectors; i++)
+        {
+            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->paFdEvts[i]);
+            if (RT_FAILURE(rc))
+                return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                       N_("Failed to create event file descriptor %u out of %u for interrupts"), i, cMaxVectors);
+        }
+    }
+
+    /* The memory BARs, with the pages of the MSI-X table and pending bits trapped. */
+    for (uint8_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
+        if (pFun->aBars[iBar].bType == 2)
+        {
+            rc = pciVfioBarSetupMmio(pThis, pFun, pPciDev, iBar);
+            if (RT_FAILURE(rc))
+                return rc;
+        }
+
+    /* The interrupt poller and what wakes it up. */
+    rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdWakeup);
+    if (RT_FAILURE(rc))
+        return rc;
+    rc = PDMDevHlpThreadCreate(pDevIns, &pFun->pThrdIrq, pFun, pciVfioIrqPoller, pciVfioIrqPollerWakeup,
+                               0 /* cbStack */, RTTHREADTYPE_IO, pFun->szName);
+    AssertLogRelRCReturn(rc, rc);
+
+    LogRel(("VFIO#%d.%u: The device isn't there, the VM is built for it from the configured layout\n",
+            pThis->iInstance, pFun->uPciFun));
+    return VINF_SUCCESS;
+}
+
+
+/**
  * @interface_method_impl{PDMDEVREG,pfnConstruct}
  */
 static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCFGMNODE pCfg)
@@ -4848,7 +5249,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->fVfioLegacy      = false;
     pThis->fGuestRamMapped  = false;
     pThis->fIoasAllocated   = false;
-    pThis->fConstructed     = false;
+    pThis->fSetupErrorsToLog     = false;
     pThis->hThrdWatcher     = NIL_RTTHREAD;
     pThis->iFdWatcherWakeup = -1;
     pThis->fWatcherStop     = false;
@@ -4927,8 +5328,10 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         return rc;
 
     /* Initialize available functions. */
-    uint32_t iPciDevNo = PDMPCIDEVREG_DEV_NO_FIRST_UNUSED;
-    bool fMultiFn = false;
+    uint32_t iPciDevNo    = PDMPCIDEVREG_DEV_NO_FIRST_UNUSED;
+    bool     fMultiFn     = false;
+    uint32_t cFunsPresent = 0;
+    uint32_t cFunsAbsent  = 0;
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PVFIOPCIFUN pFun    = &pThis->aPciFuns[iPciFun];
@@ -4968,9 +5371,30 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"ExposeVga\" failed"));
 
+        /*
+         * A device which isn't there can be put in later if it is in a hot-plug capable
+         * slot and if the configuration says what to build the VM from.
+         */
+        PCFGMNODE const pCfgLayout = pHlp->pfnCFGMGetChildF(pCfgFun, "Layout");
+        pThis->fSetupErrorsToLog = pCfgLayout != NULL;
         rc = pciVfioFunOpen(pThis, pFun, pCfgFun, &pFun->iFdVfio);
+        pThis->fSetupErrorsToLog = false;
         if (RT_FAILURE(rc))
-            return rc;
+        {
+            if (!pCfgLayout)
+                return rc;
+
+            PCIVFIOFUNLAYOUT Layout;
+            rc = pciVfioFunLayoutFromCfg(pThis, pFun, pCfgLayout, &Layout);
+            if (RT_SUCCESS(rc))
+                rc = pciVfioFunConstructEmpty(pThis, pFun, pPciDev, &Layout, iPciDevNo, fVga);
+            if (RT_FAILURE(rc))
+                return rc;
+            cFunsAbsent++;
+            iPciDevNo = PDMPCIDEVREG_DEV_NO_SAME_AS_PREV;
+            continue;
+        }
+        cFunsPresent++;
 
         struct vfio_device_info DevInfo;
         DevInfo.argsz = sizeof(DevInfo);
@@ -5126,6 +5550,19 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                 return rc;
         }
 
+        /* What the VM is built from: the memory BARs are split by it, and a device which gets
+           put in later is compared with it. */
+        pFun->Layout.cbPciCfg   = pFun->cbPciCfg;
+        pFun->Layout.cbRom      = pFun->cbRom;
+        AssertCompile(sizeof(pFun->Layout.acIrqVectors) == sizeof(pFun->acIrqVectors));
+        memcpy(pFun->Layout.acIrqVectors, pFun->acIrqVectors, sizeof(pFun->Layout.acIrqVectors));
+        pFun->Layout.iBarMsix   = pFun->iBarMsix;
+        pFun->Layout.fMsix      = pFun->offMsixCtrl != 0;
+        pFun->Layout.offMsixTbl = pFun->offMsixTbl;
+        pFun->Layout.cbMsixTbl  = pFun->cbMsixTbl;
+        pFun->Layout.offMsixPba = pFun->offMsixPba;
+        pFun->Layout.cbMsixPba  = pFun->cbMsixPba;
+
         /* Create the MMIO region mappings now. */
         for (uint8_t i = 0; i < RT_ELEMENTS(pFun->aBars); i++)
         {
@@ -5186,21 +5623,14 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             LogRel(("VFIO#%d.%u: The host can't tell when it wants the device back, removing it while the VM exists is going to block on the host\n",
                     iInstance, iPciFun));
 
-        /* What the VM is built from now, for comparing a device with which gets put in later. */
-        pFun->Layout.cbPciCfg   = pFun->cbPciCfg;
-        pFun->Layout.cbRom      = pFun->cbRom;
-        AssertCompile(sizeof(pFun->Layout.acIrqVectors) == sizeof(pFun->acIrqVectors));
-        memcpy(pFun->Layout.acIrqVectors, pFun->acIrqVectors, sizeof(pFun->Layout.acIrqVectors));
-        pFun->Layout.iBarMsix   = pFun->iBarMsix;
-        pFun->Layout.fMsix      = pFun->offMsixCtrl != 0;
-        pFun->Layout.offMsixTbl = pFun->offMsixTbl;
-        pFun->Layout.cbMsixTbl  = pFun->cbMsixTbl;
-        pFun->Layout.offMsixPba = pFun->offMsixPba;
-        pFun->Layout.cbMsixPba  = pFun->cbMsixPba;
-
         /* Subsequent function should use the same major as the previous one. */
         iPciDevNo = PDMPCIDEVREG_DEV_NO_SAME_AS_PREV;
     }
+
+    /* One device, which is there or not. */
+    if (cFunsPresent && cFunsAbsent)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("Some functions of the PCI device to pass through are there and others are not"));
 
     /* The thread watching the notifications of the host about the functions. */
     rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pThis->iFdWatcherWakeup);
@@ -5224,7 +5654,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             PPDMDEVINS const pDevInsPort = devpciR3HotPlugSlotFind(pDevIns, pDevIns->apPciDevs[iPciFun]);
             if (pDevInsPort)
             {
-                rc = devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevIns, pciVfioSlotLinkChanged, true /*fPresent*/);
+                rc = devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevIns, pciVfioSlotLinkChanged, cFunsAbsent == 0 /*fPresent*/);
                 if (RT_FAILURE(rc))
                     return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                                N_("The hot-plug capable slot the passed through PCI device is configured "
@@ -5234,6 +5664,12 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             }
             break;
         }
+
+    if (   cFunsAbsent
+        && !pThis->pDevInsPort)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("The PCI device to pass through isn't there. The VM can start without it only "
+                                      "if it is configured to be in a hot-plug capable slot"));
 
     /* Need to fixup the header type for all functions. */
     if (fMultiFn)
@@ -5247,7 +5683,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         }
     }
 
-    pThis->fConstructed = true;
+    pThis->fSetupErrorsToLog = true;
     return rc;
 }
 
