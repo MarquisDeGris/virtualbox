@@ -4735,7 +4735,8 @@ static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
             ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fGoneForGuest, false);
             ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fGone, false);
         }
-    pciVfioReset(pDevIns);
+    if (PDMDevHlpVMState(pDevIns) == VMSTATE_RUNNING)
+        pciVfioReset(pDevIns);
     ASMAtomicWriteU64(&pThis->msAttnPressed, 0);
 
     /* The watcher thread has functions to watch again. */
