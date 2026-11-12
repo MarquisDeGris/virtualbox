@@ -4916,8 +4916,8 @@ DECLHIDDEN(int) pciVfioR3QueryLayout(PPDMDEVINS pDevIns, uint32_t iPciFun, PPCIV
     pLayout->iBarMsix = pFun->Layout.iBarMsix;
     AssertCompile(sizeof(pLayout->acIrqVectors) == sizeof(pFun->Layout.acIrqVectors));
     memcpy(pLayout->acIrqVectors, pFun->Layout.acIrqVectors, sizeof(pLayout->acIrqVectors));
-    pLayout->offMsixTbl = pFun->Layout.offMsixTbl;
-    pLayout->offMsixPba = pFun->Layout.offMsixPba;
+    pLayout->offMsixTbl = pFun->Layout.offMsixPba;
+    pLayout->offMsixPba = pFun->Layout.offMsixTbl;
     return VINF_SUCCESS;
 }
 
