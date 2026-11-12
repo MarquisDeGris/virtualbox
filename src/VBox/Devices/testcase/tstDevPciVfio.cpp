@@ -2109,6 +2109,9 @@ static void tstDuplicateCaps(void)
             RTTESTI_CHECK_MSG(Msi.uData == 0x4046, ("data %#RX32\n", Msi.uData));
     }
     tstFixtureTeardown();
+}
+
+
 /*
  *
  * Random device models and random guest accesses.
