@@ -3868,7 +3868,7 @@ static void ich9pcibridgeR3SlotUpdate(PPDMDEVINS pDevIns, uint16_t fEvents)
      * The interrupt.  A message is sent whenever the condition becomes true.
      */
     bool const fIrq = ich9pcibridgeR3SlotIsIrqConditionMet(pPciDev);
-    if (fIrq != pSlot->fIrqRaised)
+    if (fIrq != pSlot->fIrqRaised || fIrq)
     {
         pSlot->fIrqRaised = fIrq;
         if (fIrq)
