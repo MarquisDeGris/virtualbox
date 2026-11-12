@@ -2599,6 +2599,47 @@ static void tstRemovalUnderLoad(void)
 }
 
 
+/**
+ * The state of a device of the host can't be saved: saving the state of the VM
+ * and teleporting it are refused, and so is loading a saved state into a VM
+ * which has the device.
+ */
+static void tstSavedState(void)
+{
+    RTTestISub("Saved state is refused");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* Saving and teleporting: refused, with something to tell the user. */
+        for (unsigned fLive = 0; fLive < 2; fLive++)
+        {
+            rc = tstPdmSaveStatePrep(RT_BOOL(fLive));
+            RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("fLive=%u: %Rrc\n", fLive, rc));
+            RTTESTI_CHECK_MSG(!strcmp(tstPdmGetLastRuntimeErrorId(), "PciVfioNoSavedState"),
+                              ("fLive=%u: runtime error '%s'\n", fLive, tstPdmGetLastRuntimeErrorId()));
+            RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("fLive=%u: no message\n", fLive));
+        }
+
+        /* Loading: the saved state doesn't go with the configuration of the VM. */
+        rc = tstPdmLoadStatePrep();
+        RTTESTI_CHECK_MSG(rc == VERR_SSM_LOAD_CONFIG_MISMATCH, ("loading: %Rrc\n", rc));
+        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("loading: no message\n"));
+
+        /* None of this has done anything to the device. */
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
+    }
+    tstFixtureTeardown();
+}
+
+
 /*
  *
  * Random device models and random guest accesses.
@@ -3273,6 +3314,7 @@ int main()
     tstRemoval();
     tstRemovalOtherCases();
     tstRemovalUnderLoad();
+    tstSavedState();
     tstFuzz();
 
     return RTTestSummaryAndDestroy(hTest);
