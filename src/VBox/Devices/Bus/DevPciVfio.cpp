@@ -4381,7 +4381,6 @@ static int pciVfioFunCheckLayout(PVFIOPCI pThis, PVFIOPCIFUN pFun)
                     iBarMsix = (uint8_t)iBar;
             }
             if (   pBar->bType != 2
-                || pBar->cbRegion != RegionInfo.size
                 || (uint32_t)pBar->enmAddrSpace != enmAddrSpace
                 || fMappable != (pBar->pvMmio != NULL))
                 pszWhat = "BARs";
