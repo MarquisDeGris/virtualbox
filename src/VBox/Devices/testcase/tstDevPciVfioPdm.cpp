@@ -158,6 +158,8 @@ typedef struct TSTPDMDEV
     PFNSSMDEVSAVEPREP   pfnSavePrep;
     /** Saved state: the callback preparing for loading, optional. */
     PFNSSMDEVLOADPREP   pfnLoadPrep;
+    /** Saved state: the callback completing the loading, optional. */
+    PFNSSMDEVLOADDONE   pfnLoadDone;
 } TSTPDMDEV;
 /** Pointer to a device instance record. */
 typedef TSTPDMDEV *PTSTPDMDEV;
@@ -364,6 +366,8 @@ typedef struct TSTPDM
     char                szLastError[512];
     /** The ID of the last runtime error. */
     char                szLastRuntimeErrorId[64];
+    /** The status of the saved state operation the devices get to see. */
+    int                 rcSsm;
     /** The NOP critical section handed to the devices. */
     PDMCRITSECT         NopCritSect;
 } TSTPDM;
@@ -1566,6 +1570,14 @@ static DECLCALLBACK(int) tstPdmHlp_SSMSetLoadError(PSSMHANDLE pSSM, int rc, RT_S
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnSSMHandleGetStatus} */
+static DECLCALLBACK(int) tstPdmHlp_SSMHandleGetStatus(PSSMHANDLE pSSM)
+{
+    RT_NOREF(pSSM);
+    return g_Pdm.rcSsm;
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnCritSectGetNop} */
 static DECLCALLBACK(PPDMCRITSECT) tstPdmHlp_CritSectGetNop(PPDMDEVINS pDevIns)
 {
@@ -1591,13 +1603,15 @@ static DECLCALLBACK(int) tstPdmHlp_SSMRegister(PPDMDEVINS pDevIns, uint32_t uVer
                                                PFNSSMDEVLOADPREP pfnLoadPrep, PFNSSMDEVLOADEXEC pfnLoadExec,
                                                PFNSSMDEVLOADDONE pfnLoadDone)
 {
-    /* Only what comes before anything is saved or loaded is played through. */
-    RT_NOREF(uVersion, cbGuess, pszBefore, pfnLiveExec, pfnLiveVote, pfnSaveExec, pfnSaveDone, pfnLoadExec, pfnLoadDone);
+    /* What comes before anything is saved or loaded and what comes after loading is
+       played through, the tests put what was loaded where it belongs. */
+    RT_NOREF(uVersion, cbGuess, pszBefore, pfnLiveExec, pfnLiveVote, pfnSaveExec, pfnSaveDone, pfnLoadExec);
     PTSTPDMDEV pDev = (PTSTPDMDEV)pDevIns->Internal.s.pDev;
     AssertReturn(pDev, VERR_INTERNAL_ERROR_3);
     pDev->pfnLivePrep = pfnLivePrep;
     pDev->pfnSavePrep = pfnSavePrep;
     pDev->pfnLoadPrep = pfnLoadPrep;
+    pDev->pfnLoadDone = pfnLoadDone;
     return VINF_SUCCESS;
 }
 
@@ -1670,6 +1684,7 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnVMSetRuntimeErrorV              = tstPdmHlp_VMSetRuntimeErrorV;
     g_tstPdmDevHlpR3.pfnSSMSetLoadError                 = tstPdmHlp_SSMSetLoadError;
     g_tstPdmDevHlpR3.pfnSSMSetLoadErrorV                = tstPdmHlp_SSMSetLoadErrorV;
+    g_tstPdmDevHlpR3.pfnSSMHandleGetStatus              = tstPdmHlp_SSMHandleGetStatus;
     g_tstPdmDevHlpR3.pfnCritSectGetNop                  = tstPdmHlp_CritSectGetNop;
     g_tstPdmDevHlpR3.pfnSetDeviceCritSect               = tstPdmHlp_SetDeviceCritSect;
     g_tstPdmDevHlpR3.pfnSSMRegister                     = tstPdmHlp_SSMRegister;
@@ -2357,6 +2372,31 @@ int tstPdmLoadStatePrep(void)
                 return rc;
         }
     return VINF_SUCCESS;
+}
+
+
+/**
+ * Tells the devices that loading a saved state is over, the way it is done
+ * after everything was loaded or loading has failed.
+ *
+ * @returns VBox status code, the first failure a device reports.
+ * @param   rcLoad              How loading went up to here, which the devices can ask for.
+ */
+int tstPdmLoadStateDone(int rcLoad)
+{
+    AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
+    g_Pdm.szLastError[0] = '\0';
+    g_Pdm.rcSsm          = rcLoad;
+    int rc = VINF_SUCCESS;
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+        if (g_Pdm.aDevs[i].pfnLoadDone)
+        {
+            int rc2 = g_Pdm.aDevs[i].pfnLoadDone(g_Pdm.aDevs[i].pDevIns, NULL /*pSSM*/);
+            if (RT_FAILURE(rc2) && RT_SUCCESS(rc))
+                rc = rc2;
+        }
+    g_Pdm.rcSsm = VINF_SUCCESS;
+    return rc;
 }
 
 
