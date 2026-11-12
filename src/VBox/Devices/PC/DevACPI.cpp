@@ -221,7 +221,8 @@ enum
     SYSTEM_INFO_INDEX_NVME_ADDRESS      = 31, /**< First NVMe controller PCI address, or 0 */
     SYSTEM_INFO_INDEX_IOMMU_ADDRESS     = 32, /**< IOMMU PCI address, or 0 */
     SYSTEM_INFO_INDEX_SB_IOAPIC_ADDRESS = 33, /**< Southbridge I/O APIC (needed by AMD IOMMU) PCI address, or 0 */
-    SYSTEM_INFO_INDEX_END               = 34,
+    SYSTEM_INFO_INDEX_PCIE_NATIVE_HOTPLUG = 34, /**< Whether the guest is granted PCI express native hot-plug */
+    SYSTEM_INFO_INDEX_END               = 35,
     SYSTEM_INFO_INDEX_INVALID           = 0x80,
     SYSTEM_INFO_INDEX_VALID             = 0x200
 };
@@ -406,8 +407,11 @@ typedef struct ACPISTATE
     bool                fUseIommuAmd;
     /** If the IOMMU (Intel) device should be enabled */
     bool                fUseIommuIntel;
+    /** If the guest is granted control of PCI express native hot-plug, for PCI
+     * express root ports with a hot-plug capable slot. */
+    bool                fPciExpressNativeHotPlug;
     /** Padding. */
-    bool                afPadding0[3];
+    bool                afPadding0[2];
     /** Primary NIC PCI address. */
     uint32_t            u32NicPciAddress;
     /** HD Audio PCI address. */
@@ -1805,6 +1809,10 @@ static DECLCALLBACK(VBOXSTRICTRC) acpiR3SysInfoDataRead(PPDMDEVINS pDevIns, void
 
         case SYSTEM_INFO_INDEX_SB_IOAPIC_ADDRESS:
             *pu32 = pThis->u32SbIoApicPciAddress;
+            break;
+
+        case SYSTEM_INFO_INDEX_PCIE_NATIVE_HOTPLUG:
+            *pu32 = pThis->fPciExpressNativeHotPlug;
             break;
 
         case SYSTEM_INFO_INDEX_END:
@@ -4357,6 +4365,7 @@ static DECLCALLBACK(int) acpiR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
                                   "|PowerS1Enabled"
                                   "|PowerS4Enabled"
                                   "|CpuHotPlug"
+                                  "|PciExpressNativeHotPlug"
                                   "|DsdtFilePath"
                                   "|SsdtFilePath"
                                   "|Serial0IoPortBase"
@@ -4488,6 +4497,11 @@ static DECLCALLBACK(int) acpiR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
     rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "CpuHotPlug", &pThis->fCpuHotPlug, false);
     if (RT_FAILURE(rc))
         return PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to read \"CpuHotPlug\""));
+
+    /* query whether the guest is to do PCI express native hot-plug */
+    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "PciExpressNativeHotPlug", &pThis->fPciExpressNativeHotPlug, false);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to read \"PciExpressNativeHotPlug\""));
 
     /* query serial info */
     rc = pHlp->pfnCFGMQueryU8Def(pCfg, "Serial0Irq", &pThis->uSerial0Irq, 4);
