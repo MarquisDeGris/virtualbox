@@ -2228,12 +2228,46 @@ static void tstFuzzModelInit(PTSTVFIODEVCFG pModel, PTSTFUZZINFO pInfo)
             {
                 bCapId = VBOX_PCI_CAP_ID_MSIX;
                 uint32_t const cVectors = tstRndChance(80) ? tstRnd(1, 64) : tstRnd(1, 2048);
-                uint32_t const iBarTbl  = tstRndChance(90) ? tstRnd(0, 5) : tstRnd(6, 7);
-                uint32_t const iBarPba  = tstRndChance(80) ? iBarTbl : tstRnd(0, 7);
-                uint32_t const offTbl   = tstRndChance(80) ? tstRnd(0, 16) * 0x1000 : tstRndValue() & ~UINT32_C(7);
-                uint32_t const offPba   = tstRndChance(80)
-                                        ? offTbl + RT_ALIGN_32(cVectors * 16, tstRndChance(50) ? 0x1000 : 8)
-                                        : tstRndValue() & ~UINT32_C(7);
+                uint32_t       iBarTbl;
+                uint32_t       iBarPba;
+                uint32_t       offTbl;
+                uint32_t       offPba;
+                if (tstRndChance(70))
+                {
+                    /* The way devices have it: table and pending bits inside a memory BAR which is big
+                       enough for them, behind each other or in pages of their own. */
+                    uint32_t const cbTbl = cVectors * 16;
+                    uint32_t const cbPba = RT_ALIGN_32(cVectors, 64) / 8;
+                    iBarTbl = iBarPba = tstRnd(0, 5);
+                    for (uint32_t iBar = 0; iBar < 6; iBar++)
+                        if (   pModel->aRegions[iBar].cb
+                            && !(pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBar * 4] & PCI_ADDRESS_SPACE_IO))
+                        {
+                            iBarTbl = iBarPba = iBar;
+                            break;
+                        }
+                    offTbl = tstRnd(0, 3) * 0x1000;
+                    offPba = tstRndChance(50) ? offTbl + RT_ALIGN_32(cbTbl, 8) : offTbl + RT_ALIGN_32(cbTbl, 0x1000);
+                    uint32_t const cbNeeded = RT_ALIGN_32(offPba + cbPba, 0x1000) + (tstRndChance(50) ? 0x1000 : 0);
+                    if (   pModel->aRegions[iBarTbl].cb < cbNeeded
+                        || (pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBarTbl * 4] & PCI_ADDRESS_SPACE_IO))
+                    {
+                        uint32_t cbBar = _4K;
+                        while (cbBar < cbNeeded)
+                            cbBar *= 2;
+                        tstModelSetBar(pModel, iBarTbl, cbBar, PCI_ADDRESS_SPACE_MEM);
+                        tstFuzzAddEdge(pInfo, iBarTbl, cbBar);
+                    }
+                }
+                else
+                {
+                    iBarTbl = tstRndChance(90) ? tstRnd(0, 5) : tstRnd(6, 7);
+                    iBarPba = tstRndChance(80) ? iBarTbl : tstRnd(0, 7);
+                    offTbl  = tstRndChance(80) ? tstRnd(0, 16) * 0x1000 : tstRndValue() & ~UINT32_C(7);
+                    offPba  = tstRndChance(80)
+                            ? offTbl + RT_ALIGN_32(cVectors * 16, tstRndChance(50) ? 0x1000 : 8)
+                            : tstRndValue() & ~UINT32_C(7);
+                }
                 uint16_t const fCtrl    = (uint16_t)(cVectors - 1);
                 uint32_t const u32Tbl   = offTbl | iBarTbl;
                 uint32_t const u32Pba   = offPba | iBarPba;
@@ -2564,6 +2598,17 @@ static void tstFuzz(void)
             uint64_t const cbMapped = tstVfioKrnlGetDmaMappedBytes();
             RTTESTI_CHECK_MSG(cbMapped == TST_RAM_SIZE - TSTPDM_RAM_HOLE_SIZE, ("%RU64 bytes mapped for DMA\n", cbMapped));
             tstPdmPowerOn();
+
+            /* Most guests start out with setting the device up the way a firmware does it. */
+            if (tstRndChance(80))
+            {
+                for (uint32_t iBar = 0; iBar < 6; iBar++)
+                    tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0 + iBar * 4,
+                                        (s_Model.abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBar * 4] & PCI_ADDRESS_SPACE_IO)
+                                      ? TST_FUZZ_IO_PORT(iBar) : TST_FUZZ_MEM_ADDR(iBar), 4);
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND,
+                                  VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            }
 
             for (uint32_t iOp = 0, cOps = tstRnd(20, 400); iOp < cOps; iOp++)
                 tstFuzzGuestOp(&s_Model, pDev, &Info);
