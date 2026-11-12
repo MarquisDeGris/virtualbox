@@ -53,6 +53,7 @@
 #include <VBox/pci.h>
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/err.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/critsect.h>
 #include <iprt/mem.h>
@@ -235,6 +236,12 @@ typedef struct TSTVFIOKRNL
     uint32_t            cFailSkip;
     /** Fault injection: the errno to fail with. */
     int                 iFailErrno;
+    /** Fault injection: number of mappings of ordinary memory at a given address to fail. */
+    uint32_t volatile   cFailPlaceholderMaps;
+    /** Called before ordinary memory gets mapped at a given address, optional. */
+    PFNTSTVFIOMMAPHOOK  pfnPlaceholderHook;
+    /** The user argument of the hook. */
+    void               *pvPlaceholderHookUser;
 } TSTVFIOKRNL;
 
 
@@ -1668,6 +1675,64 @@ void tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno)
 }
 
 
+/**
+ * Makes the next mappings of ordinary memory at a given address fail, which is
+ * what takes the place of device memory when a device is let go of.
+ *
+ * @param   cTimes              How many of them fail, 0 for none.
+ */
+void tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes)
+{
+    ASMAtomicWriteU32(&g_Krnl.cFailPlaceholderMaps, cTimes);
+}
+
+
+/**
+ * Sets a function which is called before ordinary memory gets mapped at a
+ * given address, which is when a device is in the middle of being let go of.
+ *
+ * @param   pfnHook             The function, NULL for none.
+ * @param   pvUser              The user argument.
+ */
+void tstVfioKrnlSetPlaceholderMmapHook(PFNTSTVFIOMMAPHOOK pfnHook, void *pvUser)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.pfnPlaceholderHook    = pfnHook;
+    g_Krnl.pvPlaceholderHookUser = pvUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Checks whether a mapping is one which was asked to fail.
+ *
+ * @returns true if the mapping is to fail, false if not.
+ * @param   fFlags              The flags of the mapping, MAP_XXX.
+ */
+static bool tstVfioKrnlIsMmapToFail(int fFlags)
+{
+    if (   (fFlags & (MAP_FIXED | MAP_ANONYMOUS)) != (MAP_FIXED | MAP_ANONYMOUS)
+        || !g_Krnl.fInitialized)
+        return false;
+
+    RTCritSectEnter(&g_Krnl.CritSect);
+    PFNTSTVFIOMMAPHOOK const pfnHook = g_Krnl.pfnPlaceholderHook;
+    void * const             pvUser  = g_Krnl.pvPlaceholderHookUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    if (pfnHook)
+        pfnHook(pvUser);
+
+    for (;;)
+    {
+        uint32_t const cLeft = ASMAtomicReadU32(&g_Krnl.cFailPlaceholderMaps);
+        if (!cLeft)
+            return false;
+        if (ASMAtomicCmpXchgU32(&g_Krnl.cFailPlaceholderMaps, cLeft - 1, cLeft))
+            return true;
+    }
+}
+
+
 /*
  *
  * The wrappers, see GNU ld --wrap.
@@ -2034,6 +2099,11 @@ static void *tstVfioKrnlMmapRecord(int iFd, void *pv, size_t cb)
 
 void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
 {
+    if (tstVfioKrnlIsMmapToFail(fFlags))
+    {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
     if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
     {
         errno = EINVAL;
@@ -2045,6 +2115,11 @@ void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t
 
 void *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
 {
+    if (tstVfioKrnlIsMmapToFail(fFlags))
+    {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
     if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
     {
         errno = EINVAL;

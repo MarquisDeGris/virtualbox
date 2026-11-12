@@ -43,10 +43,11 @@
  * about EOI events from the guest for the device.
  * The passed through device therefore needs to support MSI or MSI-X.
  *
- * Saved states are not supported, and will never be as we can't capture the PCIe device state
- * and replay it when resuming. Saving the state of the VM and teleporting it are refused while
- * the device is part of the VM, and a saved state isn't loaded into a VM which has the device,
- * as it can only have been made without it.
+ * The state of the device can't be saved, and never will be as we can't capture the PCIe device
+ * state and replay it when resuming. Saving the state of the VM and teleporting it are refused
+ * while the device is part of the VM, and a saved state isn't loaded into a VM which has the
+ * device, as it can only have been made without it. A device in a hot-plug capable slot is the
+ * exception: the state can be saved while the slot is empty, see @ref sec_dev_vfio_hotplug.
  *
  * @section sec_dev_vfio_guest_view     What the guest gets to see
  *
@@ -125,6 +126,15 @@
  * pciVfioFunLayoutFromCfg(). The values are those pciVfioR3QueryLayout() returns for a VM which
  * was started with the device. A device which is there when the VM starts is what counts, the
  * configured layout is not looked at then.
+ *
+ * The state of the VM can be saved and the VM can be teleported while the slot is empty, and
+ * only then: the device has to be taken out first, and no device is put in while the state is
+ * being saved. The guest finds the slot empty when the state is loaded. If the VM which loads
+ * the state has the device, the device is taken out of the slot before anything is loaded and
+ * put in again afterwards, which is a device being plugged in for the guest. This way whatever
+ * reads and writes the memory of the VM for the saved state gets the ordinary memory keeping
+ * the place of the device memory, and never the memory of a device. A state is only loaded
+ * into a VM which is built from the same layout as the one which saved it.
  *
  * @section sec_dev_vfio_requirements
  *
@@ -239,6 +249,7 @@
 #include <VBox/vmm/vmapi.h>
 #include <iprt/asm.h>
 #include <iprt/assert.h>
+#include <iprt/critsect.h>
 #include <iprt/ctype.h>
 #include <iprt/dir.h>
 #include <iprt/mem.h>
@@ -301,6 +312,10 @@
  * again meanwhile takes the request back or, once the slot is off, asks for the
  * opposite. */
 #define VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS       (10 * RT_MS_1SEC)
+
+/** The version of the saved state unit.  The unit has the layout the VM is built
+ * from for each function, nothing of the device. */
+#define VFIO_PCI_SAVED_STATE_VERSION          1
 
 
 /*********************************************************************************************************************************
@@ -433,6 +448,9 @@ typedef struct VFIOPCIFUN
     /** Flag whether the guest finds nothing where the function was.  This follows fGone
      * once the guest mappings of the BARs are removed, see pciVfioFunGoneOnEmt(). */
     bool volatile        fGoneForGuest;
+    /** Flag whether memory of the device stayed mapped when the function went out of
+     * service, because putting ordinary memory into its place failed. */
+    bool volatile        fDevMemLeft;
     /** What takes the place of the device file when the function goes out of service:
      * a file descriptor which refuses everything the device file is used for. */
     int                  iFdInert;
@@ -606,6 +624,15 @@ typedef struct VFIOPCI
     /** When the attention button of the slot was pressed last to ask the guest to let
      * go of the device, 0 if it wasn't since the link to the slot went down last. */
     uint64_t volatile    msAttnPressed;
+    /** Serializes what is done about the slot being empty or not: putting a device in,
+     * completing the removal of one on an EMT, and saving and loading the state of the
+     * VM, which are for an empty slot only. */
+    RTCRITSECT           CritSectSlot;
+    /** Flag whether the device was taken out of the slot for loading a saved state and
+     * is to be put in again when that is done. */
+    bool                 fLoadReattach;
+    /** Flag whether the saved state being loaded has the unit of this device. */
+    bool                 fLoadUnitSeen;
 } VFIOPCI;
 /** Pointer to the raw PCI instance data. */
 typedef VFIOPCI *PVFIOPCI;
@@ -3767,6 +3794,22 @@ static int pciVfioFunOpen(PVFIOPCI pThis, PVFIOPCIFUN pFun, PCFGMNODE pCfg, int 
 
 
 /**
+ * Hands back to the host what the memory keeping the place of the device memory
+ * of a function has taken up.
+ *
+ * @param   pFun        The function, out of service.
+ */
+static void pciVfioFunPlaceholdersDrop(PCVFIOPCIFUN pFun)
+{
+    if (pFun->fDevMemLeft)
+        return;
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
+        if (pFun->aBars[iBar].pvMmio)
+            madvise((void *)pFun->aBars[iBar].pvMmio, pFun->aBars[iBar].cbRegion, MADV_DONTNEED);
+}
+
+
+/**
  * Does on an EMT what is left to do for a function which went out of service:
  * the guest loses its mappings of the BARs and finds nothing where the function
  * was from then on.
@@ -3782,27 +3825,33 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
     PVFIOPCIFUN pFun    = &pThis->aPciFuns[iPciFun];
     PPDMPCIDEV  pPciDev = pDevIns->apPciDevs[iPciFun];
 
-    /* Nothing to do if a device was put in again before this got its turn. */
-    if (!pFun->fGone)
-        return VINF_SUCCESS;
+    /*
+     * One EMT at a time, and not while another one puts a device into the slot or
+     * prepares the slot for saving or loading the state of the VM.
+     */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
 
-    /* The PCI bus removes the mappings when the decoding gets disabled.  The guest doesn't get to enable it again. */
-    uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
-    uint16_t const u16Cmd     = PDMPciDevGetCommand(pPciDev);
-    if (u16Cmd & fCmdActive)
+    /* Nothing to do if a device was put in again before this got its turn. */
+    if (pFun->fGone)
     {
-        VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16Cmd & ~fCmdActive);
-        Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
+        /* The PCI bus removes the mappings when the decoding gets disabled.  The guest doesn't get to enable it again. */
+        uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
+        uint16_t const u16Cmd     = PDMPciDevGetCommand(pPciDev);
+        if (u16Cmd & fCmdActive)
+        {
+            VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16Cmd & ~fCmdActive);
+            Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
+        }
+
+        /* From here on the guest finds nothing where the function was. */
+        ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
+
+        /* Whatever the guest managed to write into the memory which took the place of the BARs is of no use to anybody. */
+        pciVfioFunPlaceholdersDrop(pFun);
     }
 
-    /* From here on the guest finds nothing where the function was. */
-    ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
-
-    /* Whatever the guest managed to write into the memory which took the place of the BARs is of no use to anybody. */
-    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
-        if (pFun->aBars[iBar].pvMmio)
-            madvise((void *)pFun->aBars[iBar].pvMmio, pFun->aBars[iBar].cbRegion, MADV_DONTNEED);
-
+    RTCritSectLeave(&pThis->CritSectSlot);
     return VINF_SUCCESS;
 }
 
@@ -3822,17 +3871,30 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun);
  * valid.  The file descriptor of the device is replaced by one which refuses
  * everything, which leaves its number valid for whoever is using it right now.
  *
+ * A device which is just being put into the hot-plug capable slot gets there
+ * first, and whoever is checking that nothing of a device is left in the VM
+ * gets done with it, see pciVfioSlotIsEmptyForState().
+ *
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function.
  * @param   pszWhy      The reason, for the log.
  */
 static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszWhy)
 {
-    if (ASMAtomicXchgBool(&pFun->fGone, true))
+    /* Being out of service and the device being let go of are one thing for whoever
+       holds the critical section of the slot. */
+    int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRC(rcLock);
+    bool const fWasGone = ASMAtomicXchgBool(&pFun->fGone, true);
+    if (!fWasGone)
+    {
+        LogRel(("VFIO#%d.%u: The function is taken out of service: %s\n", pThis->iInstance, pFun->uPciFun, pszWhy));
+        pciVfioFunLetGo(pThis, pFun);
+    }
+    if (RT_SUCCESS(rcLock))
+        RTCritSectLeave(&pThis->CritSectSlot);
+    if (fWasGone)
         return;
-    LogRel(("VFIO#%d.%u: The function is taken out of service: %s\n", pThis->iInstance, pFun->uPciFun, pszWhy));
-
-    pciVfioFunLetGo(pThis, pFun);
 
     /* The rest is for an EMT to do. */
     int rc = PDMDevHlpVMReqCallNoWait(pThis->pDevIns, VMCPUID_ANY, (PFNRT)pciVfioFunGoneOnEmt, 2,
@@ -3854,6 +3916,7 @@ static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszW
 static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
 {
     /* The device memory mapped into this process and through that into the guest. */
+    bool fDevMemLeft = false;
     for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
     {
         PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
@@ -3862,10 +3925,14 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
             void *pv = mmap((void *)pBar->pvMmio, pBar->cbRegion, PROT_READ | PROT_WRITE,
                             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /*fd*/, 0 /*offset*/);
             if (pv == MAP_FAILED)
+            {
                 LogRel(("VFIO#%d.%u: Failed to replace the mapping of BAR%u (%d), the device stays in use by it\n",
                         pThis->iInstance, pFun->uPciFun, iBar, errno));
+                fDevMemLeft = true;
+            }
         }
     }
+    ASMAtomicWriteBool(&pFun->fDevMemLeft, fDevMemLeft);
 
     /* The device itself.  This also takes it out of the I/O address space and ends its interrupts. */
     if (dup3(pFun->iFdInert, pFun->iFdVfio, O_CLOEXEC) == -1)
@@ -3885,6 +3952,26 @@ static bool pciVfioIsOutOfService(PVFIOPCI pThis)
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
             && !pThis->aPciFuns[iPciFun].fGone)
+            return false;
+    return true;
+}
+
+
+/**
+ * Checks whether nothing of the device is left in the VM, which is what saving
+ * the state of the VM and loading one need: the memory which can be mapped into
+ * the guest is read when the state is saved and written to when it is loaded,
+ * and that must not be the memory of a device.
+ *
+ * @returns true if nothing of the device is left, false if something is.
+ * @param   pThis       The VFIO PCI device instance.
+ */
+static bool pciVfioSlotIsEmptyForState(PVFIOPCI pThis)
+{
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && (   !pThis->aPciFuns[iPciFun].fGone
+                || pThis->aPciFuns[iPciFun].fDevMemLeft))
             return false;
     return true;
 }
@@ -4605,15 +4692,17 @@ static int pciVfioFunAttach(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev
 
 
 /**
- * Puts a device into the empty hot-plug capable slot, on an EMT so nothing of
- * the VM gets in the way.
+ * Puts a device into the empty hot-plug capable slot.
  *
  * @returns VBox status code.
  * @param   pDevIns     The device instance.
+ *
+ * @thread  EMT, owning the critical section of the slot.
  */
-static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
+static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
 {
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    Assert(RTCritSectIsOwner(&pThis->CritSectSlot));
 
     /*
      * The slot has to be empty, with nothing left to do for the device which was
@@ -4651,6 +4740,7 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
         {
+            ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fDevMemLeft, false);
             ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fGoneForGuest, false);
             ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fGone, false);
         }
@@ -4669,6 +4759,42 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
 
 
 /**
+ * Puts a device into the empty hot-plug capable slot, on an EMT so nothing of
+ * the VM gets in the way.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ */
+static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+
+    /*
+     * The slot has to stay empty while the state of the VM is being saved or
+     * loaded, see pciVfioSavePrep() and pciVfioLoadPrep().  The state of the VM
+     * tells: it is changed before the callbacks of the saved state get called,
+     * and these wait for what is going on here.
+     */
+    VMSTATE const enmVMState = PDMDevHlpVMState(pDevIns);
+    if (   enmVMState == VMSTATE_RUNNING
+        || enmVMState == VMSTATE_SUSPENDED)
+        rc = pciVfioSlotAttachWorker(pDevIns);
+    else
+    {
+        LogRel(("VFIO#%d: No device is put into the slot unless the VM is running or suspended (VM state %d)\n",
+                pThis->iInstance, enmVMState));
+        rc = VERR_VM_INVALID_VM_STATE;
+    }
+
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
  * Puts the device which is configured for the device instance into the empty
  * hot-plug capable slot.  The guest is told and does the rest.
  *
@@ -4679,6 +4805,8 @@ static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
  * @retval  VERR_NOT_SUPPORTED if the device instance is not in a hot-plug capable slot.
  * @retval  VERR_ALREADY_EXISTS if there is a device in the slot.
  * @retval  VERR_MISMATCH if the device is not like the one the VM was started with.
+ * @retval  VERR_VM_INVALID_VM_STATE if the VM is neither running nor suspended, which
+ *          it isn't while its state is being saved or loaded.
  * @param   pDevIns     The device instance.
  *
  * @thread  Any.
@@ -4794,6 +4922,9 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
         }
     }
 
+    if (RTCritSectIsInitialized(&pThis->CritSectSlot))
+        RTCritSectDelete(&pThis->CritSectSlot);
+
     return VINF_SUCCESS;
 }
 
@@ -4809,7 +4940,14 @@ static int pciVfioRefuseSavingState(PPDMDEVINS pDevIns)
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     LogRel(("VFIO#%d: The state of the VM can't be saved with a PCI device of the host passed through to it\n",
             pThis->iInstance));
-    int rc = PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "PciVfioNoSavedState",
+    int rc;
+    if (pThis->pDevInsPort)
+        rc = PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "PciVfioNoSavedState",
+                                        N_("The state of the VM can't be saved or teleported while a PCI device of the "
+                                           "host is passed through to it. Take the device out of the VM first, or "
+                                           "power the VM off instead"));
+    else
+        rc = PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "PciVfioNoSavedState",
                                         N_("The state of the VM can't be saved or teleported while a PCI device of the "
                                            "host is passed through to it. Power the VM off instead, or remove the device "
                                            "from the VM first"));
@@ -4819,12 +4957,88 @@ static int pciVfioRefuseSavingState(PPDMDEVINS pDevIns)
 
 
 /**
- * @callback_method_impl{FNSSMDEVLIVEPREP, The state of a device of the host can't be moved to another host.}
+ * Completes on an EMT what is left to do for the functions after the device was
+ * taken out of the hot-plug capable slot, for saving the state of the VM or
+ * loading one: the guest loses its mappings of the BARs, see
+ * pciVfioFunGoneOnEmt(), and nothing of the device stays behind in the config
+ * space of the functions.  The PCI bus saves the config space and compares what
+ * is there with what it loads.  It has the same to go by this way whether the
+ * VM was started with the device or without, see pciVfioFunConstructEmpty().
+ *
+ * The threads delivering the interrupts of the functions are not running while
+ * a state is saved or loaded, so nobody is looking at the config space.
+ *
+ * @param   pThis       The VFIO PCI device instance, with nothing in the slot.
+ *
+ * @thread  EMT, owning the critical section of the slot.
+ */
+static void pciVfioSlotEmptyComplete(PVFIOPCI pThis)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+    Assert(RTCritSectIsOwner(&pThis->CritSectSlot));
+
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+        if (pFun->iFdVfio == -1)
+            continue;
+        PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
+
+        if (!pFun->fGoneForGuest)
+            pciVfioFunGoneOnEmt(pDevIns, iPciFun);
+
+        /* What pciVfioFunAttach() takes from a device and puts together for it. */
+        for (uint32_t i = 0; i < RT_ELEMENTS(s_aCfgSpaceDesc); i++)
+            if (s_aCfgSpaceDesc[i].fInitFromDev)
+                memset(&pPciDev->abConfig[s_aCfgSpaceDesc[i].offReg], 0, s_aCfgSpaceDesc[i].cbReg);
+        PDMPciDevSetVendorId(pPciDev, UINT16_MAX);
+        PDMPciDevSetDeviceId(pPciDev, UINT16_MAX);
+        PDMPciDevSetCapabilityList(pPciDev, 0);
+        memset(&pPciDev->abConfig[0x40], 0, sizeof(pPciDev->abConfig) - 0x40);
+    }
+}
+
+
+/**
+ * Checks whether the state of the VM can be saved or teleported as far as this
+ * device goes: only with a hot-plug capable slot which is empty.  Without such a
+ * slot the device is part of the VM for good.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ * @param   fFinal      Whether the state gets saved right away, with the VM suspended and
+ *                      this being called on an EMT.
+ */
+static int pciVfioSaveCheck(PPDMDEVINS pDevIns, bool fFinal)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    if (!pThis->pDevInsPort)
+        return pciVfioRefuseSavingState(pDevIns);
+
+    /*
+     * A device which is being put into the slot right now gets there first.  None
+     * is put in from here on until the state is saved, see pciVfioSlotAttachOnEmt().
+     */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    if (!pciVfioSlotIsEmptyForState(pThis))
+        rc = pciVfioRefuseSavingState(pDevIns);
+    else if (fFinal)
+        pciVfioSlotEmptyComplete(pThis);
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLIVEPREP,
+ *      The state of a device of the host can't be moved to another host.  This is
+ *      called before anything of the VM is looked at while it keeps running.}
  */
 static DECLCALLBACK(int) pciVfioLivePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
     RT_NOREF(pSSM);
-    return pciVfioRefuseSavingState(pDevIns);
+    return pciVfioSaveCheck(pDevIns, false /*fFinal*/);
 }
 
 
@@ -4834,20 +5048,286 @@ static DECLCALLBACK(int) pciVfioLivePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 static DECLCALLBACK(int) pciVfioSavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
     RT_NOREF(pSSM);
-    return pciVfioRefuseSavingState(pDevIns);
+    return pciVfioSaveCheck(pDevIns, true /*fFinal*/);
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVSAVEEXEC,
+ *      Saves what the VM is built from for each function\, so the state is only
+ *      loaded into a VM which is built the same way.  There is no device in the
+ *      slot\, see pciVfioSavePrep().}
+ */
+static DECLCALLBACK(int) pciVfioSaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    for (uint32_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PCIVFIOFUNLAYOUT Layout;
+        if (RT_FAILURE(pciVfioR3QueryLayout(pDevIns, iPciFun, &Layout)))
+            continue;
+
+        pHlp->pfnSSMPutU32(pSSM, iPciFun);
+        pHlp->pfnSSMPutU32(pSSM, Layout.cbPciCfg);
+        for (uint32_t iBar = 0; iBar < RT_ELEMENTS(Layout.aBars); iBar++)
+        {
+            pHlp->pfnSSMPutU64(pSSM, Layout.aBars[iBar].cb);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].fIoPorts);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].f64Bit);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].fPrefetchable);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].fMappable);
+        }
+        pHlp->pfnSSMPutU64(pSSM, Layout.cbRom);
+        pHlp->pfnSSMPutBool(pSSM, Layout.fVga);
+        pHlp->pfnSSMPutBool(pSSM, Layout.fMsix);
+        pHlp->pfnSSMPutU8(pSSM, Layout.iBarMsix);
+        for (uint32_t i = 0; i < RT_ELEMENTS(Layout.acIrqVectors); i++)
+            pHlp->pfnSSMPutU32(pSSM, Layout.acIrqVectors[i]);
+        pHlp->pfnSSMPutU32(pSSM, Layout.offMsixTbl);
+        pHlp->pfnSSMPutU32(pSSM, Layout.offMsixPba);
+    }
+    return pHlp->pfnSSMPutU32(pSSM, UINT32_MAX); /* terminator */
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVSAVEDONE,
+ *      Saving the state has read through the memory keeping the place of the
+ *      device memory\, which makes the host keep track of it.}
+ */
+static DECLCALLBACK(int) pciVfioSaveDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    RT_NOREF(pSSM);
+
+    /* This is called for a state which was not saved too. */
+    if (pThis->pDevInsPort)
+    {
+        int rc = RTCritSectEnter(&pThis->CritSectSlot);
+        AssertRCReturn(rc, rc);
+        if (pciVfioSlotIsEmptyForState(pThis))
+            for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+                if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+                    pciVfioFunPlaceholdersDrop(&pThis->aPciFuns[iPciFun]);
+        RTCritSectLeave(&pThis->CritSectSlot);
+    }
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Compares what two VMs are built from for a function.
+ *
+ * @returns What differs, NULL if nothing does.
+ * @param   pLayout1    The one layout.
+ * @param   pLayout2    The other layout.
+ */
+static const char *pciVfioLayoutDiff(PCPCIVFIOFUNLAYOUT pLayout1, PCPCIVFIOFUNLAYOUT pLayout2)
+{
+    if (pLayout1->cbPciCfg != pLayout2->cbPciCfg)
+        return "config spaces";
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout1->aBars); iBar++)
+        if (   pLayout1->aBars[iBar].cb            != pLayout2->aBars[iBar].cb
+            || pLayout1->aBars[iBar].fIoPorts      != pLayout2->aBars[iBar].fIoPorts
+            || pLayout1->aBars[iBar].f64Bit        != pLayout2->aBars[iBar].f64Bit
+            || pLayout1->aBars[iBar].fPrefetchable != pLayout2->aBars[iBar].fPrefetchable
+            || pLayout1->aBars[iBar].fMappable     != pLayout2->aBars[iBar].fMappable)
+            return "BARs";
+    if (   pLayout1->fMsix      != pLayout2->fMsix
+        || pLayout1->iBarMsix   != pLayout2->iBarMsix
+        || pLayout1->offMsixTbl != pLayout2->offMsixTbl
+        || pLayout1->offMsixPba != pLayout2->offMsixPba)
+        return "MSI-X tables";
+    if (pLayout1->cbRom != pLayout2->cbRom)
+        return "ROMs";
+    if (pLayout1->fVga != pLayout2->fVga)
+        return "legacy VGA ranges";
+    for (uint32_t i = 0; i < RT_ELEMENTS(pLayout1->acIrqVectors); i++)
+        if (pLayout1->acIrqVectors[i] != pLayout2->acIrqVectors[i])
+            return "interrupts";
+    return NULL;
 }
 
 
 /**
  * @callback_method_impl{FNSSMDEVLOADPREP,
- *      A saved state can only have been made without the device\, so the device was added afterwards.}
+ *      A state is loaded into a VM with nothing in the hot-plug capable slot\, as
+ *      that is what it was saved with.}
  */
 static DECLCALLBACK(int) pciVfioLoadPrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
-    return pDevIns->pHlpR3->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
-                                               N_("The saved state was made without the PCI device of the host which is "
-                                                  "passed through to the VM now. Remove the device from the VM or discard "
-                                                  "the saved state"));
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    /* Without such a slot the device is part of the VM for good, and no state gets saved with that. */
+    if (!pThis->pDevInsPort)
+        return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                        N_("The saved state was made without the PCI device of the host which is "
+                                           "passed through to the VM now. Remove the device from the VM or discard "
+                                           "the saved state"));
+
+    /*
+     * Loading writes to all the memory the guest can have mapped, and this must not
+     * be the memory of a device.  The guest which is loaded doesn't know of a device
+     * in the slot either.  So a device goes out of the slot here, like one the host
+     * takes back, and is put in again when loading is done, see pciVfioLoadDone().
+     */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    pThis->fLoadUnitSeen = false;
+    pThis->fLoadReattach = false;
+    if (!pciVfioIsOutOfService(pThis))
+    {
+        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded");
+        pThis->fLoadReattach = true;
+    }
+    if (pciVfioSlotIsEmptyForState(pThis))
+        pciVfioSlotEmptyComplete(pThis);
+    else
+        rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                      N_("The saved state can't be loaded as the PCI device of the host which is "
+                                         "passed through to the VM could not be taken out of it"));
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADEXEC,
+ *      Checks that the state was saved by a VM which is built from the same
+ *      layout as this one.}
+ */
+static DECLCALLBACK(int) pciVfioLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t uPass)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    Assert(uPass == SSM_PASS_FINAL); RT_NOREF(uPass);
+    if (uVersion != VFIO_PCI_SAVED_STATE_VERSION)
+        return VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION;
+
+    uint32_t fFunsSaved = 0;
+    for (;;)
+    {
+        uint32_t iPciFun = 0;
+        int rc = pHlp->pfnSSMGetU32(pSSM, &iPciFun);
+        AssertRCReturn(rc, rc);
+        if (iPciFun == UINT32_MAX)
+            break;
+        if (   iPciFun >= RT_ELEMENTS(pThis->aPciFuns)
+            || (fFunsSaved & RT_BIT_32(iPciFun)))
+            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, RT_SRC_POS,
+                                            "iPciFun=%#RX32 fFunsSaved=%#RX32", iPciFun, fFunsSaved);
+        fFunsSaved |= RT_BIT_32(iPciFun);
+
+        PCIVFIOFUNLAYOUT Saved;
+        RT_ZERO(Saved);
+        pHlp->pfnSSMGetU32(pSSM, &Saved.cbPciCfg);
+        for (uint32_t iBar = 0; iBar < RT_ELEMENTS(Saved.aBars); iBar++)
+        {
+            pHlp->pfnSSMGetU64(pSSM, &Saved.aBars[iBar].cb);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].fIoPorts);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].f64Bit);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].fPrefetchable);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].fMappable);
+        }
+        pHlp->pfnSSMGetU64(pSSM, &Saved.cbRom);
+        pHlp->pfnSSMGetBool(pSSM, &Saved.fVga);
+        pHlp->pfnSSMGetBool(pSSM, &Saved.fMsix);
+        pHlp->pfnSSMGetU8(pSSM, &Saved.iBarMsix);
+        for (uint32_t i = 0; i < RT_ELEMENTS(Saved.acIrqVectors); i++)
+            pHlp->pfnSSMGetU32(pSSM, &Saved.acIrqVectors[i]);
+        pHlp->pfnSSMGetU32(pSSM, &Saved.offMsixTbl);
+        rc = pHlp->pfnSSMGetU32(pSSM, &Saved.offMsixPba);
+        AssertRCReturn(rc, rc);
+
+        PCIVFIOFUNLAYOUT Layout;
+        rc = pciVfioR3QueryLayout(pDevIns, iPciFun, &Layout);
+        if (RT_FAILURE(rc))
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
+                                           N_("The state was saved with function %u of a passed through PCI device, "
+                                              "which the VM doesn't have"), iPciFun);
+        const char * const pszWhat = pciVfioLayoutDiff(&Saved, &Layout);
+        if (pszWhat)
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
+                                           N_("The state was saved with another kind of PCI device passed through as "
+                                              "function %u: the %s differ"), iPciFun, pszWhat);
+    }
+
+    for (uint32_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !(fFunsSaved & RT_BIT_32(iPciFun)))
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
+                                           N_("The state was saved without function %u of the passed through PCI device"),
+                                           iPciFun);
+
+    pThis->fLoadUnitSeen = true;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADDONE,
+ *      Puts the device back into the slot if it was taken out for loading the
+ *      state.  The guest is told that a device was plugged in.}
+ */
+static DECLCALLBACK(int) pciVfioLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    /* Nothing to do here if loading was refused or failed, this gets called nevertheless. */
+    if (   !pThis->pDevInsPort
+        || RT_FAILURE(pHlp->pfnSSMHandleGetStatus(pSSM)))
+        return VINF_SUCCESS;
+
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    bool const fReattach = pThis->fLoadReattach;
+    pThis->fLoadReattach = false;
+
+    /* A state without the unit of this device was saved by a VM which didn't have the device at all. */
+    if (!pThis->fLoadUnitSeen)
+        rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                      N_("The saved state was made without the PCI device of the host which is "
+                                         "configured for the VM now. Remove the device from the VM or discard "
+                                         "the saved state"));
+
+    /* The PCI bus takes what it knows about the interrupt capabilities of a function from the
+       state.  It knows nothing about those of our functions, they are dealt with here. */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns) && RT_SUCCESS(rc); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && (   pDevIns->apPciDevs[iPciFun]->Int.s.u8MsiCapOffset
+                || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsiCapSize
+                || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsixCapOffset
+                || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsixCapSize))
+            rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                          N_("The saved state has interrupt capabilities for function %u of the passed "
+                                             "through PCI device which belong to another kind of device"), iPciFun);
+
+    if (RT_SUCCESS(rc))
+    {
+        /* The slot is as empty as before for the guest, whatever was loaded for the functions,
+           and what loading has written to the memory keeping the place of the device memory
+           is of no use to anybody. */
+        pciVfioSlotEmptyComplete(pThis);
+        for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+            if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+                pciVfioFunPlaceholdersDrop(&pThis->aPciFuns[iPciFun]);
+
+        if (fReattach)
+        {
+            int rc2 = pciVfioSlotAttachWorker(pDevIns);
+            if (RT_FAILURE(rc2))
+                LogRel(("VFIO#%d: The device was not put back into the slot after the saved state was loaded (%Rrc)\n",
+                        pThis->iInstance, rc2));
+        }
+    }
+
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
 }
 
 
@@ -5256,6 +5736,8 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->pDevInsPort      = NULL;
     pThis->cMsGuestRelease  = 15 * RT_MS_1SEC;
     pThis->msAttnPressed    = 0;
+    pThis->fLoadReattach    = false;
+    pThis->fLoadUnitSeen    = false;
 
     for (uint8_t i = 0; i < RT_ELEMENTS(pThis->aPciFuns); i++)
     {
@@ -5266,6 +5748,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         pFun->fIoasAttached  = false;
         pFun->fGone          = false;
         pFun->fGoneForGuest  = false;
+        pFun->fDevMemLeft    = false;
         pFun->iFdInert       = -1;
         pFun->iFdEvtReq      = -1;
         pFun->iFdEvtErr      = -1;
@@ -5283,11 +5766,17 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     if (RT_FAILURE(rc))
         return rc;
 
-    /* There is no state to save, the unit is there for refusing to. */
-    rc = PDMDevHlpSSMRegisterEx(pDevIns, 1 /*uVersion*/, 0 /*cbGuess*/, NULL /*pszBefore*/,
+    /* A critical section for what is done about the hot-plug capable slot.  The destructor checks whether it is there. */
+    rc = RTCritSectInit(&pThis->CritSectSlot);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /* The state of a device isn't saved.  The unit is there for refusing to, and for what
+       saving and loading the state with an empty hot-plug capable slot takes. */
+    rc = PDMDevHlpSSMRegisterEx(pDevIns, VFIO_PCI_SAVED_STATE_VERSION, 512 /*cbGuess*/, NULL /*pszBefore*/,
                                 pciVfioLivePrep, NULL /*pfnLiveExec*/, NULL /*pfnLiveVote*/,
-                                pciVfioSavePrep, NULL /*pfnSaveExec*/, NULL /*pfnSaveDone*/,
-                                pciVfioLoadPrep, NULL /*pfnLoadExec*/, NULL /*pfnLoadDone*/);
+                                pciVfioSavePrep, pciVfioSaveExec, pciVfioSaveDone,
+                                pciVfioLoadPrep, pciVfioLoadExec, pciVfioLoadDone);
     if (RT_FAILURE(rc))
         return rc;
 
