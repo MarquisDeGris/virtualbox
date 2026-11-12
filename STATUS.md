@@ -7,17 +7,19 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `f6a1395f` (17 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `bd836fb5` (19 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 (hardening), WP3 (removal of the device on the host) and the first part
-of WP4 (saved state is refused) are done. The testcase runs clean with
-AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer, including the
-fuzz test (T2). Next: hot-plug towards the guest (WP5, WP6).
+WP2 (hardening), WP3 (removal of the device on the host), the first part of
+WP4 (saved state is refused) and WP5 (hot-plug slot in the root port, ACPI)
+are done. The testcase runs clean with AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer, including the fuzz tests (T2). Next: the
+passthrough device uses the slot, so it can come and go while the VM runs
+(WP6).
 
 ## Done
 
@@ -150,13 +152,35 @@ fuzz test (T2). Next: hot-plug towards the guest (WP5, WP6).
   message for the user; loading a saved state into a VM which has the device
   is refused too. The second part (saving with an empty slot) comes with
   the hot-plug slot of WP6.
+- WP5 (commits `2e543155`, `bd836fb5`): the guest side of hot-plug.
+  - A PCI express root port configured with `HotPlug` has a slot for PCI
+    express native hot-plug: power controller, attention button, the two
+    indicators, hot-plug surprise; commands complete at once; slot events
+    are signalled by MSI.
+  - The PCI express capability of such a port has the access attributes of
+    the specification (read-only, read-write, write-1-to-clear). Other
+    bridges are unchanged.
+  - While the link to the slot is down (no device, no power, link disabled)
+    the guest gets no answer from what is behind the port.
+  - A device which comes and goes registers with the port and is told about
+    the link. The passthrough device does not do that yet (WP6).
+  - Nothing new in the saved state; after loading, the guest is told what
+    changed in the slot. A state of a port with another slot is refused.
+  - ACPI: with the setting `PciExpressNativeHotPlug` of the ACPI device,
+    `_OSC` grants the guest native hot-plug, PME, AER and the PCI express
+    capability structure, and the PCI root bridge is a PCI express root
+    bridge (`PNP0A08`). Without the setting nothing changes but a compatible
+    ID being there.
+  - Until WP7 both settings are extra data:
+    `VBoxInternal/Devices/ich9pcibridge/<n>/Config/HotPlug` and
+    `VBoxInternal/Devices/acpi/0/Config/PciExpressNativeHotPlug`.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 85) |
+| Test | Before the fix | With fixes (run 101) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -194,6 +218,12 @@ Each new test was first run against the device without the fix it belongs to.
 | Device taken back before power on, device error | fails, 16 checks (run 81) | pass |
 | The host takes the device back while the guest is busy with it | fails (run 81) | pass |
 | Saved state is refused | fails, 8 checks (run 87) | pass |
+| Root port: registers of the hot-plug slot | new feature; deliberate defects are found (runs 92, 95, 98, 99) | pass |
+| Root port: slot events and interrupts | new feature; deliberate defects are found (runs 92, 94, 97) | pass |
+| Root port: device in the hot-plug slot | new feature; deliberate defects are found (runs 93, 97) | pass |
+| Root port: hot-plug slot and saved state | new feature; deliberate defect is found (run 96) | pass |
+| Root port: random guest accesses and slot events | new feature; deliberate defect is found (run 98) | pass |
+| ACPI table: hardware ID of the root bridge and `_OSC`, executed with the ACPICA tools | without the change: ID and `_OSC` as before (first half of the check) | pass |
 
 ## Test harness (WP1)
 
@@ -221,9 +251,10 @@ device, saved-state stream.
 
 ## Next
 
-1. WP5: PCIe native hot-plug in the root port.
-2. WP6: hot-pluggable passthrough slot, second part of WP4.
-3. WP7: management interface.
+1. WP6: the passthrough device in the hot-plug slot: attach and detach
+   while the VM runs, asking the guest first, second part of WP4.
+2. WP7: management interface, which also sets the two settings of WP5.
+3. T4: a guest operating system using the slot, in CI.
 
 ## Decisions
 
@@ -250,13 +281,20 @@ device, saved-state stream.
 | 2026-11-12 | The notifications of the host are watched by a thread of the device's own, not a PDM thread | PDM threads stand still while the VM is paused; the host waits for the device to be let go of |
 | 2026-11-12 | Device memory mapped into the guest is replaced in place by ordinary memory when the device goes away; the file descriptor is replaced in place too | Everybody holding the address or the descriptor number stays valid without locking, and nothing can touch the device afterwards |
 | 2026-11-12 | A function with an error the host cannot recover from is let go of, the VM keeps running | The alternative, stopping the VM, takes down everything else the guest does; the guest sees a device which failed |
+| 2026-11-12 | The hot-plug slot has a power controller, an attention button, both indicators and is surprise capable; commands complete at once | This is the slot of the root ports of other virtual machines, which Windows and Linux guests are known to handle; a Windows guest cannot be tried before the hardware test |
+| 2026-11-12 | Slot events are signalled by MSI only, the root port gets no interrupt pin | Allowed by the specification; passthrough depends on MSI anyway; no new interrupt routing |
+| 2026-11-12 | Only root ports configured with `HotPlug` get the strict access attributes for the PCI express capability | The guest takes control of the capability with native hot-plug; all other bridges and with them all existing VMs stay as they are |
+| 2026-11-12 | The port itself keeps the guest from what is behind it while the link is down | Does not depend on the device behind the port doing it right |
+| 2026-11-12 | The slot adds nothing to the saved state; after loading, the port compares what is in the slot with what the guest saw last | The config space is all the guest knows; a device which was put in or taken out while the state was on disk is an ordinary hot-plug event |
+| 2026-11-12 | `_OSC` grants native hot-plug, PME, AER and the capability structure together, and only with a setting of its own; the root bridge is `PNP0A08` then | Same as in other virtual machines Windows guests do native hot-plug with; VMs without the setting keep their ACPI behaviour |
+| 2026-11-12 | The ACPI table is checked in CI by executing it with the ACPICA tools | The table is the one part of WP5 the device testcase cannot reach |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 35 tests | `f6a1395f` | all pass (run 85); clean with ASan, LSan and UBSan (run 86) |
-| T2 fuzz | running in CI | `f6a1395f` | 2000 models per run, 20000 with sanitizers (run 86); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 39 tests, ACPI table check | `bd836fb5` | all pass (run 101); clean with ASan, LSan and UBSan (run 102) |
+| T2 fuzz | running in CI | `bd836fb5` | 2000 models and 400000 operations on the root port per run, 20000 and 2000000 with sanitizers (run 102); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -322,5 +360,9 @@ device, saved-state stream.
 | 83, 84 | code branch @ `24515f86` | tests, sanitize | passed | 34 tests and the fuzz test |
 | 85, 86 | code branch @ `f6a1395f` (as `scratch/ssm`) | tests, sanitize | passed | 35 tests and the fuzz test |
 | 87 | `scratch/red-evidence-14` | tests | failed as intended | saved state test against the driver before the change |
+| 88 to 90 | `scratch/hotplug` | tests | failed | development of WP5 (test did not compile; a check of the new fuzz test was too strict; option of a CI tool) |
+| 91, 100 | `scratch/hotplug` | tests, sanitize | passed | 39 tests, two fuzz tests, ACPI table check |
+| 92 to 99 | `scratch/mutant-hp1` to `scratch/mutant-hp8` | tests | failed as intended | eight deliberate defects in the hot-plug slot, each one caught |
+| 101, 102 | code branch @ `bd836fb5` | tests, sanitize | passed | 39 tests, two fuzz tests, ACPI table check |
 
 Run numbers are those GitHub shows for the `build` workflow.
