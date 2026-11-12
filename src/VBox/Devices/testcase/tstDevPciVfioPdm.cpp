@@ -422,6 +422,8 @@ typedef struct TSTPDM
     TSTPDMMSI           aMsis[256];
     /** Number of MSIs delivered. */
     uint32_t            cMsis;
+    /** The MSI which was delivered last. */
+    TSTPDMMSI           LastMsi;
     /** Requests waiting for the thread playing the EMT, protected by CritSectIrq. */
     struct
     {
@@ -1440,6 +1442,9 @@ static DECLCALLBACK(void) tstPdmPciHlp_IoApicSendMsi(PPDMDEVINS pDevIns, PCIBDF 
         g_Pdm.aMsis[g_Pdm.cMsis].uAddr     = pMsi->Addr.u64;
         g_Pdm.aMsis[g_Pdm.cMsis].uData     = pMsi->Data.u32;
     }
+    g_Pdm.LastMsi.uBusDevFn = uBusDevFn;
+    g_Pdm.LastMsi.uAddr     = pMsi->Addr.u64;
+    g_Pdm.LastMsi.uData     = pMsi->Data.u32;
     g_Pdm.cMsis++;
     RTCritSectLeave(&g_Pdm.CritSectIrq);
     RTSemEventSignal(g_Pdm.hEvtMsi);
@@ -3440,6 +3445,22 @@ bool tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi)
         *pMsi = g_Pdm.aMsis[idxMsi];
         fRc   = true;
     }
+    RTCritSectLeave(&g_Pdm.CritSectIrq);
+    return fRc;
+}
+
+
+/**
+ * Returns the MSI which reached the interrupt controller last.
+ *
+ * @returns true if there was one, false if not.
+ * @param   pMsi                Where to return the MSI.
+ */
+bool tstPdmMsiGetLast(PTSTPDMMSI pMsi)
+{
+    RTCritSectEnter(&g_Pdm.CritSectIrq);
+    bool const fRc = g_Pdm.cMsis != 0;
+    *pMsi = g_Pdm.LastMsi;
     RTCritSectLeave(&g_Pdm.CritSectIrq);
     return fRc;
 }

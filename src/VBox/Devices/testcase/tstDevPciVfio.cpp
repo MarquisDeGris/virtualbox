@@ -6327,6 +6327,36 @@ static void tstSlotFuzzGuestSetup(void)
 
 
 /**
+ * Has the guest set up MSI for function 0 of the device in the slot and the
+ * device raise an interrupt, which has to arrive the way the guest set it up.
+ *
+ * @param   pDev                Function 0 of the device of the fake kernel.
+ */
+static void tstSlotFuzzCheckMsi(PTSTVFIODEV pDev)
+{
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 16, 0, 4); /* No vector is masked. */
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee02000), 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 8,  0, 4);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 12, 0x4051, 2);
+    uint32_t const fMsgCtrl = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2, 2);
+    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2,
+                      (fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_QSIZE) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+
+    uint32_t const cMsisBefore = tstPdmMsiGetCount();
+    int rc = tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0);
+    TSTPDMMSI Msi;
+    RT_ZERO(Msi);
+    if (   RT_FAILURE(rc)
+        || !tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC)
+        || !tstPdmMsiGetLast(&Msi)
+        || Msi.uAddr != UINT64_C(0xfee02000)
+        || Msi.uData != 0x4051)
+        RTTestIFailed("the interrupt of the device did not arrive as the guest set it up (%Rrc, address %#RX64, data %#RX32)\n",
+                      rc, Msi.uAddr, Msi.uData);
+}
+
+
+/**
  * Checks what has to hold for a passthrough device in a hot-plug capable slot
  * whatever the guest, the host and the management do.
  *
@@ -6412,6 +6442,7 @@ static void tstSlotFuzz(void)
     uint32_t    cTakenByHost = 0;
     uint32_t    cStatesSaved = 0;
     uint32_t    cStatesLoaded = 0;
+    uint32_t    cInterrupts  = 0;
     g_cMsTstGuestRelease = 20;
     rc = tstSlotFixtureSetup(&s_Model, 1, &Fuzz.pDev, &Fuzz.pDevInsPort, &pDevInsDev);
     g_cMsTstGuestRelease = 0;
@@ -6477,7 +6508,11 @@ static void tstSlotFuzz(void)
                 /* The guest sets everything up, and reaches the device if there is one. */
                 tstSlotFuzzGuestSetup();
                 if (fPresent && fKrnlThere)
+                {
                     RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(Fuzz.pDev), ("the guest doesn't reach the device in the slot\n"));
+                    tstSlotFuzzCheckMsi(Fuzz.pDev);
+                    cInterrupts++;
+                }
             }
             else if (uOp < 61)
                 /* The guest switches the power of the slot. */
@@ -6642,8 +6677,9 @@ static void tstSlotFuzz(void)
             }
         }
         RTTestIPrintf(RTTESTLVL_ALWAYS,
-                      "%u operation(s) with seed %#RX32: device put in %u time(s), taken by the host %u time(s), %u state(s) saved, %u loaded\n",
-                      cOps, uSeed, cAttached, cTakenByHost, cStatesSaved, cStatesLoaded);
+                      "%u operation(s) with seed %#RX32: device put in %u time(s), taken by the host %u time(s), "
+                      "%u state(s) saved, %u loaded, %u interrupt(s) of the device\n",
+                      cOps, uSeed, cAttached, cTakenByHost, cStatesSaved, cStatesLoaded, cInterrupts);
     }
     tstPdmFreeState(pvState);
     tstFixtureTeardown();

@@ -243,6 +243,7 @@ int             tstPdmStatePatchItem(void *pvState, size_t cbState, const char *
 uint32_t        tstPdmMsiGetCount(void);
 bool            tstPdmMsiWait(uint32_t cExpected, RTMSINTERVAL cMsTimeout);
 bool            tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi);
+bool            tstPdmMsiGetLast(PTSTPDMMSI pMsi);
 uint32_t        tstPdmGetHeapAllocCount(void);
 /** @} */
 
