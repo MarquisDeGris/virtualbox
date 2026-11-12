@@ -133,6 +133,7 @@ uint32_t    tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone);
 uint32_t    tstVfioKrnlGetOpenFdCount(void);
 uint32_t    tstVfioKrnlGetInheritableFdCount(void);
+uint32_t    tstVfioKrnlGetViolationCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
