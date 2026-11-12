@@ -5237,7 +5237,7 @@ static DECLCALLBACK(int) pciVfioLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, ui
                                            N_("The state was saved with a function %u of the passed through PCI device, "
                                               "which the VM doesn't have"), iPciFun);
         const char * const pszWhat = pciVfioLayoutDiff(&Saved, &Layout);
-        if (pszWhat)
+        if (pszWhat && !pThis->pDevInsPort)
             return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
                                            N_("The state was saved with another kind of PCI device passed through as "
                                               "function %u: the %s differ"), iPciFun, pszWhat);
