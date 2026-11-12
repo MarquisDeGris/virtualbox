@@ -5454,7 +5454,7 @@ static DECLCALLBACK(int) pciVfioPortQueryState(PPDMIPCIPASSTHROUGHPORT pInterfac
 
     /* A device which is being put into the slot or taken out of it shows as not being there. */
     bool const fPresent = !pciVfioIsOutOfService(pThis);
-    *pfHotPlug = pThis->pDevInsPort != NULL;
+    *pfHotPlug = pThis->pDevIns != NULL;
     *pfPresent = fPresent;
     *pfInUse   =    fPresent
                  && (   !pThis->pDevInsPort
