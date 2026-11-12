@@ -5317,7 +5317,7 @@ static DECLCALLBACK(int) pciVfioLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
             if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
                 pciVfioFunPlaceholdersDrop(&pThis->aPciFuns[iPciFun]);
 
-        if (fReattach)
+        if (fReattach && !pThis->pDevInsPort)
         {
             int rc2 = pciVfioSlotAttachWorker(pDevIns);
             if (RT_FAILURE(rc2))
