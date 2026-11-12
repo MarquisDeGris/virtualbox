@@ -4211,7 +4211,6 @@ static DECLCALLBACK(int) ich9pcibridgeR3SlotLoadDone(PPDMDEVINS pDevIns, PSSMHAN
     /* The guest was interrupted for what the registers show.  From here on it is
        told what is different now, the device in the slot gets to know if the link
        isn't in the state it was in before the state was loaded. */
-    pSlot->fIrqRaised = ich9pcibridgeR3SlotIsIrqConditionMet(pPciDev);
     ich9pcibridgeR3SlotUpdate(pDevIns, 0 /*fEvents*/);
 
     pBusCC->pPciHlpR3->pfnUnlock(pDevIns);
