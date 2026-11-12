@@ -5204,7 +5204,7 @@ static DECLCALLBACK(int) pciVfioLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, ui
         if (iPciFun == UINT32_MAX)
             break;
         if (   iPciFun >= RT_ELEMENTS(pThis->aPciFuns)
-            || (fFunsSaved & RT_BIT_32(iPciFun)))
+            || (fFunsSaved & RT_BIT_32(iPciFun) & RT_BIT_32(31)))
             return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, RT_SRC_POS,
                                             "iPciFun=%#RX32 fFunsSaved=%#RX32", iPciFun, fFunsSaved);
         fFunsSaved |= RT_BIT_32(iPciFun);
