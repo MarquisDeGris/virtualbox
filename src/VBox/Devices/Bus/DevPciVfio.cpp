@@ -3870,7 +3870,7 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                 else if (   !pciVfioFunAnswers(pFun)
                          || !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort))
                     /* Unplugged, or nothing the guest would have to let go of. */
-                    pciVfioSlotEmpty(pThis, "the host wants the device back");
+                    pciVfioFunSetGone(pThis, pFun, "the host wants the device back");
                 else
                 {
                     /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
