@@ -44,11 +44,14 @@
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/vmm/vmapi.h>
 #include <VBox/err.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
 #include <iprt/env.h>
 #include <iprt/rand.h>
 #include <iprt/string.h>
 #include <iprt/test.h>
+#include <iprt/thread.h>
+#include <iprt/time.h>
 
 #include <errno.h>
 
@@ -125,6 +128,8 @@ static void tstModelInit(PTSTVFIODEVCFG pModel, const char *pszNode, uint8_t bCl
     pModel->abCfg[VBOX_PCI_CLASS_SUB]     = bClassSub;
     pModel->abCfg[VBOX_PCI_CLASS_BASE]    = bClassBase;
     pModel->abCfg[VBOX_PCI_INTERRUPT_PIN] = 0x01;
+    pModel->acIrqs[VFIO_PCI_ERR_IRQ_INDEX] = 1;
+    pModel->acIrqs[VFIO_PCI_REQ_IRQ_INDEX] = 1;
 }
 
 
@@ -2261,6 +2266,339 @@ static void tstLegacy(void)
 }
 
 
+/**
+ * Waits for the device to have let go of a function of the fake kernel and to
+ * have asked for the rest to be done on an EMT.
+ *
+ * @returns true if the function is no longer open, false if the time is up.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   cReqsBefore         What tstPdmGetRequestCount() returned before the host started taking the function back.
+ * @param   cMsTimeout          How long to wait at most.
+ */
+static bool tstWaitForRelease(PTSTVFIODEV pDev, uint32_t cReqsBefore, RTMSINTERVAL cMsTimeout)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (   tstVfioKrnlDevGetOpenCount(pDev) != 0
+           || tstPdmGetRequestCount() == cReqsBefore)
+    {
+        if (RTTimeMilliTS() - msStart >= cMsTimeout)
+            return false;
+        RTThreadSleep(1);
+    }
+    return true;
+}
+
+
+/**
+ * Checks what the guest gets from a function the device has let go of: it
+ * looks like there is nothing in the slot, and nothing the guest does changes
+ * that or reaches the host.
+ *
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   uDevFn              The device and function number of the function.
+ * @param   GCPhysBar0          Where the guest had BAR0 mapped.
+ * @param   pszWhat             What happened to the function, for messages.
+ */
+static void tstCheckFunctionIsGone(PTSTVFIODEV pDev, uint8_t uDevFn, RTGCPHYS GCPhysBar0, const char *pszWhat)
+{
+    /* The config space reads as all ones and ignores writes. */
+    uint32_t u32 = tstPdmPciCfgRead(0, uDevFn, VBOX_PCI_VENDOR_ID, 2);
+    RTTESTI_CHECK_MSG(u32 == UINT32_C(0xffff), ("%s: vendor ID %#RX32\n", pszWhat, u32));
+    u32 = tstPdmPciCfgRead(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, 4);
+    RTTESTI_CHECK_MSG(u32 == UINT32_MAX, ("%s: BAR0 reads %#RX32\n", pszWhat, u32));
+    u32 = tstPdmPciCfgRead(0, uDevFn, VBOX_PCI_COMMAND, 1);
+    RTTESTI_CHECK_MSG(u32 == UINT32_C(0xff), ("%s: the command register reads %#RX32\n", pszWhat, u32));
+
+    /* The BARs are not mapped any more and the guest can't get them mapped again. */
+    RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(GCPhysBar0), ("%s: BAR0 is mapped into the guest\n", pszWhat));
+    tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_BASE_ADDRESS_0, (uint32_t)GCPhysBar0, 4);
+    tstPdmPciCfgWrite(0, uDevFn, VBOX_PCI_COMMAND,
+                      VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+    RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(GCPhysBar0), ("%s: the guest got BAR0 mapped again\n", pszWhat));
+    u32 = 0;
+    RTTESTI_CHECK_RC(tstPdmPhysRead(GCPhysBar0 + 16, &u32, sizeof(u32)), VINF_SUCCESS);
+
+    /* A reset of the VM leaves it alone. */
+    uint32_t const cResetsBefore    = tstVfioKrnlDevGetResetCount(pDev);
+    uint32_t const cBusResetsBefore = tstVfioKrnlDevGetBusResetCount(pDev);
+    tstPdmReset();
+    RTTESTI_CHECK_MSG(   tstVfioKrnlDevGetResetCount(pDev)    == cResetsBefore
+                      && tstVfioKrnlDevGetBusResetCount(pDev) == cBusResetsBefore,
+                      ("%s: the function was reset\n", pszWhat));
+    u32 = tstPdmPciCfgRead(0, uDevFn, VBOX_PCI_VENDOR_ID, 2);
+    RTTESTI_CHECK_MSG(u32 == UINT32_C(0xffff), ("%s: vendor ID %#RX32 after a reset\n", pszWhat, u32));
+    RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+}
+
+
+/**
+ * The host takes the device back while the VM runs, like when its plug is
+ * pulled: the device is let go of, what the guest had mapped of it stays
+ * harmless until the guest mappings are gone, and from then on the guest finds
+ * nothing where the function was.
+ */
+static void tstRemoval(void)
+{
+    RTTestISub("The host takes the device back while the VM runs");
+
+    /*
+     * One function with a memory and an I/O port BAR, MSI enabled.
+     */
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        tstModelSetBar(&Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_1, TST_IOBAR_PORT, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND,
+                              VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            uint32_t const fMsgCtrl =   tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2)
+                                      & ~(uint32_t)(VBOX_PCI_MSI_FLAGS_QSIZE | VBOX_PCI_MSI_FLAGS_ENABLE);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+            RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 1);
+            RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+            uint64_t const cbMapped = tstVfioKrnlGetDmaMappedBytes();
+
+            /* The plug gets pulled.  What is left for an EMT to do is held back for now. */
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
+            tstPdmSetRequestProcessing(false /*fAutomatic*/);
+            tstVfioKrnlDevRemove(pDev);
+            RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("the device has not let go of the function\n"));
+
+            /*
+             * The guest still has the BAR mapped.  What it finds there is memory which does
+             * no harm: this works although the fake kernel has made the mappings of the
+             * removed function unusable.
+             */
+            RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+            uint32_t u32 = UINT32_C(0x5a5a5a5a);
+            RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + 64, &u32, sizeof(u32)), VINF_SUCCESS);
+            u32 = 0;
+            RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + 64, &u32, sizeof(u32)), VINF_SUCCESS);
+            u32 = UINT32_MAX;
+            RTTESTI_CHECK_RC(tstPdmIoPortRead(TST_IOBAR_PORT + 0x10, &u32, 2), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG((u32 & 0xffff) == 0xffff, ("read %#RX32 from a port of the removed function\n", u32));
+            RTTESTI_CHECK_RC(tstPdmIoPortWrite(TST_IOBAR_PORT + 0x10, 0, 2), VINF_SUCCESS);
+
+            /* An EMT gets around to it: the guest mappings go away. */
+            tstPdmProcessRequests();
+            tstPdmSetRequestProcessing(true /*fAutomatic*/);
+            tstCheckFunctionIsGone(pDev, TST_PCI_DEVFN, TST_BAR0_ADDR, "removed function");
+
+            /* No interrupt from it, and the guest memory stays mapped for whatever else uses it. */
+            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            RTTESTI_CHECK(RT_FAILURE(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0)));
+            RTTESTI_CHECK_MSG(!tstPdmMsiWait(cMsisBefore + 1, 50 /*ms*/), ("an MSI of the removed function arrived\n"));
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbMapped,
+                              ("%RU64 bytes mapped for DMA, was %RU64\n", tstVfioKrnlGetDmaMappedBytes(), cbMapped));
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * Two functions: one is taken back, the other one goes on working until it is taken back too.
+     */
+    {
+        TSTVFIODEVCFG aModels[2];
+        tstModelInitDefault(&aModels[0]);
+        tstModelInit(&aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+        tstModelSetU16(&aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+        tstModelSetBar(&aModels[1], 0, _16K, PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&aModels[1], TST_EXP_CAP_OFF);
+
+        PTSTVFIODEV apDevs[2] = { NULL, NULL };
+        int rc = tstFixtureSetup(aModels, RT_ELEMENTS(aModels), apDevs, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+            for (uint8_t i = 0; i < RT_ELEMENTS(aModels); i++)
+            {
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR + i * _1M, 4);
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            }
+
+            uint32_t cReqsBefore = tstPdmGetRequestCount();
+            tstVfioKrnlDevRemove(apDevs[1]);
+            RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[1], cReqsBefore, RT_MS_5SEC), ("the device has not let go of function 1\n"));
+            tstCheckFunctionIsGone(apDevs[1], TST_PCI_DEVFN + 1, TST_BAR0_ADDR + _1M, "function 1");
+
+            /* Function 0 is still there and its interrupts arrive. */
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 1);
+            RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8,  0, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 0x4048, 2);
+            uint32_t const fMsgCtrl =   tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2)
+                                      & ~(uint32_t)(VBOX_PCI_MSI_FLAGS_QSIZE | VBOX_PCI_MSI_FLAGS_ENABLE);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(apDevs[0], VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI of function 0 did not arrive\n"));
+
+            cReqsBefore = tstPdmGetRequestCount();
+            tstVfioKrnlDevRemove(apDevs[0]);
+            RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[0], cReqsBefore, RT_MS_5SEC), ("the device has not let go of function 0\n"));
+            tstCheckFunctionIsGone(apDevs[0], TST_PCI_DEVFN, TST_BAR0_ADDR, "function 0");
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * The host takes the device back before the VM got powered on, and the host
+ * reports an error of the device it can't recover from: the device is let go
+ * of in both cases.
+ */
+static void tstRemovalOtherCases(void)
+{
+    RTTestISub("Device taken back before power on, device error");
+
+    for (uint32_t iVariant = 0; iVariant < 2; iVariant++)
+    {
+        const char * const pszWhat = iVariant == 0 ? "removed before power on" : "function with an error";
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%s: pci-vfio: %Rrc - %s\n", pszWhat, rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
+            if (iVariant == 0)
+            {
+                /* The VM isn't running yet, which is no reason to keep the host waiting. */
+                tstVfioKrnlDevRemove(pDev);
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("%s: the device has not let go of the function\n", pszWhat));
+                tstPdmPowerOn();
+            }
+            else
+            {
+                tstPdmPowerOn();
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+                tstVfioKrnlDevSignalError(pDev);
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("%s: the device has not let go of the function\n", pszWhat));
+            }
+            tstCheckFunctionIsGone(pDev, TST_PCI_DEVFN, TST_BAR0_ADDR, pszWhat);
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * @callback_method_impl{FNRTTHREAD, Pulls the plug of a function after a short
+ *      while which is different every time.}
+ */
+static DECLCALLBACK(int) tstRemovalUnderLoadThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    RT_NOREF(hThreadSelf);
+    uint32_t const cSpins = RTRandU32Ex(0, 20000);
+    for (uint32_t i = 0; i < cSpins; i++)
+        ASMNopPause();
+    if (RTRandU32Ex(0, 3) == 0)
+        RTThreadSleep(RTRandU32Ex(0, 2));
+    tstVfioKrnlDevRemove((PTSTVFIODEV)pvUser);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * The plug gets pulled while the guest is busy with the device: accessing the
+ * config space and the BARs, switching interrupts on and off, resetting.  Done
+ * many times as it is a matter of timing where it hits.
+ */
+static void tstRemovalUnderLoad(void)
+{
+    RTTestISub("The host takes the device back while the guest is busy with it");
+
+    /* MSI-X table and pending bits in BAR0, so there are trapped and directly mapped parts. */
+    uint16_t const cVectors = 8;
+    uint32_t const offTable = _8K;
+    uint32_t const offPba   = _8K + _4K;
+    uint32_t const cErrorsBefore = RTTestIErrorCount();
+    for (uint32_t iRound = 0; iRound < 150 && RTTestIErrorCount() == cErrorsBefore; iRound++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
+        tstModelSetBar(&Model, 0, _16K, PCI_ADDRESS_SPACE_MEM);
+        tstModelSetBar(&Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+        Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+        tstModelAddMsiCap(&Model, TST_MSI_CAP_OFF, 0 /*cVectorsLog2*/, true /*f64Bit*/, false /*fMaskable*/);
+        tstModelAddExpCap(&Model, TST_EXP_CAP_OFF);
+        tstModelAddMsixCap(&Model, TST_MSIX_CAP_OFF, cVectors, 0 /*iBar*/, offTable, offPba);
+
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("round %u: pci-vfio: %Rrc - %s\n", iRound, rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_1, TST_IOBAR_PORT, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND,
+                              VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            uint32_t const fMsiCtrl  = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+            uint32_t const fMsixCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, 2);
+
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
+            RTTHREAD       hThread     = NIL_RTTHREAD;
+            rc = RTThreadCreate(&hThread, tstRemovalUnderLoadThread, pDev, 0 /*cbStack*/, RTTHREADTYPE_DEFAULT,
+                                RTTHREADFLAGS_WAITABLE, "tstPull");
+            RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+            if (RT_SUCCESS(rc))
+            {
+                /* Keep the guest busy until the function is let go of, and a little longer. */
+                uint64_t const msStart = RTTimeMilliTS();
+                uint32_t       cAfter  = 0;
+                for (uint32_t iOp = 0; cAfter < 64 && RTTimeMilliTS() - msStart < RT_MS_5SEC; iOp++)
+                {
+                    uint32_t u32 = iOp;
+                    switch (iOp % 12)
+                    {
+                        case 0:  tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsiCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);    break;
+                        case 1:  tstPdmPhysRead(TST_BAR0_ADDR + 0x100, &u32, sizeof(u32));                                           break;
+                        case 2:  tstPdmPhysWrite(TST_BAR0_ADDR + offTable + 0x100, &u32, sizeof(u32));                               break;
+                        case 3:  tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsiCtrl, 2);                               break;
+                        case 4:  tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, fMsixCtrl | VBOX_PCI_MSIX_FLAGS_ENABLE, 2); break;
+                        case 5:  tstPdmPhysWrite(TST_BAR0_ADDR + offTable + 12, &u32, sizeof(u32));                                  break;
+                        case 6:  tstPdmIoPortRead(TST_IOBAR_PORT + 4, &u32, 2);                                                      break;
+                        case 7:  tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, fMsixCtrl, 2);                             break;
+                        case 8:  tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MASTER, 2);                   break;
+                        case 9:  tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND,
+                                                   VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);     break;
+                        case 10: tstPdmPciCfgRead(0, TST_PCI_DEVFN, iOp & 0xfc, 4);                                                  break;
+                        default:
+                            if ((iOp % 96) == 95)
+                                tstPdmReset();
+                            break;
+                    }
+                    if (tstVfioKrnlDevGetOpenCount(pDev) == 0)
+                        cAfter++;
+                }
+                RTTESTI_CHECK_RC(RTThreadWait(hThread, RT_MS_30SEC, NULL), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("round %u: the device has not let go of the function\n", iRound));
+                uint32_t const idVendor = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2);
+                RTTESTI_CHECK_MSG(idVendor == UINT32_C(0xffff), ("round %u: vendor ID %#RX32\n", iRound, idVendor));
+                RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR), ("round %u: BAR0 is mapped into the guest\n", iRound));
+            }
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
 /*
  *
  * Random device models and random guest accesses.
@@ -2292,6 +2630,8 @@ typedef const TSTFUZZINFO *PCTSTFUZZINFO;
 
 /** The random number generator of tstFuzz(). */
 static RTRAND g_hTstRand = NIL_RTRAND;
+/** Whether the host took the device of the current model of tstFuzz() back or reported an error of it. */
+static bool   g_fTstFuzzRemoved = false;
 
 
 /** Returns a random number in a range, both ends included. */
@@ -2621,6 +2961,8 @@ static void tstFuzzModelInit(PTSTVFIODEVCFG pModel, PTSTFUZZINFO pInfo)
     /*
      * Properties which make the device unusable or awkward.
      */
+    pModel->acIrqs[VFIO_PCI_ERR_IRQ_INDEX] = tstRndChance(90) ? 1 : 0;
+    pModel->acIrqs[VFIO_PCI_REQ_IRQ_INDEX] = tstRndChance(90) ? 1 : 0;
     pModel->fNoIommu         = tstRndChance(2);
     pModel->fNotPci          = tstRndChance(2);
     pModel->fNoFunctionReset = tstRndChance(20);
@@ -2759,7 +3101,17 @@ static void tstFuzzGuestOp(PCTSTVFIODEVCFG pModel, PTSTVFIODEV pDev, PCTSTFUZZIN
     }
     else if (uOp < 96)
         tstPdmReset();
-    else
+    else if (uOp == 99 && tstRndChance(30))
+    {
+        /* The host takes the device back for good or reports an error of it.  Whatever comes after
+           this races with the device letting go of it. */
+        if (tstRndChance(60))
+            tstVfioKrnlDevRemove(pDev);
+        else
+            tstVfioKrnlDevSignalError(pDev);
+        g_fTstFuzzRemoved = true;
+    }
+    else if (!g_fTstFuzzRemoved)
     {
         /* The device stops answering for a while. */
         tstVfioKrnlDevSetGone(pDev, true);
@@ -2811,6 +3163,7 @@ static void tstFuzz(void)
         uint32_t const uModelSeed    = uSeed + iModel;
         uint32_t const cErrorsBefore = RTTestIErrorCount();
         RTRandAdvSeed(g_hTstRand, uModelSeed);
+        g_fTstFuzzRemoved = false;
 
         static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
         TSTFUZZINFO Info;
@@ -2848,7 +3201,8 @@ static void tstFuzz(void)
             RTTESTI_CHECK_MSG(tstVfioKrnlGetDmaMappedBytes() == cbMapped,
                               ("%RU64 bytes mapped for DMA, was %RU64\n", tstVfioKrnlGetDmaMappedBytes(), cbMapped));
             uint32_t const idVendor = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2);
-            RTTESTI_CHECK_MSG(idVendor == RT_MAKE_U16(s_Model.abCfg[VBOX_PCI_VENDOR_ID], s_Model.abCfg[VBOX_PCI_VENDOR_ID + 1]),
+            RTTESTI_CHECK_MSG(   idVendor == RT_MAKE_U16(s_Model.abCfg[VBOX_PCI_VENDOR_ID], s_Model.abCfg[VBOX_PCI_VENDOR_ID + 1])
+                              || (g_fTstFuzzRemoved && idVendor == UINT32_C(0xffff)),
                               ("vendor ID %#RX32\n", idVendor));
         }
         else
@@ -2916,6 +3270,9 @@ int main()
     tstTrappedAccessMappingGone();
     tstDuplicateCaps();
     tstLegacy();
+    tstRemoval();
+    tstRemovalOtherCases();
+    tstRemovalUnderLoad();
     tstFuzz();
 
     return RTTestSummaryAndDestroy(hTest);
