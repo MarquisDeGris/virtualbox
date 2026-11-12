@@ -4557,9 +4557,6 @@ static int pciVfioFunAttach(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev
     /*
      * The notifications of the host about the device.
      */
-    rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_REQ_IRQ_INDEX, &pFun->iFdEvtReq);
-    if (RT_SUCCESS(rc))
-        rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_ERR_IRQ_INDEX, &pFun->iFdEvtErr);
     return rc;
 }
 
