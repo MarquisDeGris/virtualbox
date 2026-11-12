@@ -5434,7 +5434,7 @@ static DECLCALLBACK(int) pciVfioPortQueryLayout(PPDMIPCIPASSTHROUGHPORT pInterfa
     if (RT_SUCCESS(rc))
         rc = pfnValue(pvUser, "IntxVectors", Layout.acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
     if (RT_SUCCESS(rc))
-        rc = pfnValue(pvUser, "MsiVectors", Layout.acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]);
+        rc = pfnValue(pvUser, "MsiVector", Layout.acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]);
     if (RT_SUCCESS(rc))
         rc = pfnValue(pvUser, "MsixVectors", Layout.acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]);
     if (RT_SUCCESS(rc))
