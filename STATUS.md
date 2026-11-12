@@ -7,7 +7,7 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `6176a66b` (20 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `defa244c` (21 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -16,10 +16,11 @@ Updated: 2026-11-12
 
 WP2 (hardening), WP3 (removal of the device on the host), the first part of
 WP4 (saved state is refused), WP5 (hot-plug slot in the root port, ACPI) and
-the first part of WP6 (the guest is asked before a device is taken out of
-the slot) are done. The testcase runs clean with AddressSanitizer,
-LeakSanitizer and UndefinedBehaviorSanitizer, including the fuzz tests (T2).
-Next: putting a device into the empty slot while the VM runs (WP6).
+two parts of WP6 are done: the guest is asked before a device is taken out
+of the slot, and a device can be put into the empty slot while the VM runs.
+The testcase runs clean with AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer, including the fuzz tests (T2). Next: starting
+the VM with an empty slot (WP6).
 
 ## Done
 
@@ -187,15 +188,26 @@ Next: putting a device into the empty slot while the VM runs (WP6).
     (new setting, 15 seconds by default). An unplugged device, an error and
     a slot which is off empty the slot at once. The whole device goes and
     the guest is told that the slot is empty.
-  - Not yet: putting a device back into the slot, starting with an empty
-    slot, saved state with an empty slot.
+- WP6, second part (commit `defa244c`): `pciVfioR3SlotAttach()` puts the
+  configured device into the empty slot while the VM runs.
+  - The VM is built around the device it was started with (BARs, place of
+    the MSI-X table, ROM, interrupts); a device which differs is refused.
+  - The device file takes the place of the stand-in, the device memory is
+    mapped where the guest mappings are, the config space the guest sees is
+    put together anew; all functions or none.
+  - The device starts out disabled and reset, the guest is told that the
+    slot is occupied.
+  - With the legacy interface the group stays with the VM while the slot
+    is empty, so the host cannot use the device for something else.
+  - Nothing calls it yet (WP7).
+  - Not yet: starting with an empty slot, saved state with an empty slot.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 112) |
+| Test | Before the fix | With fixes (run 128) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -241,6 +253,7 @@ Each new test was first run against the device without the fix it belongs to.
 | Hot-plug slot: the guest switches the slot off and on | new feature; deliberate defect is found (run 105) | pass |
 | Hot-plug slot: the device is detached | new feature; deliberate defects are found (runs 106, 108, 114) | pass |
 | Hot-plug slot: the host wants the device back | new feature; deliberate defects are found (runs 107, 108, 109, 115) | pass |
+| Hot-plug slot: a device is put into the slot | new feature; deliberate defects are found (runs 120 to 126, 130) | pass |
 | ACPI table: hardware ID of the root bridge and `_OSC`, executed with the ACPICA tools | without the change: ID and `_OSC` as before (first half of the check) | pass |
 
 ## Test harness (WP1)
@@ -269,9 +282,9 @@ device, saved-state stream.
 
 ## Next
 
-1. WP6, rest: a device is put into the empty slot while the VM runs; start
-   with an empty slot; saved state with an empty slot (second part of WP4);
-   interface for the management.
+1. WP6, rest: start with an empty slot from a configured layout; saved
+   state with an empty slot (second part of WP4); interface for the
+   management; random test with devices coming and going.
 2. WP7: management interface, which also sets the two settings of WP5.
 3. T4: a guest operating system using the slot, in CI.
 
@@ -312,13 +325,17 @@ device, saved-state stream.
 | 2026-11-12 | In a hot-plug slot the whole device goes when the host wants one function back or reports an error of one | A slot holds one device; the guest cannot be told about a part of it |
 | 2026-11-12 | A device which no longer answers when the host wants it back is taken out of the slot at once | It was unplugged; there is nothing the guest could do in an orderly way |
 | 2026-11-12 | The link to the slot going down resets the device | The guest expects a device in its reset state when it switches the slot on again, as after a power cycle |
+| 2026-11-12 | A device put into the slot has to match the device the VM was started with in BARs, place of the MSI-X table, ROM size and interrupts | The VM is built around these at construction and cannot be rebuilt while it runs |
+| 2026-11-12 | Putting a device into the slot is done on an EMT, with the functions out of service until everything is in place | Nothing of the VM can get in the way, and the paths of the guest stay closed by the means which closed them when the device went |
+| 2026-11-12 | The device file of a device put into the slot takes the number of the stand-in | Everybody holding the number stays valid, as when the device went |
+| 2026-11-12 | With the legacy interface the group stays with the VM while the slot is empty | The guest memory mapping belongs to the container and would be lost with the group; the current interface (IOMMUFD) has no such tie |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 42 tests, ACPI table check | `6176a66b` | all pass (run 112); clean with ASan, LSan and UBSan (run 113) |
-| T2 fuzz | running in CI | `6176a66b` | 2000 models and 400000 operations on the root port per run, 20000 and 2000000 with sanitizers (run 113); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 43 tests, ACPI table check | `defa244c` | all pass (run 128); clean with ASan, LSan and UBSan (run 129) |
+| T2 fuzz | running in CI | `defa244c` | 2000 models and 400000 operations on the root port per run, 20000 and 2000000 with sanitizers (run 129); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -394,5 +411,10 @@ device, saved-state stream.
 | 110, 111 | `scratch/mutant-sc6`, `scratch/mutant-sc7` | tests | failed to build | the two defects did not compile |
 | 112, 113 | code branch @ `6176a66b` (as `scratch/slotclient`) | tests, sanitize | passed | 42 tests, two fuzz tests, ACPI table check |
 | 114, 115 | `scratch/mutant-sc6b`, `scratch/mutant-sc7b` | tests | failed as intended | the two defects again, each one caught |
+| 116 to 119 | `scratch/slotattach` | tests, sanitize | passed | second part of WP6, 43 tests |
+| 120 to 126 | `scratch/mutant-sa1` to `scratch/mutant-sa7` | tests | failed as intended | seven deliberate defects in putting a device into the slot, each one caught |
+| 127 | `scratch/mutant-sa8` | tests | passed | an eighth defect went unnoticed: the test did not have a device unplugged which was put in after an unplugging |
+| 128, 129 | code branch @ `defa244c` (as `scratch/slotattach`) | tests, sanitize | passed | 43 tests with the missing case, two fuzz tests, ACPI table check |
+| 130 | `scratch/mutant-sa8b` | tests | failed as intended | the eighth defect, caught now |
 
 Run numbers are those GitHub shows for the `build` workflow.
