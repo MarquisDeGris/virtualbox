@@ -3742,10 +3742,6 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
     PVFIOPCIFUN pFun    = &pThis->aPciFuns[iPciFun];
     PPDMPCIDEV  pPciDev = pDevIns->apPciDevs[iPciFun];
 
-    /* Nothing to do if a device was put in again before this got its turn. */
-    if (!pFun->fGone)
-        return VINF_SUCCESS;
-
     /* The PCI bus removes the mappings when the decoding gets disabled.  The guest doesn't get to enable it again. */
     uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
     uint16_t const u16Cmd     = PDMPciDevGetCommand(pPciDev);
