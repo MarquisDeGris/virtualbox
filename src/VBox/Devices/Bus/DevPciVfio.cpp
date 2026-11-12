@@ -3958,7 +3958,7 @@ static bool pciVfioSlotIsEmptyForState(PVFIOPCI pThis)
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
             && (   !pThis->aPciFuns[iPciFun].fGone
-                || pThis->aPciFuns[iPciFun].fDevMemLeft))
+                || !pThis->pDevInsPort))
             return false;
     return true;
 }
