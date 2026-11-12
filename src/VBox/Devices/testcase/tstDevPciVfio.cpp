@@ -4876,6 +4876,12 @@ static void tstSlotAttach(void)
             tstSlotCheckMsi(__LINE__, pDev);
             RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied, ("variant %u\n", iVariant));
 
+            /* Once more: the device which was put in is watched like the one the VM started with,
+               also by a watcher which has seen the one before go. */
+            tstVfioKrnlDevRemove(pDev);
+            RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u: the second unplugging went unnoticed\n", iVariant));
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+
             RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
                               ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
         }
