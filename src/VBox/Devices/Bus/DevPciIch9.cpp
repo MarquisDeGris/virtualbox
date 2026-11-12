@@ -4005,7 +4005,7 @@ static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDev
 static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotBridgeConfigRead(PPDMDEVINSR3 pDevIns, uint8_t iBus, uint8_t iDevice,
                                                                       uint32_t u32Address, unsigned cb, uint32_t *pu32Value)
 {
-    if (PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot.fLinkUp)
+    if (true)
         return devpciR3BridgeCommonConfigRead(pDevIns, iBus, iDevice, u32Address, cb, pu32Value);
     *pu32Value = UINT32_MAX;
     return VINF_SUCCESS;
