@@ -3874,9 +3874,7 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                 else
                 {
                     /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
-                    pciVfioSlotAskGuest(pThis);
-                    if (!msLetGoDeadline)
-                        msLetGoDeadline = RT_MAX(RTTimeMilliTS() + pThis->cMsGuestRelease, 1);
+                    pciVfioSlotEmpty(pThis, "the host wants the device back");
                 }
             }
 
