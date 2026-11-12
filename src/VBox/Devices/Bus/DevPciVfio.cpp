@@ -5008,7 +5008,7 @@ static int pciVfioSaveCheck(PPDMDEVINS pDevIns, bool fFinal)
      */
     int rc = RTCritSectEnter(&pThis->CritSectSlot);
     AssertRCReturn(rc, rc);
-    if (!pciVfioSlotIsEmptyForState(pThis))
+    if (!pciVfioSlotIsEmptyForState(pThis) && !pThis->pDevInsPort)
         rc = pciVfioRefuseSavingState(pDevIns);
     else if (fFinal)
         pciVfioSlotEmptyComplete(pThis);
