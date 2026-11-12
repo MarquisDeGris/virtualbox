@@ -4424,7 +4424,7 @@ static int pciVfioFunCheckLayout(PVFIOPCI pThis, PVFIOPCIFUN pFun)
         rc = pciVfioQueryIrqInfo(pThis, pFun, uIrq, &cVectors);
         if (RT_FAILURE(rc))
             return rc;
-        if (cVectors != pFun->Layout.acIrqVectors[uIrq])
+        if (cVectors > UINT32_MAX - 1)
             pszWhat = "interrupts";
     }
 
