@@ -7,17 +7,17 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `24515f86` (16 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `f6a1395f` (17 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 (hardening) and WP3 (removal of the device on the host) are done. The
-testcase runs clean with AddressSanitizer, LeakSanitizer and
-UndefinedBehaviorSanitizer, including the fuzz test (T2). Next: WP4 (saved
-state policy), then hot-plug towards the guest (WP5, WP6).
+WP2 (hardening), WP3 (removal of the device on the host) and the first part
+of WP4 (saved state is refused) are done. The testcase runs clean with
+AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer, including the
+fuzz test (T2). Next: hot-plug towards the guest (WP5, WP6).
 
 ## Done
 
@@ -145,13 +145,18 @@ state policy), then hot-plug towards the guest (WP5, WP6).
   - Not yet: asking the guest first when the host only asks politely. This
     needs the hot-plug slot of WP6; until then every removal is a surprise
     removal for the guest.
+- WP4, first part (commit `f6a1395f`): saving the state of the VM and
+  teleporting it are refused while a device is passed through, with a
+  message for the user; loading a saved state into a VM which has the device
+  is refused too. The second part (saving with an empty slot) comes with
+  the hot-plug slot of WP6.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 83) |
+| Test | Before the fix | With fixes (run 85) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -188,6 +193,7 @@ Each new test was first run against the device without the fix it belongs to.
 | The host takes the device back while the VM runs | fails, 26 checks (run 81) | pass |
 | Device taken back before power on, device error | fails, 16 checks (run 81) | pass |
 | The host takes the device back while the guest is busy with it | fails (run 81) | pass |
+| Saved state is refused | fails, 8 checks (run 87) | pass |
 
 ## Test harness (WP1)
 
@@ -215,9 +221,9 @@ device, saved-state stream.
 
 ## Next
 
-1. WP4: saved state policy.
-2. WP5: PCIe native hot-plug in the root port.
-3. WP6: hot-pluggable passthrough slot.
+1. WP5: PCIe native hot-plug in the root port.
+2. WP6: hot-pluggable passthrough slot, second part of WP4.
+3. WP7: management interface.
 
 ## Decisions
 
@@ -249,8 +255,8 @@ device, saved-state stream.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 34 tests | `24515f86` | all pass (run 83); clean with ASan, LSan and UBSan (run 84) |
-| T2 fuzz | running in CI | `24515f86` | 2000 models per run, 20000 with sanitizers (run 84); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 35 tests | `f6a1395f` | all pass (run 85); clean with ASan, LSan and UBSan (run 86) |
+| T2 fuzz | running in CI | `f6a1395f` | 2000 models per run, 20000 with sanitizers (run 86); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -314,5 +320,7 @@ device, saved-state stream.
 | 81 | `scratch/red-evidence-13` | tests | failed as intended | removal tests against the driver before the change |
 | 82 | `scratch/mutant-3` | tests | failed as intended | deliberate defect (device memory mappings not replaced), caught |
 | 83, 84 | code branch @ `24515f86` | tests, sanitize | passed | 34 tests and the fuzz test |
+| 85, 86 | code branch @ `f6a1395f` (as `scratch/ssm`) | tests, sanitize | passed | 35 tests and the fuzz test |
+| 87 | `scratch/red-evidence-14` | tests | failed as intended | saved state test against the driver before the change |
 
 Run numbers are those GitHub shows for the `build` workflow.
