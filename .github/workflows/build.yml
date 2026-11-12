@@ -136,10 +136,20 @@ jobs:
           done
           ls /usr/include/c++
           ./configure --help > configure-help.log 2>&1 || true
-          ./configure --ose --build-headless --disable-docs --disable-additions \
-            --disable-validationkit --disable-python --disable-hardening \
-            --disable-extpack --disable-sdl \
-            > configure-run.log 2>&1 || { cat configure-run.log; tail -100 configure.log || true; exit 1; }
+          # The tool checks of configure run into their time limits now and then, so
+          # it gets up to three attempts.
+          configured=no
+          for attempt in 1 2 3; do
+            if ./configure --ose --build-headless --disable-docs --disable-additions \
+                 --disable-validationkit --disable-python --disable-hardening \
+                 --disable-extpack --disable-sdl \
+                 > configure-run.log 2>&1; then
+              configured=yes
+              break
+            fi
+            echo "configure attempt $attempt failed:"; grep -E 'ERROR|failed' configure-run.log | head -5 || true
+          done
+          if [ "$configured" != yes ]; then cat configure-run.log; tail -100 configure.log || true; exit 1; fi
           cat configure-run.log
           echo "---- AutoConfig.kmk"; cat AutoConfig.kmk
           echo "---- env.sh"; cat env.sh
