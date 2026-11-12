@@ -5151,7 +5151,7 @@ static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV
         {
             pBar->bType  = 2;
             pBar->pvMmio = NULL;
-            if (pLayout->aBars[iBar].fMappable)
+            if (pLayout->aBars[iBar].fMappable && pLayout->aBars[iBar].fIoPorts)
             {
                 void *pvMmio = mmap(NULL, pBar->cbRegion, PROT_READ | PROT_WRITE,
                                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /*fd*/, 0 /*offset*/);
