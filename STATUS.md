@@ -7,7 +7,7 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `680a21c5` (14 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `7afa04ad` (15 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
@@ -19,9 +19,9 @@ BARs in segments; capability lists; MSI capability; config space writes; DMA
 mapping; guest access paths; configuration validation and cleanup; reset and
 command register; documentation block. The testcase runs clean with
 AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer, including a
-fuzz test with random device models and guest accesses (T2). Next: legacy
-group/container API in the harness, then WP3 (removal of the device on the
-host).
+fuzz test with random device models and guest accesses (T2). The legacy
+group/container interface is covered too. Next: WP3 (removal of the device on
+the host).
 
 ## Done
 
@@ -131,6 +131,10 @@ host).
   off-by-one at the end of the MSI-X table was not caught at first (runs 52,
   55), which led to unit checks at the ends of table and pending bits and to
   the fuzz test aiming at such places; both now catch it (runs 54, 58).
+- Harness (commit `7afa04ad`): the fake kernel has the legacy interface with
+  container and group as an alternative; construction, guest memory mapping
+  and its failure, BAR, MSI, reset, bus reset and descriptor inheritance are
+  tested with it, and the fuzz test uses it for a part of its models.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
@@ -193,13 +197,13 @@ Linux only:
 - `tstDevPciVfio.cpp`: the tests.
 
 Still to add to the harness: the root port (`ich9pcibridge`) in front of the
-device, saved-state stream, legacy group/container API.
+device, saved-state stream.
 
 ## Next
 
-1. Harness: legacy group/container API, so those paths get covered too.
-2. WP3: removal of the device on the host while the VM runs.
-3. WP4: saved state policy.
+1. WP3: removal of the device on the host while the VM runs.
+2. WP4: saved state policy.
+3. WP5 and WP6: hot-plug towards the guest.
 
 ## Decisions
 
@@ -228,8 +232,8 @@ device, saved-state stream, legacy group/container API.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 30 tests | `680a21c5` | all pass (run 68); clean with ASan, LSan and UBSan (run 69) |
-| T2 fuzz | running in CI | `680a21c5` | 2000 models per run, 20000 with sanitizers (run 69); longer runs with other seeds now and then |
+| T1 unit | running in CI, 31 tests | `7afa04ad` | all pass (run 71); clean with ASan, LSan and UBSan (run 72) |
+| T2 fuzz | running in CI | `7afa04ad` | 2000 models per run, 20000 with sanitizers (run 72); 200000 models with another seed and sanitizers (run 70) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -286,5 +290,7 @@ device, saved-state stream, legacy group/container API.
 | 64 | `scratch/red-evidence-12` | sanitize | failed as intended | duplicate capability test against the driver before the change |
 | 65 to 67 | `scratch/fuzz2` | tests, sanitize | failed, cancelled | a merge done wrong |
 | 68, 69 | code branch @ `680a21c5` (as `scratch/fuzz2`) | tests, sanitize | passed | 30 tests and the fuzz test |
+| 70 | code branch @ `680a21c5` | sanitize | passed | 200000 random device models with another seed |
+| 71, 72 | code branch @ `7afa04ad` (as `scratch/legacy`) | tests, sanitize | passed | 31 tests and the fuzz test |
 
 Run numbers are those GitHub shows for the `build` workflow.
