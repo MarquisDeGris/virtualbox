@@ -44,9 +44,7 @@
  * The passed through device therefore needs to support MSI or MSI-X.
  *
  * Saved states are not supported, and will never be as we can't capture the PCIe device state
- * and replay it when resuming. Saving the state of the VM and teleporting it are refused while
- * the device is part of the VM, and a saved state isn't loaded into a VM which has the device,
- * as it can only have been made without it.
+ * and replay it when resuming.
  *
  * @section sec_dev_vfio_guest_view     What the guest gets to see
  *
@@ -4081,59 +4079,6 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
 
 
 /**
- * Refuses to have the state of the VM saved or teleported.
- *
- * @returns VERR_NOT_SUPPORTED.
- * @param   pDevIns     The device instance.
- */
-static int pciVfioRefuseSavingState(PPDMDEVINS pDevIns)
-{
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
-    LogRel(("VFIO#%d: The state of the VM can't be saved with a PCI device of the host passed through to it\n",
-            pThis->iInstance));
-    int rc = PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "PciVfioNoSavedState",
-                                        N_("The state of the VM can't be saved or teleported while a PCI device of the "
-                                           "host is passed through to it. Power the VM off instead, or remove the device "
-                                           "from the VM first"));
-    AssertRC(rc); RT_NOREF(rc);
-    return VERR_NOT_SUPPORTED;
-}
-
-
-/**
- * @callback_method_impl{FNSSMDEVLIVEPREP, The state of a device of the host can't be moved to another host.}
- */
-static DECLCALLBACK(int) pciVfioLivePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
-{
-    RT_NOREF(pSSM);
-    return pciVfioRefuseSavingState(pDevIns);
-}
-
-
-/**
- * @callback_method_impl{FNSSMDEVSAVEPREP, The state of a device of the host can't be saved.}
- */
-static DECLCALLBACK(int) pciVfioSavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
-{
-    RT_NOREF(pSSM);
-    return pciVfioRefuseSavingState(pDevIns);
-}
-
-
-/**
- * @callback_method_impl{FNSSMDEVLOADPREP,
- *      A saved state can only have been made without the device\, so the device was added afterwards.}
- */
-static DECLCALLBACK(int) pciVfioLoadPrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
-{
-    return pDevIns->pHlpR3->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
-                                               N_("The saved state was made without the PCI device of the host which is "
-                                                  "passed through to the VM now. Remove the device from the VM or discard "
-                                                  "the saved state"));
-}
-
-
-/**
  * @interface_method_impl{PDMDEVREG,pfnInitComplete}
  */
 static DECLCALLBACK(int) pciVfioInitComplete(PPDMDEVINS pDevIns)
@@ -4197,14 +4142,6 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     }
 
     int rc = PDMDevHlpSetDeviceCritSect(pDevIns, PDMDevHlpCritSectGetNop(pDevIns));
-    if (RT_FAILURE(rc))
-        return rc;
-
-    /* There is no state to save, the unit is there for refusing to. */
-    rc = PDMDevHlpSSMRegisterEx(pDevIns, 1 /*uVersion*/, 0 /*cbGuess*/, NULL /*pszBefore*/,
-                                pciVfioLivePrep, NULL /*pfnLiveExec*/, NULL /*pfnLiveVote*/,
-                                pciVfioSavePrep, NULL /*pfnSaveExec*/, NULL /*pfnSaveDone*/,
-                                pciVfioLoadPrep, NULL /*pfnLoadExec*/, NULL /*pfnLoadDone*/);
     if (RT_FAILURE(rc))
         return rc;
 
