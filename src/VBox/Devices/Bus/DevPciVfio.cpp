@@ -3763,9 +3763,7 @@ static void pciVfioSlotAskGuest(PVFIOPCI pThis)
 {
     uint64_t const msNow  = RT_MAX(RTTimeMilliTS(), 1);
     uint64_t const msLast = ASMAtomicReadU64(&pThis->msAttnPressed);
-    if (   (   !msLast
-            || msNow - msLast >= VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS)
-        && ASMAtomicCmpXchgU64(&pThis->msAttnPressed, msNow, msLast))
+    if (ASMAtomicCmpXchgU64(&pThis->msAttnPressed, msNow, msLast))
         devpciR3HotPlugSlotPressAttentionButton(pThis->pDevInsPort);
 }
 
