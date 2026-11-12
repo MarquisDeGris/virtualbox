@@ -3237,6 +3237,44 @@ int tstPdmLoadState(const void *pvState, size_t cbState)
 
 
 /**
+ * Takes a unit out of a saved state, which makes it one of a VM which didn't
+ * have the device.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if the state has no such unit.
+ * @param   pvState             The saved state.
+ * @param   pcbState            Its size, updated.
+ * @param   pszUnit             The name of the unit.
+ * @param   uInstance           The instance of the unit.
+ */
+int tstPdmStateDropUnit(void *pvState, size_t *pcbState, const char *pszUnit, uint32_t uInstance)
+{
+    uint8_t * const pb  = (uint8_t *)pvState;
+    size_t          off = 0;
+    for (;;)
+    {
+        TSTPDMSSMUNITHDR Hdr;
+        if (sizeof(Hdr) > *pcbState - off)
+            return VERR_NOT_FOUND;
+        memcpy(&Hdr, &pb[off], sizeof(Hdr));
+        Hdr.szName[sizeof(Hdr.szName) - 1] = '\0';
+        if (   !Hdr.szName[0]
+            || Hdr.cbData > *pcbState - off - sizeof(Hdr))
+            return VERR_NOT_FOUND;
+        size_t const cbUnit = sizeof(Hdr) + Hdr.cbData;
+        if (   Hdr.uInstance == uInstance
+            && !strcmp(Hdr.szName, pszUnit))
+        {
+            memmove(&pb[off], &pb[off + cbUnit], *pcbState - off - cbUnit);
+            *pcbState -= cbUnit;
+            return VINF_SUCCESS;
+        }
+        off += cbUnit;
+    }
+}
+
+
+/**
  * Changes an item in a saved state, for trying out states which don't go with
  * the VM they are loaded into or which make no sense.
  *

@@ -5684,6 +5684,61 @@ static void tstSlotSavedStateRefused(void)
     tstFixtureTeardown();
 
     /*
+     * Memory of the device which stays mapped when the device is taken out, because
+     * nothing could be put into its place, keeps the state from being saved and a
+     * state from being loaded.  A device which is put in and taken out again makes
+     * up for that.
+     */
+    rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        void  *pvState2 = NULL;
+        size_t cbState2 = 0;
+        for (unsigned iRound = 0; iRound < 2; iRound++)
+        {
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("round %u\n", iRound));
+            tstVfioKrnlFailPlaceholderMmap(1);
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            tstVfioKrnlFailPlaceholderMmap(0);
+            tstSlotCheckEmpty(__LINE__, pDevInsPort);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("round %u\n", iRound));
+            if (iRound == 1)
+                break;
+
+            rc = tstPdmSaveState(false /*fLive*/, &pvState2, &cbState2);
+            RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("%Rrc\n", rc));
+            RTTESTI_CHECK(!strcmp(tstPdmGetLastRuntimeErrorId(), "PciVfioNoSavedState"));
+            tstPdmFreeState(pvState2);
+            tstPdmResume();
+
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            tstSlotCheckEmpty(__LINE__, pDevInsPort);
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            RTTESTI_CHECK_RC(tstPdmSaveState(false /*fLive*/, &pvState2, &cbState2), VINF_SUCCESS);
+            tstPdmFreeState(pvState2);
+            tstPdmResume();
+
+            RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+        }
+
+        /* Loading: refused before anything is loaded. */
+        tstPdmSuspend();
+        tstSlotStateHookArm(pDevInsDev, pDev);
+        rc = tstPdmLoadState(pvState, cbState);
+        tstPdmSetStateHook(NULL, NULL);
+        RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+        RTTESTI_CHECK(*tstPdmGetLastError() != '\0');
+        RTTESTI_CHECK(g_TstSlotStateHook.cCalls == 0);
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+
+    /*
      * States which are not loaded.  The VM has the device, which stays out of
      * the slot when loading fails.
      */
@@ -5747,6 +5802,28 @@ static void tstSlotSavedStateRefused(void)
         tstFixtureTeardown();
         RTMemFree(pvBadState);
     }
+    /*
+     * A state which has all it takes but the unit of the device: saved by something
+     * which knows nothing of what is needed for saving with an empty slot.
+     */
+    void *pvStateNoUnit = RTMemDup(pvState, cbState);
+    RTTESTI_CHECK(pvStateNoUnit);
+    if (pvStateNoUnit)
+    {
+        size_t cbStateNoUnit = cbState;
+        RTTESTI_CHECK_RC(tstPdmStateDropUnit(pvStateNoUnit, &cbStateNoUnit, "pci-vfio", 0 /*uInstance*/), VINF_SUCCESS);
+        rc = tstSlotStateFixtureSetup(&Model, 1, NULL /*paLayouts*/, &pDev, &pDevInsPort, &pDevInsDev);
+        if (RT_SUCCESS(rc))
+        {
+            rc = tstPdmLoadState(pvStateNoUnit, cbStateNoUnit);
+            RTTESTI_CHECK_MSG(rc == VERR_SSM_LOAD_CONFIG_MISMATCH, ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+            RTTESTI_CHECK(*tstPdmGetLastError() != '\0');
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        }
+        tstFixtureTeardown();
+        RTMemFree(pvStateNoUnit);
+    }
+
     tstPdmFreeState(pvState);
 
     /*

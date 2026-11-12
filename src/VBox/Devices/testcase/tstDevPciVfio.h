@@ -146,6 +146,7 @@ uint32_t    tstVfioKrnlGetViolationCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
+void        tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes);
 /** @} */
 
 
@@ -224,6 +225,7 @@ void            tstPdmSetStateHook(PFNTSTPDMSTATEHOOK pfnHook, void *pvUser);
 int             tstPdmSaveState(bool fLive, void **ppvState, size_t *pcbState);
 void            tstPdmFreeState(void *pvState);
 int             tstPdmLoadState(const void *pvState, size_t cbState);
+int             tstPdmStateDropUnit(void *pvState, size_t *pcbState, const char *pszUnit, uint32_t uInstance);
 int             tstPdmStatePatchItem(void *pvState, size_t cbState, const char *pszUnit, uint32_t uInstance, uint32_t idxItem,
                                      const void *pvNew, size_t cbNew);
 uint32_t        tstPdmMsiGetCount(void);
