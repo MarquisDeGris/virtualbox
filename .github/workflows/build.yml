@@ -208,6 +208,49 @@ jobs:
           tail -8 build-tests.log
           grep -E 'warning:' build-tests.log | grep -E 'tstDevPciVfio|DevPciVfio|DevPciIch9' | head -60 || true
 
+      - name: Check the ACPI table
+        if: inputs.flavor != 'baseline'
+        run: |
+          # The DSDT as built, decompiled and executed with the ACPICA tools: what the
+          # PCI root bridge calls itself and what _OSC grants the guest, without and
+          # with PCI Express native hot-plug being configured.
+          hex=$(find out/linux.amd64/release/obj/VBoxDD -name vboxaml.hex | head -1)
+          ls -l "$hex"
+          mkdir -p acpi-check
+          cd acpi-check
+          python3 - "../$hex" dsdt.aml <<'EOF'
+          import re, sys
+          src = re.sub(r'/\*.*?\*/', '', open(sys.argv[1]).read(), flags=re.S)
+          src = re.sub(r'//[^\n]*', '', src)
+          body = src[src.index('{') + 1:src.rindex('}')]
+          data = bytes(int(x, 16) for x in re.findall(r'0x([0-9A-Fa-f]{1,2})\b', body))
+          assert data[:4] == b'DSDT', data[:16]
+          assert int.from_bytes(data[4:8], 'little') == len(data), (len(data), data[4:8])
+          open(sys.argv[2], 'wb').write(data)
+          print(len(data), 'bytes of AML')
+          EOF
+          iasl -d dsdt.aml > iasl.log 2>&1 || { cat iasl.log; exit 1; }
+          tail -3 iasl.log
+          if ! grep -q 'PEHP' dsdt.dsl; then
+            echo "The table has no field for PCI Express native hot-plug, nothing more to check."
+            exit 0
+          fi
+          osc='execute \_SB.PCI0._OSC (5B 4D DB 33 F7 1F 1C 40 96 57 74 41 C0 3D D7 66) 1 3 (00 00 00 00 1F 00 00 00 1F 00 00 00)'
+          # Operation regions which read as zero: not configured.
+          acpiexec -di -b 'execute \_SB.PCI0._HID' dsdt.aml > hid-off.log 2>&1 || true
+          acpiexec -di -b "$osc" dsdt.aml > osc-off.log 2>&1 || true
+          # Operation regions which read as all ones: configured.
+          acpiexec -di -f 0xff -b 'execute \_SB.PCI0._HID' dsdt.aml > hid-on.log 2>&1 || true
+          acpiexec -di -f 0xff -b "$osc" dsdt.aml > osc-on.log 2>&1 || true
+          for f in hid-off hid-on osc-off osc-on; do echo "---- $f"; grep -v '^$' $f.log | tail -8; done
+          echo "---- checks"
+          grep -i '030AD041' hid-off.log
+          grep -i '080AD041' hid-on.log
+          grep -i -E '10 00 00 00 1F 00 00 00 +0F 00 00 00' osc-off.log
+          grep -i -E '00 00 00 00 1F 00 00 00 +1F 00 00 00' osc-on.log
+          grep -E 'Name \(_CID, EisaId \("PNP0A03"\)' dsdt.dsl
+          echo "ACPI table check passed"
+
       - name: Run device testcases
         if: inputs.flavor != 'baseline'
         run: |
