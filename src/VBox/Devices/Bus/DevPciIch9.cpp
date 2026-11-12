@@ -3976,7 +3976,7 @@ static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDev
                 /* safe, only needs to go to the config space array */
                 uint8_t bReg = PDMPciDevGetByte(pPciDev, uAddress + i);
                 bReg  = (bReg & ~g_aIch9PciBridgeExpCapAccess[offCap].fRw) | (bValue & g_aIch9PciBridgeExpCapAccess[offCap].fRw);
-                bReg &= ~(bValue & g_aIch9PciBridgeExpCapAccess[offCap].fRw1c);
+                bReg &= ~(bValue & 0);
                 PDMPciDevSetByte(pPciDev, uAddress + i, bReg);
 
                 /* A write to any part of the slot control register is a command, and
