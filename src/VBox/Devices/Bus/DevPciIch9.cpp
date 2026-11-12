@@ -107,6 +107,27 @@ typedef struct
 /** Invalid PCI region mapping address. */
 #define INVALID_PCI_ADDRESS     UINT32_MAX
 
+/** Config space offset of the MSI capability of a bridge, which it has only with a hot-plug capable slot. */
+#define ICH9PCIBRIDGE_MSI_CAP_OFFSET        0x80
+/** Config space offset of the PCI express capability of a bridge. */
+#define ICH9PCIBRIDGE_EXP_CAP_OFFSET        0xa0
+/** Size of the PCI express capability of a bridge. */
+#define ICH9PCIBRIDGE_EXP_CAP_SIZE          0x3c
+/** @name Registers of the PCI express capability, relative to its start.
+ * @{ */
+#define ICH9PCIBRIDGE_EXP_LNKCTL            0x10    /**< Link control. */
+#define ICH9PCIBRIDGE_EXP_LNKSTA            0x12    /**< Link status. */
+#define ICH9PCIBRIDGE_EXP_SLTCAP            0x14    /**< Slot capabilities. */
+#define ICH9PCIBRIDGE_EXP_SLTCTL            0x18    /**< Slot control. */
+#define ICH9PCIBRIDGE_EXP_SLTSTA            0x1a    /**< Slot status. */
+/** @} */
+/** Slot control: the attention indicator is off. */
+#define ICH9PCIBRIDGE_EXP_SLTCTL_ATNI_OFF   UINT16_C(0x00c0)
+/** Slot control: the power indicator is on. */
+#define ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_ON    UINT16_C(0x0100)
+/** Slot control: the power indicator is off. */
+#define ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_OFF   UINT16_C(0x0300)
+
 
 /*********************************************************************************************************************************
 *   Internal Functions                                                                                                           *
@@ -118,6 +139,7 @@ static void ich9pciSetIrqInternal(PPDMDEVINS pDevIns, PDEVPCIROOT pPciRoot, PDEV
 static int ich9pciFakePCIBIOS(PPDMDEVINS pDevIns);
 static void ich9pciBiosInitAllDevicesOnBus(PPDMDEVINS pDevIns, PDEVPCIROOT pPciRoot, PDEVPCIBUS pBus);
 static bool ich9pciBiosInitAllDevicesPrefetchableOnBus(PPDMDEVINS pDevIns, PDEVPCIROOT pPciRoot, PDEVPCIBUS pBus, bool fUse64Bit, bool fDryrun);
+static void ich9pcibridgeR3SlotReset(PPDMDEVINS pDevIns);
 #endif
 
 
@@ -3628,6 +3650,10 @@ DECLHIDDEN(void) devpciR3CommonResetBridge(PPDMDEVINS pDevIns)
         /* Not resetting the address decoders of the bridge to 0, since the
          * PCI-to-PCI Bridge spec says that there is no default value. */
     }
+
+    /* The slot of a PCI express port the guest can do hot-plug with. */
+    if (pBus->fHotPlugSlot)
+        ich9pcibridgeR3SlotReset(pDevIns);
 }
 
 
@@ -3638,6 +3664,573 @@ static DECLCALLBACK(void) ich9pciReset(PPDMDEVINS pDevIns)
 {
     /* Reset everything under the root bridge. */
     devpciR3CommonResetBridge(pDevIns);
+}
+
+
+/* -=-=-=-=-=- Hot-plug capable slot of a PCI express port -=-=-=-=-=- */
+
+/*
+ * A PCI express root port configured with "HotPlug" has a slot which the guest
+ * handles by PCI express native hot-plug, see the chapter on hot-plug support
+ * in the PCI express base specification.
+ *
+ * The slot has a power controller, an attention button, a power and an
+ * attention indicator, and neither a latch nor an interlock, so what is in it
+ * can go away at any time (hot-plug surprise).  A command to the slot completes
+ * at once.  The port signals the slot events by MSI only, it has no interrupt
+ * pin.
+ *
+ * Everything on the secondary bus of the port is the device in the slot.  The
+ * link to it is up while there is a device, the guest has the power of the slot
+ * on and has not disabled the link.  While the link is down, config space
+ * accesses to the secondary bus and to the buses below it are answered like
+ * there was nothing, whatever the devices there would make of them.
+ *
+ * A device which comes and goes at run time registers with the port, tells it
+ * when that happens and gets told when the link changes.  Without one, the slot
+ * is occupied for good if a device was configured on the secondary bus.
+ *
+ * The registers of the PCI express capability of such a port have the access
+ * attributes the specification gives them, because the guest takes control of
+ * the capability when it is granted native hot-plug.
+ *
+ * The config space of the port is all the guest knows about the slot, so the
+ * saved state of the port has nothing of the slot in it.  After a state was
+ * loaded, what is in the slot is compared with what the guest saw last, and the
+ * guest is told about the difference like about any other change.
+ */
+
+/**
+ * The bits of the PCI express capability of a port with a hot-plug capable slot
+ * which the guest can change, by byte.  The rest is read-only.
+ */
+static const struct
+{
+    /** Bits the guest can set and clear. */
+    uint8_t     fRw;
+    /** Bits the guest clears by writing a one. */
+    uint8_t     fRw1c;
+} g_aIch9PciBridgeExpCapAccess[ICH9PCIBRIDGE_EXP_CAP_SIZE] =
+{
+    /* 0x00: Capability ID, next capability, PCI express capabilities. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x04: Device capabilities. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x08: Device control: error reporting, relaxed ordering, payload size, no snoop, read request size. */
+    { 0xff, 0x00 }, { 0x78, 0x00 },
+    /* 0x0a: Device status: the errors detected. */
+    { 0x00, 0x0f }, { 0x00, 0x00 },
+    /* 0x0c: Link capabilities. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x10: Link control: ASPM, link disable, common clock, extended synch, bandwidth interrupts; retrain link reads as zero. */
+    { 0xd3, 0x00 }, { 0x0c, 0x00 },
+    /* 0x12: Link status: the bandwidth events. */
+    { 0x00, 0x00 }, { 0x00, 0xc0 },
+    /* 0x14: Slot capabilities. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x18: Slot control: all there is but what belongs to a latch and an interlock. */
+    { 0xfb, 0x00 }, { 0x17, 0x00 },
+    /* 0x1a: Slot status: the events. */
+    { 0x00, 0x1f }, { 0x00, 0x01 },
+    /* 0x1c: Root control: system errors, PME interrupt.  Root capabilities. */
+    { 0x0f, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x20: Root status: PME status. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x01 }, { 0x00, 0x00 },
+    /* 0x24: Device capabilities 2. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x28: Device control 2, device status 2: none of the features is supported. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x2c: Link capabilities 2. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x30: Link control 2: all there is but the de-emphasis.  Link status 2. */
+    { 0xbf, 0x00 }, { 0xff, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    /* 0x34: Slot capabilities 2, slot control 2, slot status 2: reserved. */
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 },
+    { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }, { 0x00, 0x00 }
+};
+
+
+/**
+ * Reads a 16-bit register of the PCI express capability of a bridge.
+ *
+ * @returns The register value.
+ * @param   pPciDev     The PCI device of the bridge.
+ * @param   offReg      The register, ICH9PCIBRIDGE_EXP_XXX.
+ */
+DECLINLINE(uint16_t) ich9pcibridgeR3ExpCapGetU16(PPDMPCIDEV pPciDev, uint32_t offReg)
+{
+    /* safe, only needs to go to the config space array */
+    return PDMPciDevGetWord(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + offReg);
+}
+
+
+/**
+ * Writes a 16-bit register of the PCI express capability of a bridge.
+ *
+ * @param   pPciDev     The PCI device of the bridge.
+ * @param   offReg      The register, ICH9PCIBRIDGE_EXP_XXX.
+ * @param   u16Value    The value.
+ */
+DECLINLINE(void) ich9pcibridgeR3ExpCapSetU16(PPDMPCIDEV pPciDev, uint32_t offReg, uint16_t u16Value)
+{
+    /* safe, only needs to go to the config space array */
+    PDMPciDevSetWord(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + offReg, u16Value);
+}
+
+
+/**
+ * Checks whether the port with a hot-plug capable slot has a reason to
+ * interrupt the guest and the means for it.
+ *
+ * @returns true if the condition for the interrupt is fulfilled, false if not.
+ * @param   pPciDev     The PCI device of the port.
+ */
+static bool ich9pcibridgeR3SlotIsIrqConditionMet(PPDMPCIDEV pPciDev)
+{
+    if (!MsiIsEnabled(pPciDev))
+        return false;
+
+    uint16_t const uSltCtl = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL);
+    if (!(uSltCtl & VBOX_PCI_EXP_SLTCTL_HPIE))
+        return false;
+
+    /* The enable bits of the events are where the events are in the status register,
+       but for the data link layer state change. */
+    uint16_t const uSltSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA);
+    AssertCompile(VBOX_PCI_EXP_SLTCTL_ATNB == VBOX_PCI_EXP_SLTSTA_ATNB && VBOX_PCI_EXP_SLTCTL_PWRF == VBOX_PCI_EXP_SLTSTA_PWRF);
+    AssertCompile(VBOX_PCI_EXP_SLTCTL_MRLS == VBOX_PCI_EXP_SLTSTA_MRLS && VBOX_PCI_EXP_SLTCTL_PRSD == VBOX_PCI_EXP_SLTSTA_PRSD);
+    AssertCompile(VBOX_PCI_EXP_SLTCTL_CMDC == VBOX_PCI_EXP_SLTSTA_CMDC);
+    if (  uSltSta
+        & uSltCtl
+        & (  VBOX_PCI_EXP_SLTSTA_ATNB | VBOX_PCI_EXP_SLTSTA_PWRF | VBOX_PCI_EXP_SLTSTA_MRLS | VBOX_PCI_EXP_SLTSTA_PRSD
+           | VBOX_PCI_EXP_SLTSTA_CMDC))
+        return true;
+    return (uSltSta & VBOX_PCI_EXP_SLTSTA_LLCHG)
+        && (uSltCtl & VBOX_PCI_EXP_SLTCTL_LLCHG);
+}
+
+
+/**
+ * Brings what the guest sees of a hot-plug capable slot in line with the state
+ * of the slot, tells the device in the slot if the link changed, and interrupts
+ * the guest if there is something new for it.
+ *
+ * @param   pDevIns     The device instance of the port.
+ * @param   fEvents     The events which took place, VBOX_PCI_EXP_SLTSTA_XXX.
+ *                      A change of the presence of a device and of the link
+ *                      state is found out here.
+ *
+ * @remarks The caller holds the PCI lock.
+ */
+static void ich9pcibridgeR3SlotUpdate(PPDMDEVINS pDevIns, uint16_t fEvents)
+{
+    PDEVPCIHPSLOT const pSlot   = &PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot;
+    PPDMPCIDEV const    pPciDev = pDevIns->apPciDevs[0];
+
+    /*
+     * Presence is detected with and without power.
+     */
+    uint16_t uSltSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA);
+    if (pSlot->fPresent != RT_BOOL(uSltSta & VBOX_PCI_EXP_SLTSTA_PRES))
+    {
+        uSltSta ^= VBOX_PCI_EXP_SLTSTA_PRES;
+        fEvents |= VBOX_PCI_EXP_SLTSTA_PRSD;
+    }
+
+    /*
+     * The link.
+     */
+    bool const fLinkUp =    pSlot->fPresent
+                         && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL) & VBOX_PCI_EXP_SLTCTL_PWRC)
+                         && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKCTL) & VBOX_PCI_EXP_LNKCTL_DISABLE);
+    uint16_t const uLnkSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA);
+    if (fLinkUp != RT_BOOL(uLnkSta & VBOX_PCI_EXP_LNKSTA_DL_ACT))
+    {
+        ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA, uLnkSta ^ VBOX_PCI_EXP_LNKSTA_DL_ACT);
+        fEvents |= VBOX_PCI_EXP_SLTSTA_LLCHG;
+    }
+
+    ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA, uSltSta | fEvents);
+
+    /*
+     * Tell the device in the slot.  It may call back and change the slot again,
+     * so nothing read above is used after this.
+     */
+    if (fLinkUp != pSlot->fLinkUp)
+    {
+        pSlot->fLinkUp = fLinkUp;
+        LogRelMax(256, ("PCI: Bridge #%u: The link to the hot-plug slot is %s\n", pDevIns->iInstance, fLinkUp ? "up" : "down"));
+        if (pSlot->pfnLinkChanged)
+            pSlot->pfnLinkChanged(pSlot->pDevInsClient, fLinkUp);
+    }
+
+    /*
+     * The interrupt.  A message is sent whenever the condition becomes true.
+     */
+    bool const fIrq = ich9pcibridgeR3SlotIsIrqConditionMet(pPciDev);
+    if (fIrq != pSlot->fIrqRaised)
+    {
+        pSlot->fIrqRaised = fIrq;
+        if (fIrq)
+            PDMDevHlpPCISetIrqNoWait(pDevIns, 0, PDM_IRQ_LEVEL_HIGH);
+    }
+}
+
+
+/**
+ * Resets the PCI express capability of a port with a hot-plug capable slot.
+ * The slot has power afterwards if there is a device in it, so that firmware
+ * and guests which know nothing about hot-plug find the device.
+ *
+ * @param   pDevIns     The device instance of the port.
+ */
+static void ich9pcibridgeR3SlotReset(PPDMDEVINS pDevIns)
+{
+    PDEVPCIBUS const    pBus    = PDMINS_2_DATA(pDevIns, PDEVPCIBUS);
+    PDEVPCIBUSCC const  pBusCC  = PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC);
+    PDEVPCIHPSLOT const pSlot   = &pBusCC->HotPlugSlot;
+    PPDMPCIDEV const    pPciDev = pDevIns->apPciDevs[0];
+
+    int const rcLock = pBusCC->pPciHlpR3->pfnLock(pDevIns, VERR_IGNORED);
+    AssertRCReturnVoid(rcLock);
+
+    /* Without somebody telling, the slot holds what was configured to be on the secondary bus. */
+    if (!pSlot->pDevInsClient)
+    {
+        pSlot->fPresent = false;
+        for (uint32_t uDevFn = 0; uDevFn < RT_ELEMENTS(pBus->apDevices) && !pSlot->fPresent; uDevFn++)
+            pSlot->fPresent = pBus->apDevices[uDevFn] != NULL;
+    }
+
+    /* Everything the guest can change goes back to what the constructor set up. */
+    for (uint32_t off = 0; off < ICH9PCIBRIDGE_EXP_CAP_SIZE; off++)
+    {
+        uint8_t const fChangeable = g_aIch9PciBridgeExpCapAccess[off].fRw | g_aIch9PciBridgeExpCapAccess[off].fRw1c;
+        /* safe, only needs to go to the config space array */
+        PDMPciDevSetByte(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + off,
+                           (PDMPciDevGetByte(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + off) & ~fChangeable)
+                         | (pSlot->abCfgInit[ICH9PCIBRIDGE_EXP_CAP_OFFSET + off] & fChangeable));
+    }
+
+    /* The power, the indicators and the read-only state, without events. */
+    uint16_t uSltCtl = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL);
+    uSltCtl &= ~(VBOX_PCI_EXP_SLTCTL_ATNI | VBOX_PCI_EXP_SLTCTL_PWRI | VBOX_PCI_EXP_SLTCTL_PWRC);
+    uSltCtl |= ICH9PCIBRIDGE_EXP_SLTCTL_ATNI_OFF;
+    uSltCtl |= pSlot->fPresent ? ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_ON : ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_OFF | VBOX_PCI_EXP_SLTCTL_PWRC;
+    ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL, uSltCtl);
+
+    uint16_t uSltSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA) & ~VBOX_PCI_EXP_SLTSTA_PRES;
+    if (pSlot->fPresent)
+        uSltSta |= VBOX_PCI_EXP_SLTSTA_PRES;
+    ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA, uSltSta);
+
+    uint16_t uLnkSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA) & ~VBOX_PCI_EXP_LNKSTA_DL_ACT;
+    if (pSlot->fPresent)
+        uLnkSta |= VBOX_PCI_EXP_LNKSTA_DL_ACT;
+    ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA, uLnkSta);
+
+    /* The device in the slot gets to know if this changed the link. */
+    ich9pcibridgeR3SlotUpdate(pDevIns, 0 /*fEvents*/);
+
+    pBusCC->pPciHlpR3->pfnUnlock(pDevIns);
+}
+
+
+/**
+ * @callback_method_impl{FNPCICONFIGREAD,
+ *      Port with a hot-plug capable slot: nothing special about reading.}
+ */
+static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigRead(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
+                                                                uint32_t uAddress, unsigned cb, uint32_t *pu32Value)
+{
+    RT_NOREF(pDevIns, pPciDev, uAddress, cb, pu32Value);
+    return VINF_PDM_PCI_DO_DEFAULT;
+}
+
+
+/**
+ * @callback_method_impl{FNPCICONFIGWRITE,
+ *      Port with a hot-plug capable slot: the PCI express capability with its
+ *      access attributes, and what the guest does to the slot by writing to it.}
+ */
+static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
+                                                                 uint32_t uAddress, unsigned cb, uint32_t u32Value)
+{
+    Assert(pPciDev == pDevIns->apPciDevs[0]);
+    Assert(cb <= 4);
+
+    VBOXSTRICTRC rcStrict = VINF_SUCCESS;
+    uint16_t     fEvents  = 0;
+    if (   uAddress >= ICH9PCIBRIDGE_EXP_CAP_OFFSET + ICH9PCIBRIDGE_EXP_CAP_SIZE
+        || uAddress + cb <= ICH9PCIBRIDGE_EXP_CAP_OFFSET)
+        /* Not the capability.  The default handling is done here and not left to the
+           caller, because what the guest does to the MSI capability counts below. */
+        rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, uAddress, cb, u32Value);
+    else
+        for (unsigned i = 0; i < cb; i++, u32Value >>= 8)
+        {
+            uint32_t const offCap = uAddress + i - ICH9PCIBRIDGE_EXP_CAP_OFFSET;
+            uint8_t const  bValue = (uint8_t)u32Value;
+            if (offCap < ICH9PCIBRIDGE_EXP_CAP_SIZE)
+            {
+                /* safe, only needs to go to the config space array */
+                uint8_t bReg = PDMPciDevGetByte(pPciDev, uAddress + i);
+                bReg  = (bReg & ~g_aIch9PciBridgeExpCapAccess[offCap].fRw) | (bValue & g_aIch9PciBridgeExpCapAccess[offCap].fRw);
+                bReg &= ~(bValue & g_aIch9PciBridgeExpCapAccess[offCap].fRw1c);
+                PDMPciDevSetByte(pPciDev, uAddress + i, bReg);
+
+                /* A write to any part of the slot control register is a command, and
+                   each command completes at once. */
+                if (offCap - ICH9PCIBRIDGE_EXP_SLTCTL < sizeof(uint16_t))
+                    fEvents |= VBOX_PCI_EXP_SLTSTA_CMDC;
+            }
+            else
+            {
+                /* An unaligned access reaching beyond the capability. */
+                VBOXSTRICTRC rcStrict2 = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, uAddress + i, 1, bValue);
+                if (rcStrict2 != VINF_SUCCESS)
+                    rcStrict = rcStrict2;
+            }
+        }
+
+    ich9pcibridgeR3SlotUpdate(pDevIns, fEvents);
+    return rcStrict;
+}
+
+
+/**
+ * @callback_method_impl{FNPCIBRIDGECONFIGREAD,
+ *      Port with a hot-plug capable slot: nothing answers while the link is down.}
+ */
+static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotBridgeConfigRead(PPDMDEVINSR3 pDevIns, uint8_t iBus, uint8_t iDevice,
+                                                                      uint32_t u32Address, unsigned cb, uint32_t *pu32Value)
+{
+    if (PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot.fLinkUp)
+        return devpciR3BridgeCommonConfigRead(pDevIns, iBus, iDevice, u32Address, cb, pu32Value);
+    *pu32Value = UINT32_MAX;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNPCIBRIDGECONFIGWRITE,
+ *      Port with a hot-plug capable slot: nothing listens while the link is down.}
+ */
+static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotBridgeConfigWrite(PPDMDEVINSR3 pDevIns, uint8_t iBus, uint8_t iDevice,
+                                                                       uint32_t u32Address, unsigned cb, uint32_t u32Value)
+{
+    if (PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot.fLinkUp)
+        return devpciR3BridgeCommonConfigWrite(pDevIns, iBus, iDevice, u32Address, cb, u32Value);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Finds the port with the hot-plug capable slot a PCI device is in.
+ *
+ * @returns The device instance of the port, NULL if the device is not on the
+ *          secondary bus of a port with a hot-plug capable slot.
+ * @param   pDevIns     The device instance the PCI device belongs to.
+ * @param   pPciDev     The PCI device, registered with its bus.
+ */
+DECLHIDDEN(PPDMDEVINS) devpciR3HotPlugSlotFind(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev)
+{
+    PCPDMPCIHLPR3 const pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
+    AssertPtrReturn(pPciHlp, NULL);
+    PPDMDEVINS const pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
+    AssertPtrReturn(pDevInsBus, NULL);
+
+    if (   pDevInsBus->pReg != &g_DevicePciIch9Bridge
+        || !PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS)->fHotPlugSlot)
+        return NULL;
+    return pDevInsBus;
+}
+
+
+/**
+ * Registers the device which takes care of what is in a hot-plug capable slot.
+ * There can be one per slot, and it has to register from its constructor.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_ALREADY_EXISTS if another device has registered for the slot,
+ *          which is a matter of how the VM is configured.
+ * @param   pDevInsPort     The device instance of the port, see devpciR3HotPlugSlotFind().
+ * @param   pDevInsClient   The device instance which registers.
+ * @param   pfnLinkChanged  Called when the state of the link to the slot changes, optional.
+ *                          The link is down until the callback says otherwise.
+ * @param   fPresent        Whether there is a device in the slot when the VM starts.
+ */
+DECLHIDDEN(int) devpciR3HotPlugSlotRegisterClient(PPDMDEVINS pDevInsPort, PPDMDEVINS pDevInsClient,
+                                                  PFNDEVPCIHPSLOTLINK pfnLinkChanged, bool fPresent)
+{
+    PDEVPCIBUS const    pBus  = PDMINS_2_DATA(pDevInsPort, PDEVPCIBUS);
+    PDEVPCIHPSLOT const pSlot = &PDMINS_2_DATA_CC(pDevInsPort, PDEVPCIBUSCC)->HotPlugSlot;
+    AssertReturn(pBus->fHotPlugSlot, VERR_INVALID_PARAMETER);
+    AssertPtrReturn(pDevInsClient, VERR_INVALID_POINTER);
+    AssertPtrNullReturn(pfnLinkChanged, VERR_INVALID_POINTER);
+    AssertReturn(!pSlot->fInitComplete, VERR_WRONG_ORDER);
+    if (pSlot->pDevInsClient)
+        return VERR_ALREADY_EXISTS;
+
+    pSlot->pDevInsClient  = pDevInsClient;
+    pSlot->pfnLinkChanged = pfnLinkChanged;
+    pSlot->fPresent       = fPresent;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Tells a port with a hot-plug capable slot that a device was put into the slot
+ * or taken out of it.  The guest is notified.
+ *
+ * @param   pDevInsPort     The device instance of the port, see devpciR3HotPlugSlotFind().
+ * @param   fPresent        Whether there is a device in the slot now.
+ *
+ * @thread  Any.
+ */
+DECLHIDDEN(void) devpciR3HotPlugSlotSetPresence(PPDMDEVINS pDevInsPort, bool fPresent)
+{
+    PDEVPCIBUS const    pBus   = PDMINS_2_DATA(pDevInsPort, PDEVPCIBUS);
+    PDEVPCIBUSCC const  pBusCC = PDMINS_2_DATA_CC(pDevInsPort, PDEVPCIBUSCC);
+    PDEVPCIHPSLOT const pSlot  = &pBusCC->HotPlugSlot;
+    AssertReturnVoid(pBus->fHotPlugSlot);
+
+    int const rcLock = pBusCC->pPciHlpR3->pfnLock(pDevInsPort, VERR_IGNORED);
+    AssertRCReturnVoid(rcLock);
+
+    if (pSlot->fPresent != fPresent)
+    {
+        LogRel(("PCI: Bridge #%u: A device was %s the hot-plug slot\n", pDevInsPort->iInstance,
+                fPresent ? "put into" : "taken out of"));
+        pSlot->fPresent = fPresent;
+
+        /* Before the VM construction is complete there is nobody to tell,
+           ich9pcibridgeR3InitComplete() takes it from there. */
+        if (pSlot->fInitComplete)
+            ich9pcibridgeR3SlotUpdate(pDevInsPort, 0 /*fEvents*/);
+    }
+
+    pBusCC->pPciHlpR3->pfnUnlock(pDevInsPort);
+}
+
+
+/**
+ * Presses the attention button of a hot-plug capable slot, which asks the guest
+ * to let go of the device in the slot, or to take the device in the slot into
+ * use.  A guest which follows takes about five seconds before it acts, and it
+ * shows by the link going down or up that it is done.
+ *
+ * @param   pDevInsPort     The device instance of the port, see devpciR3HotPlugSlotFind().
+ *
+ * @thread  Any.
+ */
+DECLHIDDEN(void) devpciR3HotPlugSlotPressAttentionButton(PPDMDEVINS pDevInsPort)
+{
+    PDEVPCIBUS const   pBus   = PDMINS_2_DATA(pDevInsPort, PDEVPCIBUS);
+    PDEVPCIBUSCC const pBusCC = PDMINS_2_DATA_CC(pDevInsPort, PDEVPCIBUSCC);
+    AssertReturnVoid(pBus->fHotPlugSlot);
+
+    int const rcLock = pBusCC->pPciHlpR3->pfnLock(pDevInsPort, VERR_IGNORED);
+    AssertRCReturnVoid(rcLock);
+
+    LogRel(("PCI: Bridge #%u: The attention button of the hot-plug slot was pressed\n", pDevInsPort->iInstance));
+    if (pBusCC->HotPlugSlot.fInitComplete)
+        ich9pcibridgeR3SlotUpdate(pDevInsPort, VBOX_PCI_EXP_SLTSTA_ATNB);
+
+    pBusCC->pPciHlpR3->pfnUnlock(pDevInsPort);
+}
+
+
+/**
+ * Checks whether the link to a hot-plug capable slot is up.
+ *
+ * @returns true if the link is up, false if it is down.
+ * @param   pDevInsPort     The device instance of the port, see devpciR3HotPlugSlotFind().
+ *
+ * @thread  Any.  The answer can be outdated when the caller gets it, unless the
+ *          caller holds the PCI lock.
+ */
+DECLHIDDEN(bool) devpciR3HotPlugSlotIsLinkUp(PPDMDEVINS pDevInsPort)
+{
+    AssertReturn(PDMINS_2_DATA(pDevInsPort, PDEVPCIBUS)->fHotPlugSlot, false);
+    return PDMINS_2_DATA_CC(pDevInsPort, PDEVPCIBUSCC)->HotPlugSlot.fLinkUp;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADDONE,
+ *      Port with a hot-plug capable slot: checks that the state is one of a port
+ *      with such a slot and tells the guest what happened to the slot since the
+ *      state was saved.}
+ */
+static DECLCALLBACK(int) ich9pcibridgeR3SlotLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PDEVPCIBUSCC const  pBusCC  = PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC);
+    PDEVPCIHPSLOT const pSlot   = &pBusCC->HotPlugSlot;
+    PPDMPCIDEV const    pPciDev = pDevIns->apPciDevs[0];
+    PCPDMDEVHLPR3 const pHlp    = pDevIns->pHlpR3;
+
+    /* Nothing to do here if loading failed, this gets called nevertheless. */
+    if (RT_FAILURE(pHlp->pfnSSMHandleGetStatus(pSSM)))
+        return VINF_SUCCESS;
+
+    /*
+     * The config space of the port came from the saved state, the parts the
+     * guest can't change included.  The guest has to find the slot it knew,
+     * as the registers behave by what the port is now.
+     */
+    static const struct
+    {
+        /** Offset into the PCI express capability. */
+        uint8_t     off;
+        /** The bits which have to be like the constructor set them. */
+        uint8_t     fMask;
+    } s_aFixed[] =
+    {
+        { 0x00,                             0xff }, /* The capability ID. */
+        { 0x03,                             0x01 }, /* Slot implemented. */
+        { 0x0e,                             0x10 }, /* Data link layer link active reporting capable. */
+        { ICH9PCIBRIDGE_EXP_SLTCAP,         0xff },
+        { ICH9PCIBRIDGE_EXP_SLTCAP + 1,     0xff },
+        { ICH9PCIBRIDGE_EXP_SLTCAP + 2,     0xff },
+        { ICH9PCIBRIDGE_EXP_SLTCAP + 3,     0xff }
+    };
+    for (unsigned i = 0; i < RT_ELEMENTS(s_aFixed); i++)
+    {
+        uint32_t const off = ICH9PCIBRIDGE_EXP_CAP_OFFSET + s_aFixed[i].off;
+        /* safe, only needs to go to the config space array */
+        if ((PDMPciDevGetByte(pPciDev, off) ^ pSlot->abCfgInit[off]) & s_aFixed[i].fMask)
+            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                            N_("The state was saved with a different hot-plug configuration of PCI bridge #%u"),
+                                            pDevIns->iInstance);
+    }
+
+    int const rcLock = pBusCC->pPciHlpR3->pfnLock(pDevIns, VERR_IGNORED);
+    AssertRCReturn(rcLock, rcLock);
+
+    /* The guest was interrupted for what the registers show.  From here on it is
+       told what is different now, the device in the slot gets to know if the link
+       isn't in the state it was in before the state was loaded. */
+    pSlot->fIrqRaised = ich9pcibridgeR3SlotIsIrqConditionMet(pPciDev);
+    ich9pcibridgeR3SlotUpdate(pDevIns, 0 /*fEvents*/);
+
+    pBusCC->pPciHlpR3->pfnUnlock(pDevIns);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @interface_method_impl{PDMDEVREG,pfnInitComplete}
+ */
+static DECLCALLBACK(int) ich9pcibridgeR3InitComplete(PPDMDEVINS pDevIns)
+{
+    /* What is on the secondary bus is known now: set the hot-plug capable slot up for it. */
+    if (PDMINS_2_DATA(pDevIns, PDEVPCIBUS)->fHotPlugSlot)
+    {
+        PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot.fInitComplete = true;
+        ich9pcibridgeR3SlotReset(pDevIns);
+    }
+    return VINF_SUCCESS;
 }
 
 
@@ -3682,7 +4275,7 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
     /*
      * Validate and read configuration.
      */
-    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "ExpressEnabled|ExpressPortType", "");
+    PDMDEV_VALIDATE_CONFIG_RETURN(pDevIns, "ExpressEnabled|ExpressPortType|HotPlug", "");
 
     /* check if we're supposed to implement a PCIe bridge. */
     bool fExpress;
@@ -3694,8 +4287,19 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
     AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: failed to read \"ExpressPortType\" as string")));
 
     uint8_t const uExpressPortType = devpciR3BridgeCommonGetExpressPortTypeFromString(szExpressPortType);
-    Log(("PCI/bridge#%u: fR0Enabled=%RTbool fRCEnabled=%RTbool fExpress=%RTbool uExpressPortType=%u (%s)\n",
-         iInstance, pDevIns->fR0Enabled, pDevIns->fRCEnabled, fExpress, uExpressPortType, szExpressPortType));
+
+    /* Whether the guest can do PCI express native hot-plug with what is behind the bridge. */
+    bool fHotPlug;
+    rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "HotPlug", &fHotPlug, false);
+    AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Configuration error: Failed to query boolean value \"HotPlug\"")));
+    if (   fHotPlug
+        && (   !fExpress
+            || uExpressPortType != VBOX_PCI_EXP_TYPE_ROOT_PORT))
+        return PDMDEV_SET_ERROR(pDevIns, VERR_NOT_SUPPORTED,
+                                N_("Configuration error: \"HotPlug\" needs a PCI express root port (\"ExpressEnabled\", \"ExpressPortType\" set to \"RootCmplxRootPort\")"));
+
+    Log(("PCI/bridge#%u: fR0Enabled=%RTbool fRCEnabled=%RTbool fExpress=%RTbool uExpressPortType=%u (%s) fHotPlug=%RTbool\n",
+         iInstance, pDevIns->fR0Enabled, pDevIns->fRCEnabled, fExpress, uExpressPortType, szExpressPortType, fHotPlug));
 
     /*
      * Init data and register the PCI bus.
@@ -3806,6 +4410,28 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
         PDMPciDevSetWord(pPciDev, 0xa0 + 56, 0x0000); /* Slot control 2. */
         PDMPciDevSetWord(pPciDev, 0xa0 + 58, 0x0000); /* Slot status 2. */
         PDMPciDevSetCapabilityList(pPciDev, 0xa0);
+
+        if (fHotPlug)
+        {
+            /* The slot with what the guest needs for hot-plug.  It is empty and without power until
+               it is known what is on the secondary bus, see ich9pcibridgeR3InitComplete(). */
+            AssertCompile(ICH9PCIBRIDGE_EXP_CAP_OFFSET == 0xa0);
+            PDMPciDevSetWord(pPciDev, 0xa0 + 2, PDMPciDevGetWord(pPciDev, 0xa0 + 2) | VBOX_PCI_EXP_FLAGS_SLOT);
+            PDMPciDevSetDWord(pPciDev, 0xa0 + 12, PDMPciDevGetDWord(pPciDev, 0xa0 + 12) | VBOX_PCI_EXP_LNKCAP_DLLA);
+            PDMPciDevSetDWord(pPciDev, 0xa0 + 20,
+                                PDMPciDevGetDWord(pPciDev, 0xa0 + 20)
+                              | VBOX_PCI_EXP_SLTCAP_ATNB
+                              | VBOX_PCI_EXP_SLTCAP_PWRC
+                              | VBOX_PCI_EXP_SLTCAP_ATNI
+                              | VBOX_PCI_EXP_SLTCAP_PWRI
+                              | VBOX_PCI_EXP_SLTCAP_HPS
+                              | VBOX_PCI_EXP_SLTCAP_HPC
+                              | /* Physical Slot Number */ (((uint32_t)iInstance + 1) << 19)); /* Slot capabilities. */
+            PDMPciDevSetWord(pPciDev, 0xa0 + 24,
+                               ICH9PCIBRIDGE_EXP_SLTCTL_ATNI_OFF
+                             | ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_OFF
+                             | VBOX_PCI_EXP_SLTCTL_PWRC); /* Slot control. */
+        }
     }
     else
     {
@@ -3836,6 +4462,34 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
     pPciDev->Int.s.pfnBridgeConfigRead  = devpciR3BridgeCommonConfigRead;
     pPciDev->Int.s.pfnBridgeConfigWrite = devpciR3BridgeCommonConfigWrite;
 
+    if (fHotPlug)
+    {
+        /*
+         * The guest is told about slot events by MSI.  Its writes to the PCI
+         * express capability need more care than the default handling takes, and
+         * it only gets through to the secondary bus while the link to the slot is up.
+         */
+        PDMMSIREG MsiReg;
+        RT_ZERO(MsiReg);
+        MsiReg.cMsiVectors    = 1;
+        MsiReg.iMsiCapOffset  = ICH9PCIBRIDGE_MSI_CAP_OFFSET;
+        MsiReg.iMsiNextOffset = ICH9PCIBRIDGE_EXP_CAP_OFFSET;
+        MsiReg.fMsi64bit      = true;
+        rc = PDMDevHlpPCIRegisterMsi(pDevIns, &MsiReg);
+        AssertLogRelRCReturn(rc, rc);
+        PDMPciDevSetCapabilityList(pPciDev, ICH9PCIBRIDGE_MSI_CAP_OFFSET);
+
+        rc = PDMDevHlpPCIInterceptConfigAccesses(pDevIns, pPciDev, ich9pcibridgeR3SlotConfigRead, ich9pcibridgeR3SlotConfigWrite);
+        AssertLogRelRCReturn(rc, rc);
+        pPciDev->Int.s.pfnBridgeConfigRead  = ich9pcibridgeR3SlotBridgeConfigRead;
+        pPciDev->Int.s.pfnBridgeConfigWrite = ich9pcibridgeR3SlotBridgeConfigWrite;
+
+        AssertCompile(sizeof(pBusCC->HotPlugSlot.abCfgInit) <= sizeof(pPciDev->abConfig));
+        memcpy(pBusCC->HotPlugSlot.abCfgInit, &pPciDev->abConfig[0], sizeof(pBusCC->HotPlugSlot.abCfgInit));
+        pBus->fHotPlugSlot = true;
+        LogRel(("PCI: Bridge instance #%u has a hot-plug capable slot, number %u.\n", iInstance, iInstance + 1));
+    }
+
     /*
      * Register SSM handlers. We use the same saved state version as for the host bridge
      * to make changes easier.
@@ -3845,7 +4499,7 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
                                 "pgm" /* before */,
                                 NULL, NULL, NULL,
                                 NULL, devpciR3BridgeCommonSaveExec, NULL,
-                                NULL, devpciR3BridgeCommonLoadExec, NULL);
+                                NULL, devpciR3BridgeCommonLoadExec, fHotPlug ? ich9pcibridgeR3SlotLoadDone : NULL);
     AssertLogRelRCReturn(rc, rc);
 
     return VINF_SUCCESS;
@@ -4026,7 +4680,7 @@ const PDMDEVREG g_DevicePciIch9Bridge =
     /* .pfnAttach = */              NULL,
     /* .pfnDetach = */              NULL,
     /* .pfnQueryInterface = */      NULL,
-    /* .pfnInitComplete = */        NULL,
+    /* .pfnInitComplete = */        ich9pcibridgeR3InitComplete,
     /* .pfnPowerOff = */            NULL,
     /* .pfnSoftReset = */           NULL,
     /* .pfnReserved0 = */           NULL,

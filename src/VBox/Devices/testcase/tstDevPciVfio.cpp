@@ -40,6 +40,8 @@
 /*********************************************************************************************************************************
 *   Header Files                                                                                                                 *
 *********************************************************************************************************************************/
+#include "../Bus/DevPciInternal.h" /* First, it has to get at the internals of the PCI devices. */
+#include <VBox/msi.h>
 #include <VBox/pci.h>
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/vmm/vmapi.h>
@@ -3272,6 +3274,962 @@ static void tstFuzz(void)
 }
 
 
+/*
+ *
+ * The PCI express root port with a hot-plug capable slot.
+ *
+ */
+
+/** The device number of the root port on the root bus. */
+#define TSTPORT_DEV_NO          24
+/** The device and function number of the root port. */
+#define TSTPORT_DEVFN           (TSTPORT_DEV_NO << 3)
+/** The bus number the guest gives to the secondary bus of the root port. */
+#define TSTPORT_SEC_BUS         1
+/** Config space offset of the MSI capability of the root port. */
+#define TSTPORT_MSI_CAP         0x80
+/** Config space offset of the PCI express capability of the root port. */
+#define TSTPORT_EXP_CAP         0xa0
+/** Size of the PCI express capability of the root port. */
+#define TSTPORT_EXP_CAP_SIZE    0x3c
+/** @name Registers of the PCI express capability, as config space offsets of the root port.
+ * @{ */
+#define TSTPORT_EXP_FLAGS       (TSTPORT_EXP_CAP + 0x02)
+#define TSTPORT_LNKCAP          (TSTPORT_EXP_CAP + 0x0c)
+#define TSTPORT_LNKCTL          (TSTPORT_EXP_CAP + 0x10)
+#define TSTPORT_LNKSTA          (TSTPORT_EXP_CAP + 0x12)
+#define TSTPORT_SLTCAP          (TSTPORT_EXP_CAP + 0x14)
+#define TSTPORT_SLTCTL          (TSTPORT_EXP_CAP + 0x18)
+#define TSTPORT_SLTSTA          (TSTPORT_EXP_CAP + 0x1a)
+/** @} */
+/** Slot control of an empty slot after a reset: no power, both indicators off. */
+#define TSTPORT_SLTCTL_EMPTY    UINT16_C(0x07c0)
+/** Slot control of an occupied slot after a reset: power and power indicator on, attention indicator off. */
+#define TSTPORT_SLTCTL_OCCUPIED UINT16_C(0x01c0)
+/** What a guest adds to the slot control to get told about everything the slot does. */
+#define TSTPORT_SLTCTL_ENABLES  (  VBOX_PCI_EXP_SLTCTL_ATNB | VBOX_PCI_EXP_SLTCTL_PRSD | VBOX_PCI_EXP_SLTCTL_CMDC \
+                                 | VBOX_PCI_EXP_SLTCTL_HPIE | VBOX_PCI_EXP_SLTCTL_LLCHG)
+/** The message address the guest gives the root port for its interrupt. */
+#define TSTPORT_MSI_ADDR        UINT32_C(0xfee01000)
+/** The message data the guest gives the root port for its interrupt. */
+#define TSTPORT_MSI_DATA        UINT16_C(0x0051)
+
+/**
+ * The registers of the PCI express capability of a root port with a hot-plug
+ * capable slot and the bits in them the guest can do something about.
+ */
+static const struct
+{
+    /** Offset into the capability. */
+    uint8_t     off;
+    /** Size of the register in bytes. */
+    uint8_t     cb;
+    /** Bits the guest can set and clear. */
+    uint32_t    fRw;
+    /** Bits the guest clears by writing a one, none of which ever gets set but those of the slot status. */
+    uint32_t    fRw1c;
+    /** Read-only bits which go with what happens to the slot. */
+    uint32_t    fDynamic;
+} g_aTstPortRegs[] =
+{
+    { 0x00, 2, 0,      0,                    0 }, /* Capability ID, next capability. */
+    { 0x02, 2, 0,      0,                    0 }, /* PCI express capabilities. */
+    { 0x04, 4, 0,      0,                    0 }, /* Device capabilities. */
+    { 0x08, 2, 0x78ff, 0,                    0 }, /* Device control. */
+    { 0x0a, 2, 0,      0x000f,               0 }, /* Device status. */
+    { 0x0c, 4, 0,      0,                    0 }, /* Link capabilities. */
+    { 0x10, 2, 0x0cd3, 0,                    0 }, /* Link control. */
+    { 0x12, 2, 0,      0xc000,               VBOX_PCI_EXP_LNKSTA_DL_ACT }, /* Link status. */
+    { 0x14, 4, 0,      0,                    0 }, /* Slot capabilities. */
+    { 0x18, 2, 0x17fb, 0,                    0 }, /* Slot control. */
+    { 0x1a, 2, 0,      0x011f,               VBOX_PCI_EXP_SLTSTA_PRES }, /* Slot status. */
+    { 0x1c, 2, 0x000f, 0,                    0 }, /* Root control. */
+    { 0x1e, 2, 0,      0,                    0 }, /* Root capabilities. */
+    { 0x20, 4, 0,      UINT32_C(0x00010000), 0 }, /* Root status. */
+    { 0x24, 4, 0,      0,                    0 }, /* Device capabilities 2. */
+    { 0x28, 2, 0,      0,                    0 }, /* Device control 2. */
+    { 0x2a, 2, 0,      0,                    0 }, /* Device status 2. */
+    { 0x2c, 4, 0,      0,                    0 }, /* Link capabilities 2. */
+    { 0x30, 2, 0xffbf, 0,                    0 }, /* Link control 2. */
+    { 0x32, 2, 0,      0,                    0 }, /* Link status 2. */
+    { 0x34, 4, 0,      0,                    0 }, /* Slot capabilities 2. */
+    { 0x38, 2, 0,      0,                    0 }, /* Slot control 2. */
+    { 0x3a, 2, 0,      0,                    0 }  /* Slot status 2. */
+};
+
+/** What the tests playing the device in the hot-plug capable slot got told about the link. */
+static struct
+{
+    /** Number of calls. */
+    uint32_t    cCalls;
+    /** The state of the link according to the last call, down before the first one. */
+    bool        fLinkUp;
+    /** The device instance the last call came with. */
+    PPDMDEVINS  pDevIns;
+} g_TstPortLink;
+
+
+/** @callback_method_impl{FNDEVPCIHPSLOTLINK} */
+static DECLCALLBACK(void) tstPortLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
+{
+    g_TstPortLink.cCalls++;
+    g_TstPortLink.fLinkUp = fLinkUp;
+    g_TstPortLink.pDevIns = pDevIns;
+}
+
+
+/**
+ * Sets up a VM with the ICH9 PCI bus and a bridge on it, a PCI express root
+ * port usually, and optionally the fake kernel with a PCI function and a
+ * passthrough device for it behind the bridge.
+ *
+ * Completing the VM construction is left to the caller.  tstFixtureTeardown()
+ * has to be called regardless of the result.
+ *
+ * @returns Status code of the constructor which failed, or of whatever failed before.
+ * @param   pszPortType         The "ExpressPortType" of the bridge, NULL for a bridge which is not PCI express.
+ * @param   fHotPlug            Whether the bridge is configured to have a hot-plug capable slot.
+ * @param   pModel              The PCI function to put behind the bridge, NULL for none.
+ * @param   ppDev               Where to return the fake kernel handle of the function, NULL if there is none.
+ * @param   ppDevInsPort        Where to return the device instance of the bridge.
+ * @param   ppDevInsDev         Where to return the device instance of the passthrough device, optional.
+ */
+static int tstPortFixtureSetup(const char *pszPortType, bool fHotPlug, PCTSTVFIODEVCFG pModel, PTSTVFIODEV *ppDev,
+                               PPDMDEVINS *ppDevInsPort, PPDMDEVINS *ppDevInsDev)
+{
+    RT_ZERO(g_TstPortLink);
+    *ppDevInsPort = NULL;
+    if (ppDevInsDev)
+        *ppDevInsDev = NULL;
+
+    int rc = tstVfioKrnlInit();
+    RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+    if (RT_FAILURE(rc))
+        return rc;
+    if (pModel)
+    {
+        rc = tstVfioKrnlDevAdd(pModel, ppDev);
+        RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+
+    rc = tstPdmInit(TST_RAM_SIZE);
+    RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /* The root bus with an ECAM window for config space accesses. */
+    PCFGMNODE pCfgInst = tstCfgNodeCreate(NULL, "0");
+    PCFGMNODE pCfg     = tstCfgNodeCreate(pCfgInst, "Config");
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "IOAPIC", 1), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "McfgBase", TSTPDM_MCFG_BASE), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "McfgLength", TSTPDM_MCFG_SIZE), VINF_SUCCESS);
+    rc = tstPdmDevCreate(&g_DevicePciIch9, 0 /*iInstance*/, pCfgInst, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("ich9pci: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /* The bridge. */
+    pCfgInst = tstCfgNodeCreate(NULL, "0");
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIBusNo", 0), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIDeviceNo", TSTPORT_DEV_NO), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIFunctionNo", 0), VINF_SUCCESS);
+    pCfg = tstCfgNodeCreate(pCfgInst, "Config");
+    if (pszPortType)
+    {
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "ExpressEnabled", 1), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstCfgSetString(pCfg, "ExpressPortType", pszPortType), VINF_SUCCESS);
+    }
+    if (fHotPlug)
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "HotPlug", 1), VINF_SUCCESS);
+    rc = tstPdmDevCreate(&g_DevicePciIch9Bridge, 0 /*iInstance*/, pCfgInst, ppDevInsPort);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /* The passthrough device: the one thing on the secondary bus, which is the second PCI bus of the VM. */
+    if (pModel)
+    {
+        pCfgInst = tstCfgNodeCreate(NULL, "0");
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIBusNo", 1), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIDeviceNo", 0), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIFunctionNo", 0), VINF_SUCCESS);
+        pCfg = tstCfgNodeCreate(pCfgInst, "Config");
+        PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, "Fun0");
+        RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", pModel->szNode), VINF_SUCCESS);
+        rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, ppDevInsDev);
+    }
+    return rc;
+}
+
+
+/** Reads from the config space of the root port like the guest does. */
+static uint32_t tstPortCfgRead(uint32_t offReg, unsigned cb)
+{
+    return tstPdmPciCfgRead(0, TSTPORT_DEVFN, offReg, cb);
+}
+
+
+/** Writes to the config space of the root port like the guest does. */
+static void tstPortCfgWrite(uint32_t offReg, uint32_t u32Value, unsigned cb)
+{
+    tstPdmPciCfgWrite(0, TSTPORT_DEVFN, offReg, u32Value, cb);
+}
+
+
+/** Gives the root port its bus numbers, which is what a firmware does first. */
+static void tstPortGuestSetBusNumbers(void)
+{
+    tstPortCfgWrite(VBOX_PCI_PRIMARY_BUS, 0, 1);
+    tstPortCfgWrite(VBOX_PCI_SECONDARY_BUS, TSTPORT_SEC_BUS, 1);
+    tstPortCfgWrite(VBOX_PCI_SUBORDINATE_BUS, TSTPORT_SEC_BUS, 1);
+}
+
+
+/** Sets up and enables MSI of the root port, which is what a guest does to get interrupts from it. */
+static void tstPortGuestEnableMsi(void)
+{
+    tstPortCfgWrite(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO, TSTPORT_MSI_ADDR, 4);
+    tstPortCfgWrite(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI, 0, 4);
+    tstPortCfgWrite(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_DATA_64, TSTPORT_MSI_DATA, 2);
+    tstPortCfgWrite(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL,
+                    tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+}
+
+
+/**
+ * Checks what the guest and the device in the slot see of the hot-plug capable
+ * slot, and how many interrupts the root port has sent so far.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   uSltStaExpected     The expected slot status.
+ * @param   fLinkUpExpected     Whether the link is expected to be up.
+ * @param   cLinkCallsExpected  How often the device in the slot is expected to have been told about the link.
+ * @param   cMsisExpected       The expected number of interrupts.
+ */
+static void tstPortCheck(unsigned uLine, uint16_t uSltStaExpected, bool fLinkUpExpected, uint32_t cLinkCallsExpected,
+                         uint32_t cMsisExpected)
+{
+    uint32_t const uSltSta = tstPortCfgRead(TSTPORT_SLTSTA, 2);
+    if (uSltSta != uSltStaExpected)
+        RTTestIFailed("line %u: slot status %#RX32, expected %#RX16\n", uLine, uSltSta, uSltStaExpected);
+
+    bool const fLinkUp = RT_BOOL(tstPortCfgRead(TSTPORT_LNKSTA, 2) & VBOX_PCI_EXP_LNKSTA_DL_ACT);
+    if (fLinkUp != fLinkUpExpected)
+        RTTestIFailed("line %u: the guest sees the link %s\n", uLine, fLinkUp ? "up" : "down");
+    if (g_TstPortLink.cCalls != cLinkCallsExpected)
+        RTTestIFailed("line %u: the device in the slot was told %u time(s) about the link, expected %u\n",
+                      uLine, g_TstPortLink.cCalls, cLinkCallsExpected);
+    else if (g_TstPortLink.fLinkUp != fLinkUpExpected)
+        RTTestIFailed("line %u: the device in the slot was told that the link is %s\n",
+                      uLine, g_TstPortLink.fLinkUp ? "up" : "down");
+
+    uint32_t const cMsis = tstPdmMsiGetCount();
+    if (cMsis != cMsisExpected)
+        RTTestIFailed("line %u: %u interrupt(s) from the root port, expected %u\n", uLine, cMsis, cMsisExpected);
+    else if (cMsis)
+    {
+        TSTPDMMSI Msi;
+        if (   !tstPdmMsiGet(cMsis - 1, &Msi)
+            || Msi.uBusDevFn != PCIBDF_MAKE(0, TSTPORT_DEVFN)
+            || Msi.uAddr != TSTPORT_MSI_ADDR
+            || Msi.uData != TSTPORT_MSI_DATA)
+            RTTestIFailed("line %u: the last interrupt is not what the guest asked for: sender %#RX16 address %#RX64 data %#RX32\n",
+                          uLine, Msi.uBusDevFn, Msi.uAddr, Msi.uData);
+    }
+}
+
+
+/**
+ * The bridge without and with a hot-plug capable slot: what it tells the guest
+ * about itself and what the guest can change of that.
+ */
+static void tstPortRegisters(void)
+{
+    RTTestISub("Root port: registers of the hot-plug slot");
+
+    /*
+     * Not asked for: the port is what it always was.
+     */
+    PPDMDEVINS pDevInsPort = NULL;
+    int rc = tstPortFixtureSetup("RootCmplxRootPort", false /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("ich9pcibridge: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstPdmInitComplete(), VINF_SUCCESS);
+        tstPdmPowerOn();
+        RTTESTI_CHECK(tstPortCfgRead(VBOX_PCI_CAPABILITY_LIST, 1) == TSTPORT_EXP_CAP);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_EXP_CAP, 2) == VBOX_PCI_CAP_ID_EXP);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_MSI_CAP, 4) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_EXP_FLAGS, 2) & VBOX_PCI_EXP_FLAGS_SLOT));
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_LNKCAP, 4) & VBOX_PCI_EXP_LNKCAP_DLLA));
+        RTTESTI_CHECK_MSG(tstPortCfgRead(TSTPORT_SLTCAP, 4) == (75 << 7), ("%#RX32\n", tstPortCfgRead(TSTPORT_SLTCAP, 4)));
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 4) == 0);
+    }
+    tstFixtureTeardown();
+
+    /*
+     * Asked for with a bridge which can't have it.
+     */
+    static const char * const s_apszPortTypes[] = { NULL, "ExpressSwDownstream", "RootCmplxIntEp" };
+    for (unsigned i = 0; i < RT_ELEMENTS(s_apszPortTypes); i++)
+    {
+        rc = tstPortFixtureSetup(s_apszPortTypes[i], true /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
+        RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("variant %u: %Rrc\n", i, rc));
+        RTTESTI_CHECK_MSG(strstr(tstPdmGetLastError(), "HotPlug") != NULL, ("variant %u: '%s'\n", i, tstPdmGetLastError()));
+        tstFixtureTeardown();
+    }
+
+    /*
+     * A root port with a hot-plug capable slot.
+     */
+    rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("ich9pcibridge with hot-plug: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstPdmInitComplete(), VINF_SUCCESS);
+        tstPdmPowerOn();
+        tstPortGuestSetBusNumbers();
+
+        /* The capabilities: MSI, then PCI express.  MSI is the only interrupt the port has. */
+        RTTESTI_CHECK(tstPortCfgRead(VBOX_PCI_STATUS, 2) & VBOX_PCI_STATUS_CAP_LIST);
+        RTTESTI_CHECK(tstPortCfgRead(VBOX_PCI_CAPABILITY_LIST, 1) == TSTPORT_MSI_CAP);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_MSI_CAP, 2) == (VBOX_PCI_CAP_ID_MSI | (TSTPORT_EXP_CAP << 8)));
+        RTTESTI_CHECK(   (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) & (VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_ENABLE))
+                      == VBOX_PCI_MSI_FLAGS_64BIT);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_EXP_CAP, 2) == VBOX_PCI_CAP_ID_EXP);
+        RTTESTI_CHECK(tstPortCfgRead(VBOX_PCI_INTERRUPT_PIN, 1) == 0);
+
+        /* A root port with a slot the guest can do native hot-plug with, the slot numbers start at one. */
+        uint32_t u32 = tstPortCfgRead(TSTPORT_EXP_FLAGS, 2);
+        RTTESTI_CHECK_MSG(u32 == (2 | (VBOX_PCI_EXP_TYPE_ROOT_PORT << 4) | VBOX_PCI_EXP_FLAGS_SLOT), ("%#RX32\n", u32));
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_LNKCAP, 4) & VBOX_PCI_EXP_LNKCAP_DLLA);
+        u32 = tstPortCfgRead(TSTPORT_SLTCAP, 4);
+        RTTESTI_CHECK_MSG(u32 == (  VBOX_PCI_EXP_SLTCAP_ATNB | VBOX_PCI_EXP_SLTCAP_PWRC | VBOX_PCI_EXP_SLTCAP_ATNI
+                                  | VBOX_PCI_EXP_SLTCAP_PWRI | VBOX_PCI_EXP_SLTCAP_HPS  | VBOX_PCI_EXP_SLTCAP_HPC
+                                  | (75 << 7) | (1 << 19)),
+                          ("slot capabilities %#RX32\n", u32));
+
+        /* Nothing was configured to be behind the port: the slot is empty and has no power. */
+        RTTESTI_CHECK_MSG(tstPortCfgRead(TSTPORT_SLTCTL, 2) == TSTPORT_SLTCTL_EMPTY, ("%#RX32\n", tstPortCfgRead(TSTPORT_SLTCTL, 2)));
+        tstPortCheck(__LINE__, 0 /*uSltSta*/, false /*fLinkUp*/, 0 /*cLinkCalls*/, 0 /*cMsis*/);
+        RTTESTI_CHECK(!devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+
+        /*
+         * What the guest can change: ones into everything, then zeros.  The slot
+         * status is written after the slot control, which takes the command
+         * completed event away the first time and leaves it there the second time.
+         */
+        uint32_t au32Initial[RT_ELEMENTS(g_aTstPortRegs)];
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aTstPortRegs); i++)
+            au32Initial[i] = tstPortCfgRead(TSTPORT_EXP_CAP + g_aTstPortRegs[i].off, g_aTstPortRegs[i].cb);
+        for (unsigned iPass = 0; iPass < 2; iPass++)
+        {
+            for (unsigned i = 0; i < RT_ELEMENTS(g_aTstPortRegs); i++)
+                tstPortCfgWrite(TSTPORT_EXP_CAP + g_aTstPortRegs[i].off, iPass == 0 ? UINT32_MAX : 0, g_aTstPortRegs[i].cb);
+            for (unsigned i = 0; i < RT_ELEMENTS(g_aTstPortRegs); i++)
+            {
+                uint32_t u32Expected = (au32Initial[i] & ~g_aTstPortRegs[i].fRw) | (iPass == 0 ? g_aTstPortRegs[i].fRw : 0);
+                if (iPass == 1 && g_aTstPortRegs[i].off == 0x1a)
+                    u32Expected |= VBOX_PCI_EXP_SLTSTA_CMDC;
+                u32 = tstPortCfgRead(TSTPORT_EXP_CAP + g_aTstPortRegs[i].off, g_aTstPortRegs[i].cb);
+                RTTESTI_CHECK_MSG(u32 == u32Expected,
+                                  ("pass %u, register %#x: %#RX32, expected %#RX32\n", iPass, g_aTstPortRegs[i].off, u32, u32Expected));
+            }
+        }
+        RTTESTI_CHECK(tstPdmMsiGetCount() == 0);
+
+        /* An event goes away by writing a one to it. */
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 2);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == 0);
+
+        /* A byte of the slot control is a command as well, and a byte of the status does for the event. */
+        tstPortCfgWrite(TSTPORT_SLTCTL + 1, TSTPORT_SLTCTL_EMPTY >> 8, 1);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == (TSTPORT_SLTCTL_EMPTY & 0xff00));
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == VBOX_PCI_EXP_SLTSTA_CMDC);
+        tstPortCfgWrite(TSTPORT_SLTSTA + 1, 0xff, 1);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == VBOX_PCI_EXP_SLTSTA_CMDC);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 1);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == 0);
+
+        /* Control and status in one go: the event of before is gone, the one of this command is there. */
+        tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY, 2);
+        tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | ((uint32_t)VBOX_PCI_EXP_SLTSTA_CMDC << 16), 4);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 4) == (TSTPORT_SLTCTL_EMPTY | ((uint32_t)VBOX_PCI_EXP_SLTSTA_CMDC << 16)));
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 2);
+
+        /* Accesses which are not aligned: across the start and across the end of the capability. */
+        tstPortCfgWrite(TSTPORT_EXP_CAP + TSTPORT_EXP_CAP_SIZE - 2, UINT32_MAX, 4);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_EXP_CAP + TSTPORT_EXP_CAP_SIZE - 2, 2) == 0);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_EXP_CAP + TSTPORT_EXP_CAP_SIZE, 2) == 0xffff);
+        tstPortCfgWrite(TSTPORT_EXP_CAP - 2, UINT32_C(0x5aa5c33c), 4);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_EXP_CAP - 2, 2) == 0xc33c);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_EXP_CAP, 2) == VBOX_PCI_CAP_ID_EXP);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == 0);
+
+        /* The rest of the config space works like before. */
+        tstPortCfgWrite(VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+        RTTESTI_CHECK(   (tstPortCfgRead(VBOX_PCI_COMMAND, 2) & (VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER))
+                      == (VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER));
+        RTTESTI_CHECK(tstPortCfgRead(VBOX_PCI_SECONDARY_BUS, 1) == TSTPORT_SEC_BUS);
+        RTTESTI_CHECK(tstPortCfgRead(VBOX_PCI_VENDOR_ID, 2) == 0x8086);
+        RTTESTI_CHECK(tstPdmMsiGetCount() == 0);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A device being put into the hot-plug capable slot and taken out of it, the
+ * attention button, the guest switching the power and disabling the link: what
+ * the guest sees, when it is interrupted and what the device gets told.
+ */
+static void tstPortSlotEvents(void)
+{
+    RTTestISub("Root port: slot events and interrupts");
+
+    PPDMDEVINS pDevInsPort = NULL;
+    int rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("ich9pcibridge with hot-plug: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        /* The test is the device which comes and goes, there can only be one. */
+        RTTESTI_CHECK_RC(devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevInsPort, tstPortLinkChanged, false /*fPresent*/),
+                         VINF_SUCCESS);
+        RTTESTI_CHECK_RC(devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevInsPort, tstPortLinkChanged, false /*fPresent*/),
+                         VERR_ALREADY_EXISTS);
+        RTTESTI_CHECK_RC(tstPdmInitComplete(), VINF_SUCCESS);
+        tstPdmPowerOn();
+        tstPortGuestSetBusNumbers();
+
+        uint32_t cMsis  = 0;
+        uint32_t cCalls = 0;
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == TSTPORT_SLTCTL_EMPTY);
+        tstPortCheck(__LINE__, 0, false, cCalls, cMsis);
+
+        /* The guest gets ready: MSI, then the slot.  Writing the slot control is a command,
+           and the guest asked to be told when one is done. */
+        uint16_t const uSltCtlOff = TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES;
+        uint16_t const uSltCtlOn  = TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES;
+        tstPortGuestEnableMsi();
+        tstPortCheck(__LINE__, 0, false, cCalls, cMsis);
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOff, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_CMDC, false, cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 2);
+        tstPortCheck(__LINE__, 0, false, cCalls, cMsis);
+
+        /* A device is put into the slot: present, but without power there is no link. */
+        devpciR3HotPlugSlotSetPresence(pDevInsPort, true);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD, false, cCalls, ++cMsis);
+        devpciR3HotPlugSlotSetPresence(pDevInsPort, true);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD, false, cCalls, cMsis);
+
+        /* One more event while the guest has not dealt with the first: no further interrupt,
+           not before the guest has cleared everything. */
+        devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_PRSD, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES, false, cCalls, cMsis);
+        devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+
+        /* The guest switches the power on: the link comes up, the device is told.  Command completed and
+           the link state change are one interrupt. */
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOn, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, true, ++cCalls, ++cMsis);
+        RTTESTI_CHECK(g_TstPortLink.pDevIns == pDevInsPort);
+        RTTESTI_CHECK(devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES, true, cCalls, cMsis);
+
+        /* The guest disables the link and enables it again. */
+        uint16_t const uLnkCtl = (uint16_t)tstPortCfgRead(TSTPORT_LNKCTL, 2);
+        tstPortCfgWrite(TSTPORT_LNKCTL, uLnkCtl | VBOX_PCI_EXP_LNKCTL_DISABLE, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_LLCHG, false, ++cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+        tstPortCfgWrite(TSTPORT_LNKCTL, uLnkCtl, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_LLCHG, true, ++cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+
+        /* With the hot-plug interrupt disabled the events wait, and they are reported when it gets enabled. */
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOn & ~VBOX_PCI_EXP_SLTCTL_HPIE, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC, true, cCalls, cMsis);
+        devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_ATNB, true, cCalls, cMsis);
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOn, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_ATNB, true, cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+
+        /* An event the guest has not enabled is noted down without an interrupt. */
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOn & ~VBOX_PCI_EXP_SLTCTL_ATNB, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC, true, cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 2);
+        devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_ATNB, true, cCalls, cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOn, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC, true, cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC, 2);
+
+        /* Without MSI enabled there is no interrupt, the events are reported when it gets enabled. */
+        uint16_t const fMsgCtrl = (uint16_t)tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2);
+        RTTESTI_CHECK(fMsgCtrl & VBOX_PCI_MSI_FLAGS_ENABLE);
+        tstPortCfgWrite(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, fMsgCtrl & ~VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_ATNB, true, cCalls, cMsis);
+        tstPortCfgWrite(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, fMsgCtrl, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_ATNB, true, cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+
+        /* The device is gone all of a sudden, and another one is there with the power still on. */
+        devpciR3HotPlugSlotSetPresence(pDevInsPort, false);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_LLCHG, false, ++cCalls, ++cMsis);
+        RTTESTI_CHECK(!devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+        devpciR3HotPlugSlotSetPresence(pDevInsPort, true);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_LLCHG, true, ++cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+
+        /* The orderly way: the guest switches the power off, then the device is taken out. */
+        tstPortCfgWrite(TSTPORT_SLTCTL, uSltCtlOff, 2);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, false, ++cCalls, ++cMsis);
+        tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_CMDC | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+        devpciR3HotPlugSlotSetPresence(pDevInsPort, false);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRSD, false, cCalls, ++cMsis);
+
+        /* A reset of the VM: no events, no interrupts enabled, the empty slot is without power. */
+        tstPdmReset();
+        tstPortGuestSetBusNumbers();
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == TSTPORT_SLTCTL_EMPTY);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) & VBOX_PCI_MSI_FLAGS_ENABLE));
+        tstPortCheck(__LINE__, 0, false, cCalls, cMsis);
+
+        /* A device put in while the guest doesn't listen is found by looking, and a reset
+           switches the power on for it. */
+        devpciR3HotPlugSlotSetPresence(pDevInsPort, true);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD, false, cCalls, cMsis);
+        tstPdmReset();
+        tstPortGuestSetBusNumbers();
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == TSTPORT_SLTCTL_OCCUPIED);
+        tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES, true, ++cCalls, cMsis);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * A passthrough device behind a root port with a hot-plug capable slot, as
+ * configured when the VM starts: the slot has power, and the guest reaches the
+ * device only while the link is up.
+ */
+static void tstPortDevice(void)
+{
+    RTTestISub("Root port: device in the hot-plug slot");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    int rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, &Model, &pDev, &pDevInsPort, &pDevInsDev);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstPdmInitComplete(), VINF_SUCCESS);
+        tstPdmPowerOn();
+        tstPortGuestSetBusNumbers();
+
+        /* The device finds the port it is behind, the port itself is behind none. */
+        RTTESTI_CHECK(devpciR3HotPlugSlotFind(pDevInsDev, pDevInsDev->apPciDevs[0]) == pDevInsPort);
+        RTTESTI_CHECK(devpciR3HotPlugSlotFind(pDevInsPort, pDevInsPort->apPciDevs[0]) == NULL);
+
+        /* Occupied and with power from the start. */
+        RTTESTI_CHECK_MSG(tstPortCfgRead(TSTPORT_SLTCTL, 2) == TSTPORT_SLTCTL_OCCUPIED, ("%#RX32\n", tstPortCfgRead(TSTPORT_SLTCTL, 2)));
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == VBOX_PCI_EXP_SLTSTA_PRES);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_LNKSTA, 2) & VBOX_PCI_EXP_LNKSTA_DL_ACT);
+        RTTESTI_CHECK(devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID);
+
+        /* The guest switches the power off or disables the link: nothing is there, nothing gets through. */
+        uint32_t const uCmdBefore = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, 2);
+        uint16_t const uLnkCtl    = (uint16_t)tstPortCfgRead(TSTPORT_LNKCTL, 2);
+        for (unsigned iVariant = 0; iVariant < 2; iVariant++)
+        {
+            if (iVariant == 0)
+                tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY, 2);
+            else
+                tstPortCfgWrite(TSTPORT_LNKCTL, uLnkCtl | VBOX_PCI_EXP_LNKCTL_DISABLE, 2);
+            RTTESTI_CHECK_MSG(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_LNKSTA, 2) & VBOX_PCI_EXP_LNKSTA_DL_ACT), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == 0xffff, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 4) == UINT32_MAX, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, 0x100, 4) == UINT32_MAX, ("variant %u\n", iVariant));
+            tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, uCmdBefore ^ VBOX_PCI_COMMAND_MEMORY, 2);
+
+            if (iVariant == 0)
+                tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_OCCUPIED, 2);
+            else
+                tstPortCfgWrite(TSTPORT_LNKCTL, uLnkCtl, 2);
+            RTTESTI_CHECK_MSG(tstPortCfgRead(TSTPORT_LNKSTA, 2) & VBOX_PCI_EXP_LNKSTA_DL_ACT, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, 2) == uCmdBefore,
+                              ("variant %u: command %#RX32, was %#RX32\n", iVariant,
+                               tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, 2), uCmdBefore));
+        }
+
+        /* A reset of the VM with the power off: on again. */
+        tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY, 2);
+        RTTESTI_CHECK(!devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+        tstPdmReset();
+        tstPortGuestSetBusNumbers();
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == TSTPORT_SLTCTL_OCCUPIED);
+        RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTSTA, 2) == VBOX_PCI_EXP_SLTSTA_PRES);
+        RTTESTI_CHECK(devpciR3HotPlugSlotIsLinkUp(pDevInsPort));
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
+
+        /* The guest did not ask for interrupts and got none. */
+        RTTESTI_CHECK(tstPdmMsiGetCount() == 0);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Puts a 16-bit value into the config space of the root port the way loading a
+ * saved state does it.
+ *
+ * @param   pDevInsPort         The device instance of the root port.
+ * @param   offReg              The config space offset.
+ * @param   u16Value            The value.
+ */
+static void tstPortLoadU16(PPDMDEVINS pDevInsPort, uint32_t offReg, uint16_t u16Value)
+{
+    pDevInsPort->apPciDevs[0]->abConfig[offReg]     = RT_LO_U8(u16Value);
+    pDevInsPort->apPciDevs[0]->abConfig[offReg + 1] = RT_HI_U8(u16Value);
+}
+
+
+/**
+ * Puts the config space of a root port into the place the way loading a saved
+ * state does it: as the guest left it with interrupts set up and nothing left
+ * to be dealt with.
+ *
+ * @param   pDevInsPort         The device instance of the root port.
+ * @param   fOccupied           Whether the state was saved with a device in the slot and the power on.
+ */
+static void tstPortLoadState(PPDMDEVINS pDevInsPort, bool fOccupied)
+{
+    uint8_t * const pbCfg = &pDevInsPort->apPciDevs[0]->abConfig[0];
+    tstPortLoadU16(pDevInsPort, TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO,     RT_LO_U16(TSTPORT_MSI_ADDR));
+    tstPortLoadU16(pDevInsPort, TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO + 2, RT_HI_U16(TSTPORT_MSI_ADDR));
+    tstPortLoadU16(pDevInsPort, TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_DATA_64, TSTPORT_MSI_DATA);
+    pbCfg[TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL] |= VBOX_PCI_MSI_FLAGS_ENABLE;
+    tstPortLoadU16(pDevInsPort, TSTPORT_SLTCTL, (fOccupied ? TSTPORT_SLTCTL_OCCUPIED : TSTPORT_SLTCTL_EMPTY) | TSTPORT_SLTCTL_ENABLES);
+    tstPortLoadU16(pDevInsPort, TSTPORT_SLTSTA, fOccupied ? VBOX_PCI_EXP_SLTSTA_PRES : 0);
+    if (fOccupied)
+        pbCfg[TSTPORT_LNKSTA + 1] |= RT_HI_U8(VBOX_PCI_EXP_LNKSTA_DL_ACT);
+    else
+        pbCfg[TSTPORT_LNKSTA + 1] &= ~RT_HI_U8(VBOX_PCI_EXP_LNKSTA_DL_ACT);
+}
+
+
+/**
+ * Loading a saved state into a VM with a root port with a hot-plug capable
+ * slot: the guest is told what happened to the slot since the state was saved,
+ * and a state which doesn't go with the port is refused.
+ */
+static void tstPortSavedState(void)
+{
+    RTTestISub("Root port: hot-plug slot and saved state");
+
+    /*
+     * Two rounds: the state was saved with an empty slot and is loaded with a
+     * device in it, and the other way around.
+     */
+    for (unsigned iVariant = 0; iVariant < 2; iVariant++)
+    {
+        bool const fPresentNow = iVariant == 0;
+        PPDMDEVINS pDevInsPort = NULL;
+        int rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("ich9pcibridge with hot-plug: %Rrc - %s\n", rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            RTTESTI_CHECK_RC(devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevInsPort, tstPortLinkChanged, fPresentNow),
+                             VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstPdmInitComplete(), VINF_SUCCESS);
+            tstPdmPowerOn();
+
+            /* Before anything is loaded, the slot is what it is when a VM starts. */
+            uint32_t cCalls = fPresentNow ? 1 : 0;
+            tstPortCheck(__LINE__, fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0, fPresentNow, cCalls, 0);
+
+            /* Loading went wrong before it got to the port: nothing happens. */
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VERR_SSM_INTEGRITY_CRC), VINF_SUCCESS);
+            tstPortCheck(__LINE__, fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0, fPresentNow, cCalls, 0);
+
+            /* The state of a port which had no hot-plug capable slot, or of another kind of slot. */
+            uint8_t * const pbCfg = &pDevInsPort->apPciDevs[0]->abConfig[0];
+            uint8_t const   bSaved0 = pbCfg[TSTPORT_SLTCAP];
+            pbCfg[TSTPORT_SLTCAP] &= ~VBOX_PCI_EXP_SLTCAP_HPC;
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VERR_SSM_LOAD_CONFIG_MISMATCH);
+            RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("no message\n"));
+            pbCfg[TSTPORT_SLTCAP] = bSaved0 | VBOX_PCI_EXP_SLTCAP_MRL;
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VERR_SSM_LOAD_CONFIG_MISMATCH);
+            pbCfg[TSTPORT_SLTCAP] = bSaved0;
+            uint8_t const   bSaved1 = pbCfg[TSTPORT_EXP_FLAGS + 1];
+            pbCfg[TSTPORT_EXP_FLAGS + 1] &= ~RT_HI_U8(VBOX_PCI_EXP_FLAGS_SLOT);
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VERR_SSM_LOAD_CONFIG_MISMATCH);
+            pbCfg[TSTPORT_EXP_FLAGS + 1] = bSaved1;
+            tstPortCheck(__LINE__, fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0, fPresentNow, cCalls, 0);
+
+            /* The state of the same port, with the slot the other way around. */
+            tstPortLoadState(pDevInsPort, !fPresentNow);
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
+            if (fPresentNow)
+            {
+                /* A device was put in: present, the power is off like the guest left it, which the device is told. */
+                RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == (TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES));
+                tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD, false, ++cCalls, 1);
+            }
+            else
+            {
+                /* The device was taken out: not present, the link is down.  The device in the slot,
+                   which there is none, was not told as the link was down for it all along. */
+                RTTESTI_CHECK(tstPortCfgRead(TSTPORT_SLTCTL, 2) == (TSTPORT_SLTCTL_OCCUPIED | TSTPORT_SLTCTL_ENABLES));
+                tstPortCheck(__LINE__, VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_LLCHG, false, cCalls, 1);
+            }
+
+            /* The state as it is now loaded once more: nothing new, no interrupt. */
+            tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_PRSD | VBOX_PCI_EXP_SLTSTA_LLCHG, 2);
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
+            tstPortCheck(__LINE__, fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0, false, cCalls, 1);
+
+            /* An event the guest has not dealt with when the state was saved does not interrupt it
+               a second time, the next one does. */
+            devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+            tstPortCheck(__LINE__, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, 2);
+            RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
+            tstPortCheck(__LINE__, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, 2);
+            tstPortCfgWrite(TSTPORT_SLTSTA, VBOX_PCI_EXP_SLTSTA_ATNB, 2);
+            devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+            tstPortCheck(__LINE__, (fPresentNow ? VBOX_PCI_EXP_SLTSTA_PRES : 0) | VBOX_PCI_EXP_SLTSTA_ATNB, false, cCalls, 3);
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * Checks what has to hold for a root port with a hot-plug capable slot
+ * whatever the guest and the device in the slot do.
+ *
+ * @returns true if all is well, false if not (test failure reported).
+ * @param   pDevInsPort         The device instance of the root port.
+ * @param   pabInitial          The PCI express capability as it was before anything was done to it.
+ * @param   fPresent            Whether there is a device in the slot.
+ * @param   fBusNumbersSet      Whether the secondary bus of the port has its number.
+ */
+static bool tstPortFuzzCheck(PPDMDEVINS pDevInsPort, uint8_t const *pabInitial, bool fPresent, bool fBusNumbersSet)
+{
+    uint32_t const cErrorsBefore = RTTestIErrorCount();
+
+    /* Nothing changes which the guest has no business changing, and no event shows up which there is none of. */
+    for (unsigned i = 0; i < RT_ELEMENTS(g_aTstPortRegs); i++)
+    {
+        uint32_t u32Initial = 0;
+        for (unsigned iByte = 0; iByte < g_aTstPortRegs[i].cb; iByte++)
+            u32Initial |= (uint32_t)pabInitial[g_aTstPortRegs[i].off + iByte] << (iByte * 8);
+        uint32_t const u32      = tstPortCfgRead(TSTPORT_EXP_CAP + g_aTstPortRegs[i].off, g_aTstPortRegs[i].cb);
+        uint32_t const fIgnore  = g_aTstPortRegs[i].fRw | g_aTstPortRegs[i].fDynamic
+                                | (g_aTstPortRegs[i].off == 0x1a ? g_aTstPortRegs[i].fRw1c : 0);
+        if ((u32 ^ u32Initial) & ~fIgnore)
+            RTTestIFailed("register %#x of the PCI express capability is %#RX32, was %#RX32\n",
+                          g_aTstPortRegs[i].off, u32, u32Initial);
+    }
+    uint32_t const uSltSta = tstPortCfgRead(TSTPORT_SLTSTA, 2);
+    RTTESTI_CHECK_MSG(!(uSltSta & (VBOX_PCI_EXP_SLTSTA_PWRF | VBOX_PCI_EXP_SLTSTA_MRLS)), ("slot status %#RX32\n", uSltSta));
+
+    /* Presence, link and what the device in the slot knows about it go together. */
+    RTTESTI_CHECK_MSG(RT_BOOL(uSltSta & VBOX_PCI_EXP_SLTSTA_PRES) == fPresent, ("slot status %#RX32, fPresent=%d\n", uSltSta, fPresent));
+    bool const fLinkUp =    fPresent
+                         && !(tstPortCfgRead(TSTPORT_SLTCTL, 2) & VBOX_PCI_EXP_SLTCTL_PWRC)
+                         && !(tstPortCfgRead(TSTPORT_LNKCTL, 2) & VBOX_PCI_EXP_LNKCTL_DISABLE);
+    RTTESTI_CHECK_MSG(RT_BOOL(tstPortCfgRead(TSTPORT_LNKSTA, 2) & VBOX_PCI_EXP_LNKSTA_DL_ACT) == fLinkUp,
+                      ("link status %#RX32, expected the link to be %s\n", tstPortCfgRead(TSTPORT_LNKSTA, 2), fLinkUp ? "up" : "down"));
+    RTTESTI_CHECK_MSG(g_TstPortLink.fLinkUp == fLinkUp, ("the device in the slot was told last that the link is %s\n",
+                                                         g_TstPortLink.fLinkUp ? "up" : "down"));
+    RTTESTI_CHECK(devpciR3HotPlugSlotIsLinkUp(pDevInsPort) == fLinkUp);
+
+    /* The guest reaches the device while the link is up and at no other time. */
+    if (fBusNumbersSet)
+    {
+        uint32_t const idVendor = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2);
+        RTTESTI_CHECK_MSG(idVendor == (fLinkUp ? TST_VENDOR_ID : UINT32_C(0xffff)),
+                          ("vendor ID %#RX32 with the link %s\n", idVendor, fLinkUp ? "up" : "down"));
+    }
+
+    return RTTestIErrorCount() == cErrorsBefore;
+}
+
+
+/**
+ * Random guest accesses to a root port with a hot-plug capable slot and to the
+ * device behind it, mixed with a device coming and going, the attention button,
+ * resets of the VM and saved states being loaded.
+ *
+ * The number of operations follows TSTDEVPCIVFIO_FUZZ_MODELS, the seed is
+ * TSTDEVPCIVFIO_FUZZ_SEED.
+ */
+static void tstPortFuzz(void)
+{
+    RTTestISub("Root port: random guest accesses and slot events");
+
+    uint32_t    cOps  = 150 * 200;
+    uint32_t    uSeed = UINT32_C(0x20261112);
+    const char *psz   = RTEnvGet("TSTDEVPCIVFIO_FUZZ_MODELS");
+    if (psz)
+        cOps = RT_MIN(RTStrToUInt32(psz), 10000) * 200;
+    psz = RTEnvGet("TSTDEVPCIVFIO_FUZZ_SEED");
+    if (psz)
+        uSeed = RTStrToUInt32(psz);
+
+    int rc = RTRandAdvCreateParkMiller(&g_hTstRand);
+    RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
+    if (RT_FAILURE(rc))
+        return;
+    RTRandAdvSeed(g_hTstRand, uSeed);
+
+    /* The passthrough device is on the secondary bus, the test says whether it is in the slot. */
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, &Model, &pDev, &pDevInsPort, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        bool fPresent = tstRndChance(50);
+        RTTESTI_CHECK_RC(devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevInsPort, tstPortLinkChanged, fPresent), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstPdmInitComplete(), VINF_SUCCESS);
+        tstPdmPowerOn();
+        tstPortGuestSetBusNumbers();
+
+        uint8_t abInitial[TSTPORT_EXP_CAP_SIZE];
+        for (unsigned off = 0; off < sizeof(abInitial); off++)
+            abInitial[off] = (uint8_t)tstPortCfgRead(TSTPORT_EXP_CAP + off, 1);
+
+        bool fBusNumbersSet = true;
+        for (uint32_t iOp = 0; iOp < cOps; iOp++)
+        {
+            /* What decides about interrupts, before the operation. */
+            uint32_t const cMsisBefore = tstPdmMsiGetCount();
+            bool const     fCanIrqBefore =    (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) & VBOX_PCI_MSI_FLAGS_ENABLE)
+                                           && (   (tstPortCfgRead(TSTPORT_SLTCTL, 2) & VBOX_PCI_EXP_SLTCTL_HPIE)
+                                               /* An interrupt held back by the mask bit of MSI comes when the guest clears the bit. */
+                                               || (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_PENDING_BITS_64, 1) & 1));
+
+            uint32_t const uOp = tstRnd(0, 99);
+            if (uOp < 50)
+            {
+                /* The guest writes to the port: mostly at and around the PCI express capability,
+                   also to the MSI capability and anywhere else, aligned or not.  The bus numbers
+                   are left alone, the checks need the secondary bus to be reachable. */
+                static const unsigned s_acb[] = { 1, 2, 4 };
+                unsigned const cb  = s_acb[tstRnd(0, 2)];
+                uint32_t       off;
+                uint32_t const uWhere = tstRnd(0, 9);
+                if (uWhere < 6)
+                    off = tstRnd(TSTPORT_EXP_CAP - 4, TSTPORT_EXP_CAP + TSTPORT_EXP_CAP_SIZE + 3);
+                else if (uWhere < 8)
+                    off = tstRnd(TSTPORT_MSI_CAP - 2, TSTPORT_MSI_CAP + VBOX_MSI_CAP_SIZE_64 + 1);
+                else
+                    off = tstRnd(0, 0x100 - cb);
+                if (tstRndChance(80))
+                    off &= ~(uint32_t)(cb - 1);
+                if (   off + cb > VBOX_PCI_PRIMARY_BUS
+                    && off <= VBOX_PCI_SUBORDINATE_BUS)
+                    continue;
+                tstPortCfgWrite(off, tstRndValue(), cb);
+            }
+            else if (uOp < 58)
+                /* The guest does what guests do to get interrupts. */
+                switch (tstRnd(0, 2))
+                {
+                    case 0:
+                        tstPortGuestEnableMsi();
+                        break;
+                    case 1:
+                        tstPortCfgWrite(TSTPORT_SLTCTL, tstPortCfgRead(TSTPORT_SLTCTL, 2) | TSTPORT_SLTCTL_ENABLES, 2);
+                        break;
+                    default:
+                        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+                        break;
+                }
+            else if (uOp < 66)
+                /* The guest switches the power of the slot. */
+                tstPortCfgWrite(TSTPORT_SLTCTL, tstPortCfgRead(TSTPORT_SLTCTL, 2) ^ VBOX_PCI_EXP_SLTCTL_PWRC, 2);
+            else if (uOp < 76)
+            {
+                /* The guest accesses the device behind the port. */
+                static const unsigned s_acb[] = { 1, 2, 4 };
+                unsigned const cb  = s_acb[tstRnd(0, 2)];
+                uint32_t const off = tstRnd(0, 0x1000 - cb) & ~(uint32_t)(cb - 1);
+                if (tstRndChance(50))
+                    tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, off, cb);
+                else
+                    tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, off, tstRndValue(), cb);
+            }
+            else if (uOp < 88)
+            {
+                /* The device comes or goes. */
+                fPresent = tstRndChance(50);
+                devpciR3HotPlugSlotSetPresence(pDevInsPort, fPresent);
+            }
+            else if (uOp < 94)
+                devpciR3HotPlugSlotPressAttentionButton(pDevInsPort);
+            else if (uOp < 97)
+                /* A saved state which is what is there already, so nothing changes. */
+                RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
+            else
+            {
+                /* A reset of the VM, usually followed by the guest setting the port up again. */
+                tstPdmReset();
+                fBusNumbersSet = tstRndChance(90);
+                if (fBusNumbersSet)
+                    tstPortGuestSetBusNumbers();
+            }
+
+            /* No interrupt unless the guest has asked for it, before or by what it just did. */
+            bool const fCanIrqAfter =    (tstPortCfgRead(TSTPORT_MSI_CAP + VBOX_MSI_CAP_MESSAGE_CONTROL, 2) & VBOX_PCI_MSI_FLAGS_ENABLE)
+                                      && (tstPortCfgRead(TSTPORT_SLTCTL, 2) & VBOX_PCI_EXP_SLTCTL_HPIE);
+            uint32_t const cMsis = tstPdmMsiGetCount();
+            RTTESTI_CHECK_MSG(cMsis == cMsisBefore || fCanIrqBefore || fCanIrqAfter,
+                              ("%u interrupt(s) the guest has not asked for\n", cMsis - cMsisBefore));
+            RTTESTI_CHECK_MSG(cMsis - cMsisBefore <= 1, ("%u interrupts for one operation\n", cMsis - cMsisBefore));
+
+            if (!tstPortFuzzCheck(pDevInsPort, abInitial, fPresent, fBusNumbersSet))
+            {
+                RTTestIFailureDetails("operation %u (kind %u) with seed %#RX32 failed; run with TSTDEVPCIVFIO_FUZZ_SEED=%u to get it again\n",
+                                      iOp, uOp, uSeed, uSeed);
+                break;
+            }
+        }
+        RTTestIPrintf(RTTESTLVL_ALWAYS, "%u operation(s) with seed %#RX32, %u interrupt(s)\n", cOps, uSeed, tstPdmMsiGetCount());
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+    }
+    tstFixtureTeardown();
+
+    RTRandAdvDestroy(g_hTstRand);
+    g_hTstRand = NIL_RTRAND;
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -3315,7 +4273,12 @@ int main()
     tstRemovalOtherCases();
     tstRemovalUnderLoad();
     tstSavedState();
+    tstPortRegisters();
+    tstPortSlotEvents();
+    tstPortDevice();
+    tstPortSavedState();
     tstFuzz();
+    tstPortFuzz();
 
     return RTTestSummaryAndDestroy(hTest);
 }
