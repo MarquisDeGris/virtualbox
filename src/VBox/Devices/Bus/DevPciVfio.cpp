@@ -1862,13 +1862,20 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
     paIrqFds[0].fd = pFun->iFdWakeup;
     paIrqFds[0].events = POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI | POLLERR;
 
-    uint32_t cIrqs = 0;
+    /*
+     * This is entered each time the VM gets going: when it is powered on and when
+     * it is resumed.  What to poll has to be put together each time, also if the
+     * interrupt mode is what it was when the VM stopped.
+     */
+    uint32_t cIrqs      = 0;
+    bool     fPollSetUp = false;
     while (pThread->enmState == PDMTHREADSTATE_RUNNING)
     {
         /* The sequence number has to be read before the mode, see pciVfioIrqPollerSwitchMode(). */
         uint32_t const uIrqSeqReq  = ASMAtomicReadU32(&pFun->uIrqSeqReq);
         uint8_t const  uIrqModeNew = ASMAtomicReadU8(&pFun->uIrqModeNew);
-        if (pFun->uIrqModeCur != uIrqModeNew)
+        if (   !fPollSetUp
+            || pFun->uIrqModeCur != uIrqModeNew)
         {
             if (uIrqModeNew < RT_ELEMENTS(pFun->acIrqVectors))
                 cIrqs = RT_MIN(pFun->acIrqVectors[uIrqModeNew], pFun->cFdEvts);
@@ -1883,6 +1890,7 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
             }
 
             ASMAtomicWriteU8(&pFun->uIrqModeCur, uIrqModeNew);
+            fPollSetUp = true;
         }
 
         /* Inform the initiator of a mode switch that we are done with it. */

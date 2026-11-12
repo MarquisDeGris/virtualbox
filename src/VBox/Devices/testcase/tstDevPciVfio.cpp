@@ -6240,6 +6240,71 @@ static void tstSlotInterface(void)
 }
 
 
+/**
+ * Interrupts of the device after the VM was suspended and resumed: they get
+ * through as before, and one the device raised while the VM stood still
+ * arrives when the VM runs again, not earlier.
+ */
+static void tstSuspendResume(void)
+{
+    RTTestISub("Interrupts after the VM was suspended and resumed");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev = NULL;
+    int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+
+        /* The guest sets MSI up with a single vector and leaves it at that. */
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 4,  UINT32_C(0xfee00000), 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 8,  0, 4);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 12, 0x4041, 2);
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2,
+                          (fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_QSIZE) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+
+        uint32_t cMsis = 0;
+        for (unsigned iRound = 0; iRound < 5; iRound++)
+        {
+            /* The device raises an interrupt while the VM runs. */
+            RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+            cMsis++;
+            RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsis, RT_MS_5SEC),
+                              ("round %u: the MSI did not arrive, %u so far\n", iRound, tstPdmMsiGetCount()));
+
+            /* The VM stands still for a while.  In the later rounds the device raises an interrupt
+               meanwhile, which has to wait until the VM runs again. */
+            tstPdmSuspend();
+            if (iRound >= 2)
+            {
+                RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+                RTThreadSleep(50);
+                RTTESTI_CHECK_MSG(tstPdmMsiGetCount() == cMsis, ("round %u: an MSI arrived while the VM was suspended\n", iRound));
+                cMsis++;
+            }
+            tstPdmResume();
+            RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsis, RT_MS_5SEC),
+                              ("round %u: the MSI raised while the VM was suspended did not arrive, %u so far\n",
+                               iRound, tstPdmMsiGetCount()));
+        }
+
+        /* Each one arrived once, the way the guest has set it up. */
+        RTThreadSleep(20);
+        RTTESTI_CHECK_MSG(tstPdmMsiGetCount() == cMsis, ("%u MSIs, expected %u\n", tstPdmMsiGetCount(), cMsis));
+        TSTPDMMSI Msi;
+        RT_ZERO(Msi);
+        RTTESTI_CHECK(tstPdmMsiGet(cMsis - 1, &Msi));
+        RTTESTI_CHECK_MSG(Msi.uAddr == UINT64_C(0xfee00000) && Msi.uData == 0x4041,
+                          ("address %#RX64, data %#RX32\n", Msi.uAddr, Msi.uData));
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -6283,6 +6348,7 @@ int main()
     tstRemovalOtherCases();
     tstRemovalUnderLoad();
     tstSavedState();
+    tstSuspendResume();
     tstPortRegisters();
     tstPortSlotEvents();
     tstPortDevice();
