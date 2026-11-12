@@ -4517,9 +4517,6 @@ static int pciVfioFunAttach(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev
     if (RT_FAILURE(rc))
         return rc;
     if (   (pFun->offMsixCtrl != 0) != pFun->Layout.fMsix
-        || pFun->offMsixTbl != pFun->Layout.offMsixTbl
-        || pFun->cbMsixTbl  != pFun->Layout.cbMsixTbl
-        || pFun->offMsixPba != pFun->Layout.offMsixPba
         || pFun->cbMsixPba  != pFun->Layout.cbMsixPba)
         return pciVfioSetError(pThis, VERR_MISMATCH, RT_SRC_POS,
                                N_("The PCI device is not like the one the VM was started with: the %s differ"), "MSI-X tables");
