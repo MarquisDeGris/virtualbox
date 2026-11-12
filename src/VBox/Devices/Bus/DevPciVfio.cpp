@@ -4536,8 +4536,7 @@ static int pciVfioFunAttach(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev
         PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
         if (pBar->pvMmio)
         {
-            void *pv = mmap((void *)pBar->pvMmio, pBar->cbRegion, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_FILE | MAP_SHARED,
-                            pFun->iFdVfio, pBar->offVfio);
+            void *pv = (void *)pBar->pvMmio;
             if (pv == MAP_FAILED)
                 return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
