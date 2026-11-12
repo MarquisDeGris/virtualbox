@@ -5330,6 +5330,55 @@ static void tstSlotStateHookCheck(unsigned uLine)
 }
 
 
+/** What tstSlotStateLetGoHook() and the thread it starts have found. */
+static struct
+{
+    /** The thread which asks whether the state can be saved, NIL_RTTHREAD if it was not started. */
+    RTTHREAD            hThread;
+    /** Whether the thread has its answer. */
+    bool volatile       fAnswered;
+    /** Whether the thread had its answer while the device was being let go of. */
+    bool                fAnsweredMeanwhile;
+    /** The answer. */
+    int                 rc;
+} g_TstSlotStateLetGo;
+
+
+/**
+ * @callback_method_impl{FNRTTHREAD, Asks whether the state of the VM can be saved.}
+ */
+static DECLCALLBACK(int) tstSlotStateAskThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    RT_NOREF(hThreadSelf, pvUser);
+    g_TstSlotStateLetGo.rc = tstPdmSaveStatePrep(false /*fLive*/);
+    ASMAtomicWriteBool(&g_TstSlotStateLetGo.fAnswered, true);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNTSTVFIOMMAPHOOK,
+ *      The device is being let go of\, its memory is still mapped: somebody else asks
+ *      whether the state of the VM can be saved\, and gets time for getting an answer.}
+ */
+static DECLCALLBACK(void) tstSlotStateLetGoHook(void *pvUser)
+{
+    RT_NOREF(pvUser);
+    if (g_TstSlotStateLetGo.hThread == NIL_RTTHREAD)
+    {
+        int rc = RTThreadCreate(&g_TstSlotStateLetGo.hThread, tstSlotStateAskThread, NULL, 0 /*cbStack*/,
+                                RTTHREADTYPE_DEFAULT, RTTHREADFLAGS_WAITABLE, "tstAsk");
+        if (RT_SUCCESS(rc))
+        {
+            RTThreadSleep(300);
+            g_TstSlotStateLetGo.fAnsweredMeanwhile = ASMAtomicReadBool(&g_TstSlotStateLetGo.fAnswered);
+        }
+        else
+            g_TstSlotStateLetGo.hThread = NIL_RTTHREAD;
+    }
+}
+
+
 /**
  * Sets up a VM with a passthrough device for the hot-plug capable slot of a root
  * port which is constructed and not powered on, which is how a VM is when a
@@ -5680,6 +5729,34 @@ static void tstSlotSavedStateRefused(void)
         tstPdmPowerOn();
         RTTESTI_CHECK_RC(pciVfioR3SlotAttach(pDevInsDev), VINF_SUCCESS);
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
+    }
+    tstFixtureTeardown();
+
+    /*
+     * Somebody asks whether the state can be saved while the device is being let go
+     * of: the function is out of service already and memory of the device is still
+     * mapped.  The answer waits until that is over.
+     */
+    rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        tstSlotGuestEnableDevice();
+        RT_ZERO(g_TstSlotStateLetGo);
+        g_TstSlotStateLetGo.hThread = NIL_RTTHREAD;
+        g_TstSlotStateLetGo.rc      = VERR_IPE_UNINITIALIZED_STATUS;
+        tstVfioKrnlSetPlaceholderMmapHook(tstSlotStateLetGoHook, NULL);
+        RTTESTI_CHECK_RC(pciVfioR3SlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        tstVfioKrnlSetPlaceholderMmapHook(NULL, NULL);
+        RTTESTI_CHECK(g_TstSlotStateLetGo.hThread != NIL_RTTHREAD);
+        if (g_TstSlotStateLetGo.hThread != NIL_RTTHREAD)
+        {
+            RTTESTI_CHECK_RC(RTThreadWait(g_TstSlotStateLetGo.hThread, RT_MS_30SEC, NULL), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(!g_TstSlotStateLetGo.fAnsweredMeanwhile,
+                              ("%Rrc while the device was being let go of\n", g_TstSlotStateLetGo.rc));
+            RTTESTI_CHECK_RC(g_TstSlotStateLetGo.rc, VINF_SUCCESS);
+        }
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        tstSlotCheckEmpty(__LINE__, pDevInsPort);
     }
     tstFixtureTeardown();
 

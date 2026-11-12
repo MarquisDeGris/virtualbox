@@ -238,6 +238,10 @@ typedef struct TSTVFIOKRNL
     int                 iFailErrno;
     /** Fault injection: number of mappings of ordinary memory at a given address to fail. */
     uint32_t volatile   cFailPlaceholderMaps;
+    /** Called before ordinary memory gets mapped at a given address, optional. */
+    PFNTSTVFIOMMAPHOOK  pfnPlaceholderHook;
+    /** The user argument of the hook. */
+    void               *pvPlaceholderHookUser;
 } TSTVFIOKRNL;
 
 
@@ -1684,6 +1688,22 @@ void tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes)
 
 
 /**
+ * Sets a function which is called before ordinary memory gets mapped at a
+ * given address, which is when a device is in the middle of being let go of.
+ *
+ * @param   pfnHook             The function, NULL for none.
+ * @param   pvUser              The user argument.
+ */
+void tstVfioKrnlSetPlaceholderMmapHook(PFNTSTVFIOMMAPHOOK pfnHook, void *pvUser)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.pfnPlaceholderHook    = pfnHook;
+    g_Krnl.pvPlaceholderHookUser = pvUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
  * Checks whether a mapping is one which was asked to fail.
  *
  * @returns true if the mapping is to fail, false if not.
@@ -1691,8 +1711,17 @@ void tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes)
  */
 static bool tstVfioKrnlIsMmapToFail(int fFlags)
 {
-    if ((fFlags & (MAP_FIXED | MAP_ANONYMOUS)) != (MAP_FIXED | MAP_ANONYMOUS))
+    if (   (fFlags & (MAP_FIXED | MAP_ANONYMOUS)) != (MAP_FIXED | MAP_ANONYMOUS)
+        || !g_Krnl.fInitialized)
         return false;
+
+    RTCritSectEnter(&g_Krnl.CritSect);
+    PFNTSTVFIOMMAPHOOK const pfnHook = g_Krnl.pfnPlaceholderHook;
+    void * const             pvUser  = g_Krnl.pvPlaceholderHookUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    if (pfnHook)
+        pfnHook(pvUser);
+
     for (;;)
     {
         uint32_t const cLeft = ASMAtomicReadU32(&g_Krnl.cFailPlaceholderMaps);

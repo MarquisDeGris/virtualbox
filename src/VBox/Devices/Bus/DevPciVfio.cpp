@@ -3871,17 +3871,30 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun);
  * valid.  The file descriptor of the device is replaced by one which refuses
  * everything, which leaves its number valid for whoever is using it right now.
  *
+ * A device which is just being put into the hot-plug capable slot gets there
+ * first, and whoever is checking that nothing of a device is left in the VM
+ * gets done with it, see pciVfioSlotIsEmptyForState().
+ *
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function.
  * @param   pszWhy      The reason, for the log.
  */
 static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszWhy)
 {
-    if (ASMAtomicXchgBool(&pFun->fGone, true))
+    /* Being out of service and the device being let go of are one thing for whoever
+       holds the critical section of the slot. */
+    int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRC(rcLock);
+    bool const fWasGone = ASMAtomicXchgBool(&pFun->fGone, true);
+    if (!fWasGone)
+    {
+        LogRel(("VFIO#%d.%u: The function is taken out of service: %s\n", pThis->iInstance, pFun->uPciFun, pszWhy));
+        pciVfioFunLetGo(pThis, pFun);
+    }
+    if (RT_SUCCESS(rcLock))
+        RTCritSectLeave(&pThis->CritSectSlot);
+    if (fWasGone)
         return;
-    LogRel(("VFIO#%d.%u: The function is taken out of service: %s\n", pThis->iInstance, pFun->uPciFun, pszWhy));
-
-    pciVfioFunLetGo(pThis, pFun);
 
     /* The rest is for an EMT to do. */
     int rc = PDMDevHlpVMReqCallNoWait(pThis->pDevIns, VMCPUID_ANY, (PFNRT)pciVfioFunGoneOnEmt, 2,

@@ -123,6 +123,15 @@ typedef DECLCALLBACKTYPE(void, FNTSTVFIOCFGWRITE,(PTSTVFIODEV pDev, uint32_t off
 /** Pointer to a config space write callback. */
 typedef FNTSTVFIOCFGWRITE *PFNTSTVFIOCFGWRITE;
 
+/**
+ * Callback before ordinary memory gets mapped at a given address.
+ *
+ * @param   pvUser              The user argument.
+ */
+typedef DECLCALLBACKTYPE(void, FNTSTVFIOMMAPHOOK,(void *pvUser));
+/** Pointer to a callback before ordinary memory gets mapped at a given address. */
+typedef FNTSTVFIOMMAPHOOK *PFNTSTVFIOMMAPHOOK;
+
 int         tstVfioKrnlInit(void);
 void        tstVfioKrnlTerm(void);
 void        tstVfioKrnlSetLegacy(bool fLegacy);
@@ -147,6 +156,7 @@ uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
 void        tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes);
+void        tstVfioKrnlSetPlaceholderMmapHook(PFNTSTVFIOMMAPHOOK pfnHook, void *pvUser);
 /** @} */
 
 
