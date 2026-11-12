@@ -5349,7 +5349,7 @@ static DECLCALLBACK(int) pciVfioInitComplete(PPDMDEVINS pDevIns)
  */
 static int pciVfioFunQueryLayout(PVFIOPCI pThis, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout)
 {
-    if (iPciFun >= RT_ELEMENTS(pThis->aPciFuns))
+    if (iPciFun > RT_ELEMENTS(pThis->aPciFuns))
         return VERR_NOT_FOUND;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
     if (pFun->iFdVfio == -1)
