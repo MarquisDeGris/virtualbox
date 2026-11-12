@@ -7,21 +7,17 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `7afa04ad` (15 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `24515f86` (16 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 hardening is done: interrupt setup; MSI-X table and pending bits; memory
-BARs in segments; capability lists; MSI capability; config space writes; DMA
-mapping; guest access paths; configuration validation and cleanup; reset and
-command register; documentation block. The testcase runs clean with
-AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer, including a
-fuzz test with random device models and guest accesses (T2). The legacy
-group/container interface is covered too. Next: WP3 (removal of the device on
-the host).
+WP2 (hardening) and WP3 (removal of the device on the host) are done. The
+testcase runs clean with AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer, including the fuzz test (T2). Next: WP4 (saved
+state policy), then hot-plug towards the guest (WP5, WP6).
 
 ## Done
 
@@ -135,13 +131,27 @@ the host).
   container and group as an alternative; construction, guest memory mapping
   and its failure, BAR, MSI, reset, bus reset and descriptor inheritance are
   tested with it, and the fuzz test uses it for a part of its models.
+- WP3 (commit `24515f86`): the host taking the device back.
+  - the request and error notifications of VFIO are watched by a thread
+    which works in every VM state;
+  - a function the host wants back or reports an error of is taken out of
+    service: guest accesses are answered locally (all ones, writes dropped),
+    the device memory mapped into the guest is replaced in place by ordinary
+    memory, the device file descriptor is replaced by one which refuses
+    everything, which lets go of the device;
+  - an EMT then removes the guest mappings; from there on the guest finds
+    nothing where the function was;
+  - other functions stay in service; a reset leaves such a function alone.
+  - Not yet: asking the guest first when the host only asks politely. This
+    needs the hot-plug slot of WP6; until then every removal is a surprise
+    removal for the guest.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 68) |
+| Test | Before the fix | With fixes (run 83) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -174,6 +184,10 @@ Each new test was first run against the device without the fix it belongs to.
 | Trapped BAR accesses do not need the mapping of the BAR | the process crashes (run 44) | pass |
 | MSI and MSI-X capability more than once | fails, 8 checks, and leaks memory (run 64) | pass |
 | Random device models and guest accesses | found the above (run 57) | pass |
+| Legacy interface with container and group | not run against older states | pass |
+| The host takes the device back while the VM runs | fails, 26 checks (run 81) | pass |
+| Device taken back before power on, device error | fails, 16 checks (run 81) | pass |
+| The host takes the device back while the guest is busy with it | fails (run 81) | pass |
 
 ## Test harness (WP1)
 
@@ -201,9 +215,9 @@ device, saved-state stream.
 
 ## Next
 
-1. WP3: removal of the device on the host while the VM runs.
-2. WP4: saved state policy.
-3. WP5 and WP6: hot-plug towards the guest.
+1. WP4: saved state policy.
+2. WP5: PCIe native hot-plug in the root port.
+3. WP6: hot-pluggable passthrough slot.
 
 ## Decisions
 
@@ -227,13 +241,16 @@ device, saved-state stream.
 | 2026-11-12 | A function which cannot be reset on its own is reset through its bus; without any reset it is left disabled | Devices with several functions usually have no function reset; state must not carry over a guest reboot unnoticed |
 | 2026-11-12 | The fuzz test is part of the testcase binary and generates device models itself instead of mutating bytes | Most random bytes are refused early; made-up models which are valid most of the time reach the code behind the checks. Deterministic by seed, so a failure can be repeated |
 | 2026-11-12 | Tests are checked against deliberate defects now and then | A test which cannot fail proves nothing |
+| 2026-11-12 | The notifications of the host are watched by a thread of the device's own, not a PDM thread | PDM threads stand still while the VM is paused; the host waits for the device to be let go of |
+| 2026-11-12 | Device memory mapped into the guest is replaced in place by ordinary memory when the device goes away; the file descriptor is replaced in place too | Everybody holding the address or the descriptor number stays valid without locking, and nothing can touch the device afterwards |
+| 2026-11-12 | A function with an error the host cannot recover from is let go of, the VM keeps running | The alternative, stopping the VM, takes down everything else the guest does; the guest sees a device which failed |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 31 tests | `7afa04ad` | all pass (run 71); clean with ASan, LSan and UBSan (run 72) |
-| T2 fuzz | running in CI | `7afa04ad` | 2000 models per run, 20000 with sanitizers (run 72); 200000 models with another seed and sanitizers (run 70) |
+| T1 unit | running in CI, 34 tests | `24515f86` | all pass (run 83); clean with ASan, LSan and UBSan (run 84) |
+| T2 fuzz | running in CI | `24515f86` | 2000 models per run, 20000 with sanitizers (run 84); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -292,5 +309,10 @@ device, saved-state stream.
 | 68, 69 | code branch @ `680a21c5` (as `scratch/fuzz2`) | tests, sanitize | passed | 30 tests and the fuzz test |
 | 70 | code branch @ `680a21c5` | sanitize | passed | 200000 random device models with another seed |
 | 71, 72 | code branch @ `7afa04ad` (as `scratch/legacy`) | tests, sanitize | passed | 31 tests and the fuzz test |
+| 73 to 78 | `scratch/removal` | tests, sanitize | failed, cancelled | development of WP3 |
+| 79, 80 | `scratch/removal` | tests, sanitize | passed | 34 tests and the fuzz test |
+| 81 | `scratch/red-evidence-13` | tests | failed as intended | removal tests against the driver before the change |
+| 82 | `scratch/mutant-3` | tests | failed as intended | deliberate defect (device memory mappings not replaced), caught |
+| 83, 84 | code branch @ `24515f86` | tests, sanitize | passed | 34 tests and the fuzz test |
 
 Run numbers are those GitHub shows for the `build` workflow.
