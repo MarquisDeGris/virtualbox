@@ -2267,16 +2267,19 @@ static void tstLegacy(void)
 
 
 /**
- * Waits for the device to have let go of a function of the fake kernel.
+ * Waits for the device to have let go of a function of the fake kernel and to
+ * have asked for the rest to be done on an EMT.
  *
  * @returns true if the function is no longer open, false if the time is up.
  * @param   pDev                The PCI function of the fake kernel.
+ * @param   cReqsBefore         What tstPdmGetRequestCount() returned before the host started taking the function back.
  * @param   cMsTimeout          How long to wait at most.
  */
-static bool tstWaitForRelease(PTSTVFIODEV pDev, RTMSINTERVAL cMsTimeout)
+static bool tstWaitForRelease(PTSTVFIODEV pDev, uint32_t cReqsBefore, RTMSINTERVAL cMsTimeout)
 {
     uint64_t const msStart = RTTimeMilliTS();
-    while (tstVfioKrnlDevGetOpenCount(pDev) != 0)
+    while (   tstVfioKrnlDevGetOpenCount(pDev) != 0
+           || tstPdmGetRequestCount() == cReqsBefore)
     {
         if (RTTimeMilliTS() - msStart >= cMsTimeout)
             return false;
@@ -2363,9 +2366,10 @@ static void tstRemoval(void)
             uint64_t const cbMapped = tstVfioKrnlGetDmaMappedBytes();
 
             /* The plug gets pulled.  What is left for an EMT to do is held back for now. */
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
             tstPdmSetRequestProcessing(false /*fAutomatic*/);
             tstVfioKrnlDevRemove(pDev);
-            RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, RT_MS_5SEC), ("the device has not let go of the function\n"));
+            RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("the device has not let go of the function\n"));
 
             /*
              * The guest still has the BAR mapped.  What it finds there is memory which does
@@ -2420,8 +2424,9 @@ static void tstRemoval(void)
                 tstPdmPciCfgWrite(0, TST_PCI_DEVFN + i, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
             }
 
+            uint32_t cReqsBefore = tstPdmGetRequestCount();
             tstVfioKrnlDevRemove(apDevs[1]);
-            RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[1], RT_MS_5SEC), ("the device has not let go of function 1\n"));
+            RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[1], cReqsBefore, RT_MS_5SEC), ("the device has not let go of function 1\n"));
             tstCheckFunctionIsGone(apDevs[1], TST_PCI_DEVFN + 1, TST_BAR0_ADDR + _1M, "function 1");
 
             /* Function 0 is still there and its interrupts arrive. */
@@ -2440,8 +2445,9 @@ static void tstRemoval(void)
             RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(apDevs[0], VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
             RTTESTI_CHECK_MSG(tstPdmMsiWait(cMsisBefore + 1, RT_MS_5SEC), ("the MSI of function 0 did not arrive\n"));
 
+            cReqsBefore = tstPdmGetRequestCount();
             tstVfioKrnlDevRemove(apDevs[0]);
-            RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[0], RT_MS_5SEC), ("the device has not let go of function 0\n"));
+            RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[0], cReqsBefore, RT_MS_5SEC), ("the device has not let go of function 0\n"));
             tstCheckFunctionIsGone(apDevs[0], TST_PCI_DEVFN, TST_BAR0_ADDR, "function 0");
         }
         tstFixtureTeardown();
@@ -2468,11 +2474,12 @@ static void tstRemovalOtherCases(void)
         RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%s: pci-vfio: %Rrc - %s\n", pszWhat, rc, tstPdmGetLastError()));
         if (RT_SUCCESS(rc))
         {
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
             if (iVariant == 0)
             {
                 /* The VM isn't running yet, which is no reason to keep the host waiting. */
                 tstVfioKrnlDevRemove(pDev);
-                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, RT_MS_5SEC), ("%s: the device has not let go of the function\n", pszWhat));
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("%s: the device has not let go of the function\n", pszWhat));
                 tstPdmPowerOn();
             }
             else
@@ -2481,7 +2488,7 @@ static void tstRemovalOtherCases(void)
                 tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
                 tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
                 tstVfioKrnlDevSignalError(pDev);
-                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, RT_MS_5SEC), ("%s: the device has not let go of the function\n", pszWhat));
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("%s: the device has not let go of the function\n", pszWhat));
             }
             tstCheckFunctionIsGone(pDev, TST_PCI_DEVFN, TST_BAR0_ADDR, pszWhat);
         }
@@ -2520,7 +2527,8 @@ static void tstRemovalUnderLoad(void)
     uint16_t const cVectors = 8;
     uint32_t const offTable = _8K;
     uint32_t const offPba   = _8K + _4K;
-    for (uint32_t iRound = 0; iRound < 150 && !RTTestIErrorCount(); iRound++)
+    uint32_t const cErrorsBefore = RTTestIErrorCount();
+    for (uint32_t iRound = 0; iRound < 150 && RTTestIErrorCount() == cErrorsBefore; iRound++)
     {
         TSTVFIODEVCFG Model;
         tstModelInit(&Model, TST_VFIO_NODE, 0x01 /* mass storage */, 0x08 /* non-volatile memory */);
@@ -2544,7 +2552,8 @@ static void tstRemovalUnderLoad(void)
             uint32_t const fMsiCtrl  = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
             uint32_t const fMsixCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSIX_CAP_OFF + 2, 2);
 
-            RTTHREAD hThread = NIL_RTTHREAD;
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
+            RTTHREAD       hThread     = NIL_RTTHREAD;
             rc = RTThreadCreate(&hThread, tstRemovalUnderLoadThread, pDev, 0 /*cbStack*/, RTTHREADTYPE_DEFAULT,
                                 RTTHREADFLAGS_WAITABLE, "tstPull");
             RTTESTI_CHECK_RC(rc, VINF_SUCCESS);
@@ -2571,7 +2580,7 @@ static void tstRemovalUnderLoad(void)
                                                    VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);     break;
                         case 10: tstPdmPciCfgRead(0, TST_PCI_DEVFN, iOp & 0xfc, 4);                                                  break;
                         default:
-                            if (!(iOp % 96))
+                            if ((iOp % 96) == 95)
                                 tstPdmReset();
                             break;
                     }
@@ -2579,7 +2588,7 @@ static void tstRemovalUnderLoad(void)
                         cAfter++;
                 }
                 RTTESTI_CHECK_RC(RTThreadWait(hThread, RT_MS_30SEC, NULL), VINF_SUCCESS);
-                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, RT_MS_5SEC), ("round %u: the device has not let go of the function\n", iRound));
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC), ("round %u: the device has not let go of the function\n", iRound));
                 uint32_t const idVendor = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2);
                 RTTESTI_CHECK_MSG(idVendor == UINT32_C(0xffff), ("round %u: vendor ID %#RX32\n", iRound, idVendor));
                 RTTESTI_CHECK_MSG(!tstPdmIsMmio2Mapped(TST_BAR0_ADDR), ("round %u: BAR0 is mapped into the guest\n", iRound));

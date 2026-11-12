@@ -351,6 +351,9 @@ typedef struct VFIOPCIFUN
     /** Flag whether the function is out of service because the host took the device
      * back or reported an error of it.  iFdVfio refers to what iFdInert refers to then. */
     bool volatile        fGone;
+    /** Flag whether the guest finds nothing where the function was.  This follows fGone
+     * once the guest mappings of the BARs are removed, see pciVfioFunGoneOnEmt(). */
+    bool volatile        fGoneForGuest;
     /** What takes the place of the device file when the function goes out of service:
      * a file descriptor which refuses everything the device file is used for. */
     int                  iFdInert;
@@ -2867,8 +2870,12 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PVFIOPCIFUN pFun = &pThis->aPciFuns[pPciDev->idxSubDev];
 
-    /* A function which is out of service reads like one which isn't there. */
-    if (pFun->fGone)
+    /*
+     * A function which is out of service reads like one which isn't there.  Not
+     * before the guest mappings of its BARs are removed though: the PCI bus gets
+     * what it needs to know for that through here too.
+     */
+    if (pFun->fGoneForGuest)
     {
         *pu32Value = cb < sizeof(uint32_t) ? RT_BIT_32(cb * 8) - 1 : UINT32_MAX;
         return VINF_SUCCESS;
@@ -2890,8 +2897,8 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
             {
                 int rc = pciVfioConfigPassthroughRead(pFun, uAddress + i, 1, &bRead);
                 if (RT_FAILURE(rc))
-                LogRel(("VFIO#%d.%u: Failed to passthrough PCI config read at offset %#x with %Rrc, returning 0\n",
-                        pThis->iInstance, pFun->uPciFun, uAddress + i, rc));
+                    LogRelMax(32, ("VFIO#%d.%u: Failed to passthrough PCI config read at offset %#x with %Rrc, returning 0\n",
+                                   pThis->iInstance, pFun->uPciFun, uAddress + i, rc));
                 break;
             }
             case VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT:
@@ -3580,7 +3587,8 @@ static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPC
 
 /**
  * Does on an EMT what is left to do for a function which went out of service:
- * the guest loses its mappings of the BARs.
+ * the guest loses its mappings of the BARs and finds nothing where the function
+ * was from then on.
  *
  * @returns VBox status code.
  * @param   pDevIns     The device instance.
@@ -3601,6 +3609,9 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
         VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16Cmd & ~fCmdActive);
         Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
     }
+
+    /* From here on the guest finds nothing where the function was. */
+    ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
 
     /* Whatever the guest managed to write into the memory which took the place of the BARs is of no use to anybody. */
     for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
@@ -4102,6 +4113,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         pFun->iFdVfio        = -1;
         pFun->fIoasAttached  = false;
         pFun->fGone          = false;
+        pFun->fGoneForGuest  = false;
         pFun->iFdInert       = -1;
         pFun->iFdEvtReq      = -1;
         pFun->iFdEvtErr      = -1;
