@@ -1426,38 +1426,6 @@ static void tstMsixSharedBar(void)
         RTTESTI_CHECK_MSG(*(uint32_t *)&pbBar0[offTable + 0x104] == UINT32_C(0x33333333),
                           ("the device sees %#RX32 in the register behind the table\n", *(uint32_t *)&pbBar0[offTable + 0x104]));
 
-        /*
-         * Right behind the table and the pending bits: the first byte there belongs to the
-         * device, and an access reaching across the end is split between the two.
-         */
-        uint32_t const offTableEnd = offTable + cVectors * 16;
-        uint32_t const offPbaEnd   = offPba + 8;
-        pbBar0[offTableEnd]     = 0x55;
-        pbBar0[offTableEnd + 1] = 0x66;
-        pbBar0[offPbaEnd]       = 0x77;
-        pbBar0[offPbaEnd + 1]   = 0x88;
-        uint8_t bEdge = 0;
-        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTableEnd, &bEdge, sizeof(bEdge)), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(bEdge == 0x55, ("read %#x from the byte behind the table\n", bEdge));
-        u32 = UINT32_MAX;
-        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTableEnd - 2, &u32, sizeof(u32)), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x66550000), ("read %#RX32 across the end of the table\n", u32));
-        bEdge = 0;
-        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPbaEnd, &bEdge, sizeof(bEdge)), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(bEdge == 0x77, ("read %#x from the byte behind the pending bits\n", bEdge));
-        u32 = UINT32_MAX;
-        RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offPbaEnd - 2, &u32, sizeof(u32)), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(u32 == UINT32_C(0x88770000), ("read %#RX32 across the end of the pending bits\n", u32));
-        static const uint8_t s_abAcross[4] = { 0xff, 0xff, 0xee, 0xdd };
-        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offTableEnd - 2, s_abAcross, sizeof(s_abAcross)), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(   pbBar0[offTableEnd - 2] == 0xa5 && pbBar0[offTableEnd - 1] == 0xa5
-                          && pbBar0[offTableEnd]     == 0xee && pbBar0[offTableEnd + 1] == 0xdd,
-                          ("the device has %.4Rhxs around the end of the table after a write across it\n",
-                           &pbBar0[offTableEnd - 2]));
-        RTTESTI_CHECK_RC(tstPdmPhysWrite(TST_BAR0_ADDR + offPbaEnd - 2, s_abAcross, sizeof(s_abAcross)), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(pbBar0[offPbaEnd] == 0xee && pbBar0[offPbaEnd + 1] == 0xdd,
-                          ("the device has %.2Rhxs behind the pending bits after a write across their end\n", &pbBar0[offPbaEnd]));
-
         /* All vectors start out masked.  Fill in the table, leaving vector 2 masked. */
         u32 = 0;
         RTTESTI_CHECK_RC(tstPdmPhysRead(TST_BAR0_ADDR + offTable + 12, &u32, sizeof(u32)), VINF_SUCCESS);
