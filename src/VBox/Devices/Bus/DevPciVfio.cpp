@@ -5654,7 +5654,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             PPDMDEVINS const pDevInsPort = devpciR3HotPlugSlotFind(pDevIns, pDevIns->apPciDevs[iPciFun]);
             if (pDevInsPort)
             {
-                rc = devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevIns, pciVfioSlotLinkChanged, cFunsAbsent == 0 /*fPresent*/);
+                rc = devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevIns, pciVfioSlotLinkChanged, cFunsAbsent < 9 /*fPresent*/);
                 if (RT_FAILURE(rc))
                     return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                                N_("The hot-plug capable slot the passed through PCI device is configured "
