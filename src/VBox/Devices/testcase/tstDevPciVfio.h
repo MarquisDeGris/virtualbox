@@ -237,7 +237,7 @@ void            tstPdmFreeState(void *pvState);
 int             tstPdmLoadState(const void *pvState, size_t cbState);
 int             tstPdmStateDropUnit(void *pvState, size_t *pcbState, const char *pszUnit, uint32_t uInstance);
 int             tstPdmStatePatchItem(void *pvState, size_t cbState, const char *pszUnit, uint32_t uInstance, uint32_t idxItem,
-                                     const void *pvNew, size_t cbNew);
+                                     size_t offItem, const void *pvNew, size_t cbNew);
 uint32_t        tstPdmMsiGetCount(void);
 bool            tstPdmMsiWait(uint32_t cExpected, RTMSINTERVAL cMsTimeout);
 bool            tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi);

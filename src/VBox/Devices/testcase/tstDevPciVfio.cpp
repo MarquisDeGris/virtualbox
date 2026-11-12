@@ -5260,6 +5260,8 @@ static void tstSlotStartEmpty(void)
 #define TSTSTATE_VFIO_MSI_VECTORS   37
 /** pci-vfio: what ends the unit if there is one function. */
 #define TSTSTATE_VFIO_END           41
+/** ich9pcibridge: the config space of the first device. */
+#define TSTSTATE_BUS_CONFIG         2
 /** ich9pcibridge: the offset of the MSI capability the PCI bus takes care of for the first device. */
 #define TSTSTATE_BUS_MSI_CAP_OFF    5
 /** @} */
@@ -5827,27 +5829,30 @@ static void tstSlotSavedStateRefused(void)
         const char *pszUnit;
         /** The item. */
         uint32_t    idxItem;
-        /** Its size. */
-        uint32_t    cbItem;
-        /** The value to give it. */
+        /** How many bytes of the item to change, starting with the first. */
+        uint32_t    cbValue;
+        /** The value to put there. */
         uint64_t    uValue;
         /** How many bytes to leave out at the end of the state. */
         uint32_t    cbCutOff;
         /** How loading has to go, VERR_IPE_UNINITIALIZED_STATUS for any failure. */
         int         rcExpected;
+        /** What the message has to say, NULL for anything. */
+        const char *pszMsg;
     } s_aBadStates[] =
     {
-        { "a function number which is out of range",     "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 8,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED },
-        { "a function the VM doesn't have",              "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "the same function twice",                     "pci-vfio",      TSTSTATE_VFIO_END,         4, 0,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED },
-        { "no function where the VM has one",            "pci-vfio",      TSTSTATE_VFIO_FUN,         4, UINT32_MAX, 0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "another config space size",                   "pci-vfio",      TSTSTATE_VFIO_CFG_SIZE,    4, 12345,      0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "another BAR size",                            "pci-vfio",      TSTSTATE_VFIO_BAR0_SIZE,   8, _1M,        0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "MSI-X where the device has none",             "pci-vfio",      TSTSTATE_VFIO_MSIX,        1, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "another number of MSI vectors",               "pci-vfio",      TSTSTATE_VFIO_MSI_VECTORS, 4, 32,         0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "an MSI capability the PCI bus takes care of", "ich9pcibridge", TSTSTATE_BUS_MSI_CAP_OFF,  1, 0x50,       0, VERR_SSM_LOAD_CONFIG_MISMATCH },
-        { "the end missing",                             NULL,            0,                         0, 0,          8, VERR_IPE_UNINITIALIZED_STATUS },
-        { "most of it missing",                          NULL,            0,                         0, 0, UINT32_MAX, VERR_IPE_UNINITIALIZED_STATUS },
+        { "a function number which is out of range",     "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 8,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, NULL },
+        { "a function the VM doesn't have",              "pci-vfio",      TSTSTATE_VFIO_FUN,         4, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "function 1" },
+        { "the same function twice",                     "pci-vfio",      TSTSTATE_VFIO_END,         4, 0,          0, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, NULL },
+        { "no function where the VM has one",            "pci-vfio",      TSTSTATE_VFIO_FUN,         4, UINT32_MAX, 0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "without function 0" },
+        { "another config space size",                   "pci-vfio",      TSTSTATE_VFIO_CFG_SIZE,    4, 12345,      0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "config spaces differ" },
+        { "another BAR size",                            "pci-vfio",      TSTSTATE_VFIO_BAR0_SIZE,   8, _1M,        0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "BARs differ" },
+        { "MSI-X where the device has none",             "pci-vfio",      TSTSTATE_VFIO_MSIX,        1, 1,          0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "MSI-X tables differ" },
+        { "another number of MSI vectors",               "pci-vfio",      TSTSTATE_VFIO_MSI_VECTORS, 4, 32,         0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "interrupts differ" },
+        { "an MSI capability the PCI bus takes care of", "ich9pcibridge", TSTSTATE_BUS_MSI_CAP_OFF,  1, 0x50,       0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "interrupt capabilities" },
+        { "another vendor ID",                           "ich9pcibridge", TSTSTATE_BUS_CONFIG,       2, 0x4321,     0, VERR_SSM_LOAD_CONFIG_MISMATCH,     "vendor id mismatch! saved=21 43 ff ff current=ff ff ff ff" },
+        { "the end missing",                             NULL,            0,                         0, 0,          8, VERR_IPE_UNINITIALIZED_STATUS,     NULL },
+        { "most of it missing",                          NULL,            0,                         0, 0, UINT32_MAX, VERR_IPE_UNINITIALIZED_STATUS,     NULL },
     };
     for (unsigned iState = 0; iState < RT_ELEMENTS(s_aBadStates); iState++)
     {
@@ -5856,8 +5861,8 @@ static void tstSlotSavedStateRefused(void)
         size_t const cbBadState = s_aBadStates[iState].cbCutOff == UINT32_MAX ? 100 : cbState - s_aBadStates[iState].cbCutOff;
         if (s_aBadStates[iState].pszUnit)
             RTTESTI_CHECK_RC(tstPdmStatePatchItem(pvBadState, cbState, s_aBadStates[iState].pszUnit, 0 /*uInstance*/,
-                                                  s_aBadStates[iState].idxItem, &s_aBadStates[iState].uValue,
-                                                  s_aBadStates[iState].cbItem), VINF_SUCCESS);
+                                                  s_aBadStates[iState].idxItem, 0 /*offItem*/, &s_aBadStates[iState].uValue,
+                                                  s_aBadStates[iState].cbValue), VINF_SUCCESS);
 
         rc = tstSlotStateFixtureSetup(&Model, 1, NULL /*paLayouts*/, &pDev, &pDevInsPort, &pDevInsDev);
         if (RT_SUCCESS(rc))
@@ -5867,9 +5872,9 @@ static void tstSlotSavedStateRefused(void)
                  ? RT_SUCCESS(rc)
                  : rc != s_aBadStates[iState].rcExpected)
                 RTTestIFailed("a state with %s: %Rrc - %s\n", s_aBadStates[iState].pszWhat, rc, tstPdmGetLastError());
-            if (   rc == VERR_SSM_LOAD_CONFIG_MISMATCH
-                && *tstPdmGetLastError() == '\0')
-                RTTestIFailed("a state with %s: no message\n", s_aBadStates[iState].pszWhat);
+            if (   s_aBadStates[iState].pszMsg
+                && !strstr(tstPdmGetLastError(), s_aBadStates[iState].pszMsg))
+                RTTestIFailed("a state with %s: the message is '%s'\n", s_aBadStates[iState].pszWhat, tstPdmGetLastError());
             if (tstVfioKrnlDevGetOpenCount(pDev) != 0)
                 RTTestIFailed("a state with %s: the device is open %u time(s)\n", s_aBadStates[iState].pszWhat,
                               tstVfioKrnlDevGetOpenCount(pDev));
@@ -5880,6 +5885,7 @@ static void tstSlotSavedStateRefused(void)
         tstFixtureTeardown();
         RTMemFree(pvBadState);
     }
+
     /*
      * A state which has all it takes but the unit of the device: saved by something
      * which knows nothing of what is needed for saving with an empty slot.

@@ -3286,11 +3286,14 @@ int tstPdmStateDropUnit(void *pvState, size_t *pcbState, const char *pszUnit, ui
  * @param   pszUnit             The name of the unit.
  * @param   uInstance           The instance of the unit.
  * @param   idxItem             The item, counting what the unit has put from 0.
+ * @param   offItem             Where in the item the new value goes, which has to be 0 unless
+ *                              the item is a piece of memory.
  * @param   pvNew               The new value.
- * @param   cbNew               Its size, which has to be the size of the item.
+ * @param   cbNew               Its size, which has to be the size of the item unless the item
+ *                              is a piece of memory.
  */
 int tstPdmStatePatchItem(void *pvState, size_t cbState, const char *pszUnit, uint32_t uInstance, uint32_t idxItem,
-                         const void *pvNew, size_t cbNew)
+                         size_t offItem, const void *pvNew, size_t cbNew)
 {
     uint8_t * const pb  = (uint8_t *)pvState;
     size_t          off = 0;
@@ -3345,9 +3348,11 @@ int tstPdmStatePatchItem(void *pvState, size_t cbState, const char *pszUnit, uin
             AssertReturn(cbItem <= offEnd - off, VERR_INTERNAL_ERROR_4);
             if (i == idxItem)
             {
-                if (cbItem != cbNew)
+                if (  bKind == TSTPDM_SSM_ITEM_MEM
+                    ? offItem > cbItem || cbNew > cbItem - offItem
+                    : offItem != 0 || cbNew != cbItem)
                     return VERR_MISMATCH;
-                memcpy(&pb[off], pvNew, cbNew);
+                memcpy(&pb[off + offItem], pvNew, cbNew);
                 return VINF_SUCCESS;
             }
             off += cbItem;
