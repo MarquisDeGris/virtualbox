@@ -3840,8 +3840,7 @@ static void ich9pcibridgeR3SlotUpdate(PPDMDEVINS pDevIns, uint16_t fEvents)
     /*
      * The link.
      */
-    bool const fLinkUp =    pSlot->fPresent
-                         && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL) & VBOX_PCI_EXP_SLTCTL_PWRC)
+    bool const fLinkUp =    !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL) & VBOX_PCI_EXP_SLTCTL_PWRC)
                          && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKCTL) & VBOX_PCI_EXP_LNKCTL_DISABLE);
     uint16_t const uLnkSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA);
     if (fLinkUp != RT_BOOL(uLnkSta & VBOX_PCI_EXP_LNKSTA_DL_ACT))
