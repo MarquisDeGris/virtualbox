@@ -7,20 +7,23 @@ Updated: 2026-11-12
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `949a5c03` (22 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `fb6dca3a` (25 commits; the `fixup!` commit gets squashed when the merge request is opened) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | not opened yet |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
-WP2 (hardening), WP3 (removal of the device on the host), the first part of
-WP4 (saved state is refused), WP5 (hot-plug slot in the root port, ACPI) and
-three parts of WP6 are done: the guest is asked before a device is taken out
-of the slot, a device can be put into the empty slot while the VM runs, and
-the VM can start with an empty slot. The testcase runs clean with
-AddressSanitizer, LeakSanitizer and UndefinedBehaviorSanitizer, including
-the fuzz tests (T2). Next: saved state with an empty slot (WP6, WP4).
+WP2 (hardening), WP3 (removal of the device on the host), WP4 (saved state:
+refused while the device is in the VM, possible while the hot-plug slot is
+empty), WP5 (hot-plug slot in the root port, ACPI) and four parts of WP6 are
+done: the guest is asked before a device is taken out of the slot, a device
+can be put into the empty slot while the VM runs, the VM can start with an
+empty slot, and the state of the VM can be saved and loaded while the slot
+is empty. The testcase runs clean with AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer, including the fuzz tests (T2). Next: the
+interface for the management and the random test with devices coming and
+going (rest of WP6).
 
 ## Done
 
@@ -210,14 +213,53 @@ the fuzz tests (T2). Next: saved state with an empty slot (WP6, WP4).
     device in later if it matches.
   - Needs the hot-plug slot; all functions of a device are there or none;
     a device which is there at the start is what counts.
-  - Not yet: saved state with an empty slot.
+- A message of the PCI bus (commit `48f771d9`): a saved state which has a
+  device with another vendor ID where the VM has one is refused with a
+  message again. The message was given the IDs where its format takes the
+  config spaces, so it could not be put together and loading did not get
+  as far as refusing. Found by the tests of the fourth part of WP6.
+- Loading a saved state leaves MMIO2 pages alone which are zero already
+  (commit `2ef64145`, in PGM). The memory which keeps the place of the
+  BARs of a device which is not there stays without host memory behind it
+  when a state is loaded. The device testcase does not reach PGM, so this
+  has no test of its own. Only a baseline build compiles it: run 180, not
+  finished when this was written.
+- WP6, fourth part, which is the second part of WP4 (commit `fb6dca3a`):
+  the state of the VM can be saved and the VM can be teleported while the
+  hot-plug slot is empty.
+  - Refused while the device is in the slot, as before. With the slot
+    empty, what an EMT has left to do about the device is done first and
+    what the config space has of the device is cleared, so the PCI bus
+    saves the same whether the VM was started with the device or without.
+  - The saved state unit of the device has the layout the VM is built
+    from. A state is only loaded into a VM which is built from the same.
+  - If the VM which loads a state has the device, the device is taken out
+    of the slot before anything is loaded and put back afterwards; the
+    guest sees a device being plugged in. The reason is the memory: PGM
+    reads all MMIO2 pages when it saves a state and writes to them when
+    it loads one, and the BARs mapped into the guest are such pages. That
+    has to be the ordinary memory keeping their place, never the memory
+    of a device.
+  - A device is put into the slot only while the VM is running or
+    suspended, so not while a state is being saved or loaded.
+  - One critical section for everything which is done about the slot
+    being empty. This also closes two gaps of the second part for VMs
+    with several virtual CPUs (the EMT part of a removal running next to
+    a device being put in, or twice at the same time).
+  - If ordinary memory cannot be put into the place of device memory when
+    a device is let go of, no state is saved or loaded until the next
+    device was put in and taken out.
+  - Limit: a live save (teleportation, snapshot of a running VM) has PGM
+    scan the memory keeping the place of the BARs in every pass, which
+    takes time and bookkeeping memory in proportion to the size of the
+    BARs.
 - Gap list G1 to G8 and the plan in `PLAN.md`.
 
 ## Test evidence
 
 Each new test was first run against the device without the fix it belongs to.
 
-| Test | Before the fix | With fixes (run 131) |
+| Test | Before the fix | With fixes (run 181) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -265,6 +307,8 @@ Each new test was first run against the device without the fix it belongs to.
 | Hot-plug slot: the host wants the device back | new feature; deliberate defects are found (runs 107, 108, 109, 115) | pass |
 | Hot-plug slot: a device is put into the slot | new feature; deliberate defects are found (runs 120 to 126, 130) | pass |
 | Hot-plug slot: the VM starts without the device | new feature; deliberate defects are found (runs 133, 134, 136 to 139, 141, 142) | pass |
+| Hot-plug slot: saved state with the slot being empty | new feature; deliberate defects are found (runs 167 to 169, 171, 172) | pass |
+| Hot-plug slot: saved states which are refused | new feature; deliberate defects are found (runs 166 to 168, 170 to 179) | pass |
 | ACPI table: hardware ID of the root bridge and `_OSC`, executed with the ACPICA tools | without the change: ID and `_OSC` as before (first half of the check) | pass |
 
 ## Test harness (WP1)
@@ -278,23 +322,28 @@ Linux only:
 - `tstDevPciVfioPdm.cpp`: a focused mock of the PDM device helpers these
   files use: CFGM tree, I/O port / MMIO / MMIO2 registries with map state and
   a guest access dispatcher (ECAM for config space), PCI bus registration,
-  interrupt log, PDM threads on IPRT threads, VM reset. Unimplemented helpers
-  trap;
+  interrupt log, PDM threads on IPRT threads, VM reset, suspend and resume,
+  the VM state. Saved states are saved and loaded for real, the way SSM
+  does it: preparation, the data of each unit as a stream of typed items,
+  completion, with a unit standing in for PGM which reads every MMIO2 page
+  when saving and writes to every one when loading. A test can change an
+  item of a state or take a unit out. Unimplemented helpers trap;
 - `tstDevPciVfioKrnl.cpp`: a fake VFIO/IOMMUFD kernel in the test process,
   reached through linker `--wrap` of `open`, `close`, `ioctl`, `pread`,
   `pwrite`, `mmap`. Regions are backed by a memfd, interrupts by real eventfds, so
   the device's own poller thread and mappings run unmodified. Tracks open
-  descriptors and DMA mappings for leak checks, can fail one ioctl on demand
-  and can make a device "gone";
+  descriptors and DMA mappings for leak checks, can fail one ioctl on demand,
+  can make a device "gone", and can fail or announce the mapping which puts
+  ordinary memory into the place of device memory;
 - `tstDevPciVfio.cpp`: the tests.
 
-Still to add to the harness: the root port (`ich9pcibridge`) in front of the
-device, saved-state stream.
+The root port (`ich9pcibridge`) in front of the device is part of the
+harness since WP5, saved states since the fourth part of WP6.
 
 ## Next
 
-1. WP6, rest: saved state with an empty slot (second part of WP4);
-   interface for the management; random test with devices coming and going.
+1. WP6, rest: interface for the management; random test with devices
+   coming and going.
 2. WP7: management interface, which also sets the two settings of WP5 and
    stores the layout.
 3. T4: a guest operating system using the slot, in CI.
@@ -343,6 +392,13 @@ device, saved-state stream.
 | 2026-11-12 | A VM which starts without the device takes what it is built from out of its configuration, in the form a VM started with the device reports | The exact view VFIO has of the device, not one derived from elsewhere; a device which does not match is refused when it is put in |
 | 2026-11-12 | A device which is there when the VM starts is what counts, a configured layout is ignored then | The layout in the configuration may be out of date; the management stores a fresh one |
 | 2026-11-12 | Starting without the device needs the hot-plug slot, and all functions of the device are there or none | Without the slot the guest could not be told when the device arrives; a slot holds one device |
+| 2026-11-12 | The state of the VM is saved only while the hot-plug slot is empty; a device which is there is taken out of the slot before a state is loaded and put back afterwards | PGM reads all MMIO2 pages when saving and writes to them when loading, and the BARs mapped into the guest are such pages; this must never be the memory of a device |
+| 2026-11-12 | Before a state is saved or loaded the config space of the functions of the empty slot has nothing of a device, the vendor ID reads 0xffff | The PCI bus saves the config space and refuses a state with another vendor ID; a VM started with the device and one started without it have to look the same |
+| 2026-11-12 | The saved state unit of the device holds the layout of each function and nothing else; a state with another layout is refused | The VM is built around the layout; the PCI bus and PGM notice only some of the differences |
+| 2026-11-12 | A device is put into the slot only in the VM states running and suspended | The VM state changes before the saved state callbacks run, which keeps the slot empty for as long as a state is saved or loaded |
+| 2026-11-12 | One critical section serializes putting a device in, taking functions out of service, the EMT part of a removal and the saved state callbacks | Several EMTs and the watcher thread can be at these at the same time |
+| 2026-11-12 | PGM leaves MMIO2 pages alone which are zero when a state is loaded | Writing zeros to the memory keeping the place of the BARs makes the host back it, which can be many gigabytes nobody needs |
+| 2026-11-12 | The mock saves and loads states as a stream of typed items, with a unit standing in for PGM which writes to every MMIO2 page | A get which does not match its put shows, and so does a load which reaches device memory |
 
 ## Test tiers (see PLAN.md section 6)
 
@@ -432,5 +488,13 @@ device, saved-state stream.
 | 130 | `scratch/mutant-sa8b` | tests | failed as intended | the eighth defect, caught now |
 | 131, 132 | code branch @ `949a5c03` (as `scratch/slotempty`) | tests, sanitize | passed | third part of WP6, 44 tests, two fuzz tests, ACPI table check |
 | 133 to 142 | `scratch/mutant-se1` to `scratch/mutant-se8`, `-se3b`, `-se8b` | tests | failed as intended | eight deliberate defects in starting with an empty slot, each one caught (runs 135 and 140 did not build, repeated as 141 and 142) |
+| 143, 144 | `scratch/slotstate` | tests, sanitize | passed | fourth part of WP6, 46 tests |
+| 145 to 147 | `scratch/slotstate` | tests, sanitize | passed | more cases: device memory which stays mapped, a state without the unit of the device |
+| 148 to 160 | `scratch/mutant-st1` to `scratch/mutant-st13` | tests | failed as intended, 154 passed | thirteen deliberate defects in the saved state support. Twelve caught, two of these (149, 153) by a crash in the message of the PCI bus about another vendor ID, which is a defect of its own and got fixed. The seventh (154) changed nothing a guest or a state could tell and was replaced |
+| 161, 162 | `scratch/slotstate` | tests, sanitize | passed | a device is let go of under the critical section of the slot, with a test |
+| 163 | `scratch/mutant-st14` | tests | failed as intended | a fourteenth defect (a device is let go of without the critical section), caught |
+| 164, 165 | `scratch/slotstate` | tests, sanitize | passed | with the message of the PCI bus fixed and a state with another vendor ID as a test; the tree of the code branch @ `fb6dca3a` |
+| 166 to 179 | `scratch/mutant-su1` to `scratch/mutant-su14` | tests | failed as intended | all fourteen deliberate defects on the final tree, each one caught by a failing test, none by a crash |
+| 181, 182 | code branch @ `fb6dca3a` | tests, sanitize | passed | 46 tests, two fuzz tests, ACPI table check |
 
 Run numbers are those GitHub shows for the `build` workflow.

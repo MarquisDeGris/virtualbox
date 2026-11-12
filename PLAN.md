@@ -150,6 +150,9 @@ and leaves the tree buildable. Order is by dependency and risk.
 - Acceptance: save with device attached fails with a specific error; save
   with empty slot and restore round-trips.
 
+Done, see `STATUS.md`: the refusal with WP2, saving with an empty slot as
+the fourth part of WP6.
+
 ### WP5 PCIe native hot-plug in the root port (G2, guest side)
 
 Done, see `STATUS.md`. As built:
@@ -209,9 +212,17 @@ Design:
 - Link callback of the port: link down means the guest has no use for the
   device (bus master, decoding and interrupts off, device reset); link up
   after that means the device is in the state after a reset.
-- Saved state (second part of WP4): saving is allowed while the slot is
-  empty; a state can only be loaded into a VM with the same layout; if a
-  device is in the slot when the state was loaded the guest sees it arrive.
+- Saved state (second part of WP4), as built: saving and teleporting are
+  allowed while the slot is empty and refused otherwise. No device is put
+  in while a state is saved or loaded: that needs the VM to be running or
+  suspended. The unit of the device holds the layout of each function, and
+  a state is only loaded into a VM with the same layout. A device which is
+  in the slot of the VM which loads a state is taken out before anything
+  is loaded and put back afterwards, which the guest sees as a device
+  being plugged in. The background is the memory: PGM reads every MMIO2
+  page when saving and writes to every one when loading, the BARs mapped
+  into the guest are MMIO2 pages, and with the device out these are
+  ordinary memory.
 - Management reaches attach and detach through a PDM interface of the
   device (used by WP7).
 
@@ -226,6 +237,8 @@ Steps, each with tests in the model and a green CI run:
    empty slot; the host wanting the device back asks the guest first.
 4. PDM interface for the management; fuzz test with devices coming and
    going.
+
+Steps 1 to 3 are done, see `STATUS.md`.
 
 - Acceptance: attach/detach loops in the model without leaks; mismatching
   device is refused; guest sees removal and re-arrival in simulation.
@@ -288,6 +301,12 @@ minimal description, following upstream's `SECURITY.md`.
   VirtualBox kernel driver based engine would need support in the VMM memory
   manager; out of scope for version 1, noted for upstream.
 - Nested virtualisation on CI runners may be too limited for T4.
+- Saved states with an empty slot depend on what PGM does with MMIO2
+  pages. A live save scans the memory keeping the place of the BARs in
+  every pass; with BARs of many gigabytes this takes time and bookkeeping
+  memory. Loading relies on the PGM change of this branch for not having
+  the host back that memory; without it the memory is backed while a
+  state is loaded and given back when that is done.
 - Thunderbolt/USB4 authorisation and host-side PCI resource allocation are
   host kernel matters and stay outside this work; they are prerequisites
   listed in `HWTEST.md`.
