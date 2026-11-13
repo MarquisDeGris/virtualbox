@@ -26,9 +26,9 @@ the VM by the host (parts D and H), not put in.
 - The user who runs the VM may open `/dev/iommu` and the `vfio` device
   nodes, and may lock all of the guest memory (`ulimit -l`, at least the RAM
   of the VM).
-- VirtualBox built from the branch `pci-passthrough-hotplug`, with KVM as
-  execution engine: `VBoxManage modifyvm <vm> --vm-execution-engine
-  native-api`.
+- VirtualBox built from the branch of the merge request,
+  `pci-passthrough-hotplug-v1`, with KVM as execution engine:
+  `VBoxManage modifyvm <vm> --vm-execution-engine native-api`.
 - A VM with the ICH9 chipset and EFI. Guests to try: a current Linux, and
   Windows 10 or 11.
 
