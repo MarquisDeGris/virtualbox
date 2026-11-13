@@ -6837,6 +6837,43 @@ static void tstSlotFuzz(void)
 }
 
 
+/**
+ * The order of PCI addresses, which the configuration of a VM is built in for the
+ * functions of the devices of the host: the domain counts first, and of two
+ * addresses only one is before the other.
+ */
+static void tstHostAddressOrder(void)
+{
+    RTTestISub("Order of PCI addresses");
+
+    static const struct
+    {
+        uint16_t u16Domain;
+        int      iBus;
+        int      iDevice;
+        int      iFn;
+    } s_aAddrs[] =
+    {   /* In ascending order. */
+        { 0x0000, 0x00, 0x1f, 7 },
+        { 0x0000, 0x05, 0x00, 0 },
+        { 0x0000, 0x05, 0x00, 1 },
+        { 0x0000, 0x05, 0x01, 0 },
+        { 0x0000, 0x06, 0x00, 0 },
+        { 0x0001, 0x00, 0x00, 0 },
+        { 0x0001, 0x03, 0x00, 0 },
+        { 0x0002, 0x00, 0x02, 0 },
+    };
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_aAddrs); i++)
+        for (uint32_t j = 0; j < RT_ELEMENTS(s_aAddrs); j++)
+        {
+            PCIBusAddress const First(s_aAddrs[i].u16Domain, s_aAddrs[i].iBus, s_aAddrs[i].iDevice, s_aAddrs[i].iFn);
+            PCIBusAddress const Second(s_aAddrs[j].u16Domain, s_aAddrs[j].iBus, s_aAddrs[j].iDevice, s_aAddrs[j].iFn);
+            if ((First < Second) != (i < j))
+                RTTestIFailed("address %u is %s address %u", i, First < Second ? "before" : "not before", j);
+        }
+}
+
+
 int main()
 {
     RTTEST hTest;
@@ -6871,6 +6908,7 @@ int main()
     tstInterceptMmio();
     tstUnsuitableDevices();
     tstHostAddress();
+    tstHostAddressOrder();
     tstCmdRegOrder();
     tstResetFallback();
     tstTrappedAccessMappingGone();
