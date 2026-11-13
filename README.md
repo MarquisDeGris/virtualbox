@@ -9,7 +9,7 @@ work on the VFIO based PCIe passthrough device (`pci-vfio`):
 
 | Branch | Content |
 |--------|---------|
-| `meta` | this page, the [plan](PLAN.md), the [status](STATUS.md), CI definitions |
+| `meta` | this page, the [plan](PLAN.md), the [status](STATUS.md), the [hardware test](HWTEST.md), CI definitions |
 | `main` | unmodified mirror of upstream `main` |
 | `pci-passthrough-hotplug` | the code, based on upstream `main` |
 

@@ -37,6 +37,24 @@ full build of an earlier state). What was written after that is on
 - The interfaces of the passthrough device are found at LUN 0 of the device
   instance, which is where Main looks for the interfaces of a device
   (`PDMR3QueryDeviceLun`); with a test.
+- WP7, the management, as a first complete draft:
+  - Hot-plug is switched on for a VM with the extra data item
+    `VBoxInternal2/HostPCIHotPlug`. Main then gives the root port in front
+    of each PCI device of the host the hot-plug capable slot and has the
+    ACPI tables grant native hot-plug. The device has to be attached as
+    device 0 of guest bus 1 or 2.
+  - After the VM was created Main asks each passthrough device for its
+    layout and stores it as extra data
+    (`VBoxInternal2/HostPCILayout/<host address>`); it goes into the
+    configuration at the next start, so the VM starts without the device.
+  - `IConsole::plugHostPCIDevice`, `unplugHostPCIDevice` and
+    `getHostPCIDeviceState`; `VBoxManage controlvm <vm> plugpci` and
+    `unplugpci`, the state in `VBoxManage showvminfo`; man pages.
+  - Main cannot be run in the test without hardware. What it does is
+    part of the hardware test.
+
+[HWTEST.md](HWTEST.md) has the procedure for the hardware test as a
+draft.
 
 Nothing of it goes onto the code branch before it was built and tested.
 
