@@ -424,6 +424,14 @@ private:
                                    ComPtr<IUSBDevice> &aDevice);
     HRESULT findUSBDeviceById(const com::Guid &aId,
                               ComPtr<IUSBDevice> &aDevice);
+    HRESULT plugHostPCIDevice(ULONG aHostAddress);
+    HRESULT unplugHostPCIDevice(ULONG aHostAddress,
+                                ULONG aTimeout,
+                                BOOL aForce);
+    HRESULT getHostPCIDeviceState(ULONG aHostAddress,
+                                  BOOL *aHotPluggable,
+                                  BOOL *aPresent,
+                                  BOOL *aInUse);
     HRESULT createSharedFolder(const com::Utf8Str &aName,
                                const com::Utf8Str &aHostPath,
                                BOOL aWritable,
@@ -856,6 +864,8 @@ private:
                                                      bool fForce);
 
     HRESULT i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *BusMgr, PCFGMNODE pDevices);
+    HRESULT i_hostPciGetPort(ULONG aHostAddress, PCVMMR3VTABLE pVMM, PUVM pUVM, PPDMIPCIPASSTHROUGHPORT *ppPort);
+    void    i_hostPciStoreLayouts(PUVM pUVM, PCVMMR3VTABLE pVMM);
     struct LEDSET;
     typedef struct LEDSET *PLEDSET;
     PPDMLED volatile *i_getLedSet(uint32_t iLedSet);
@@ -1115,6 +1125,23 @@ private:
     bool mfTurnResetIntoPowerOff : 1;
     /** true if the VM power off was caused by reset. */
     bool mfPowerOffCausedByReset : 1;
+    /** Shadow of the VBoxInternal2/HostPCIHotPlug extra data setting: the PCI devices of
+     * the host go into hot-plug capable slots.  This is initialized by
+     * Console::i_configConstructorX86(). */
+    bool mfHostPciHotPlug : 1;
+
+    /** A PCI device of the host which is passed through to the VM. */
+    struct HostPciDevice
+    {
+        /** The instance of the pci-vfio device which passes it through. */
+        uint32_t                iInstance;
+        /** The addresses of its functions on the host (PCIBusAddress::asLong), in the
+         * order in which they are the functions of the pci-vfio instance. */
+        std::vector<uint32_t>   vecFunctions;
+    };
+    /** The PCI devices of the host which are passed through to the VM.  This is set up
+     * by Console::i_attachRawPCIDevices(). */
+    std::vector<HostPciDevice>  mHostPciDevices;
 
     /** Pointer to the VMM -> User (that's us) callbacks. */
     struct MYVMM2USERMETHODS : public VMM2USERMETHODS

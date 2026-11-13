@@ -257,6 +257,8 @@ int Console::SetBiosDiskInfo(ComPtr<IMachine> pMachine, PCFGMNODE pCfg, PCFGMNOD
 
 HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *pBusMgr, PCFGMNODE pDevices)
 {
+    mHostPciDevices.clear();
+
     SafeIfaceArray<IPCIDeviceAttachment> assignments;
     ComPtr<IMachine> aMachine = i_machine();
 
@@ -266,8 +268,6 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
         return hrc;
 
 #ifdef RT_OS_LINUX
-    RT_NOREF(pUVM, pVMM);
-
     /* Now actually add devices */
     PCFGMNODE pPCIDevs = NULL;
     PCFGMNODE pInst, pCfg;
@@ -324,6 +324,43 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
             if (hrc != S_OK)
                 return hrc;
 
+            HostPciDevice HostDev;
+            HostDev.iInstance = iDev - 1;
+            mHostPciDevices.push_back(HostDev);
+
+            if (mfHostPciHotPlug)
+            {
+                /*
+                 * The device goes into the hot-plug capable slot of the root port in front
+                 * of it.  That takes a root port on the first bus which was created for this
+                 * device, see BusAssignmentManager::assignPCIDeviceImpl(), and the device has
+                 * to be where a slot has its device.
+                 */
+                PCFGMNODE pBridgeCfg = NULL;
+                if (   (guestAddress.miBus == 1 || guestAddress.miBus == 2)
+                    && guestAddress.miDevice == 0)
+                {
+                    char szBridge[16];
+                    RTStrPrintf(szBridge, sizeof(szBridge), "%d", guestAddress.miBus - 1);
+                    pBridgeCfg = pVMM->pfnCFGMR3GetChild(pDevices, "ich9pcibridge");
+                    if (pBridgeCfg)
+                        pBridgeCfg = pVMM->pfnCFGMR3GetChild(pBridgeCfg, szBridge);
+                    if (pBridgeCfg)
+                        pBridgeCfg = pVMM->pfnCFGMR3GetChild(pBridgeCfg, "Config");
+                }
+                if (   !pBridgeCfg
+                    || pVMM->pfnCFGMR3Exists(pBridgeCfg, "HotPlug"))
+                {
+                    pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                          N_("With hot-plug for PCI devices of the host, each of them has to be device 0 on "
+                                             "guest PCI bus 1 or 2 and the only device on that bus. This is not so for the "
+                                             "host device %04x:%02x:%02x"),
+                                          hostAddress.mu16Domain, hostAddress.miBus, hostAddress.miDevice);
+                    return E_INVALIDARG;
+                }
+                InsertConfigInteger(pBridgeCfg, "HotPlug", 1);
+            }
+
             hostPciAddrCur = hostAddress;
             idxFn = 0; /* Start the function from the beginning again. */
         }
@@ -335,6 +372,54 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
         PCFGMNODE pCfgFun = NULL;
         InsertConfigNodeF(pCfg, &pCfgFun, "Fun%u", idxFn);
         InsertConfigString(pCfgFun, "HostAddress", szHostAddr);
+        mHostPciDevices.back().vecFunctions.push_back(hostAddress.asLong());
+
+        /*
+         * What the VM is built from for the function if the device isn't there when the VM
+         * starts: what the device has told when the VM was started with it, see
+         * Console::i_hostPciStoreLayouts().  The values go in as they were told.
+         */
+        if (mfHostPciHotPlug)
+        {
+            Bstr bstrLayout;
+            hrc = aMachine->GetExtraData(BstrFmt("VBoxInternal2/HostPCILayout/%s", szHostAddr).raw(),
+                                         bstrLayout.asOutParam());                              H();
+            Utf8Str const strLayout(bstrLayout);
+            if (strLayout.isNotEmpty())
+            {
+                PCFGMNODE pCfgLayout = NULL;
+                InsertConfigNode(pCfgFun, "Layout", &pCfgLayout);
+                const char *psz = strLayout.c_str();
+                while (*psz)
+                {
+                    const char * const pszEq  = strchr(psz, '=');
+                    const char        *pszEnd = strchr(psz, ';');
+                    if (!pszEnd)
+                        pszEnd = strchr(psz, '\0');
+                    char     szName[64];
+                    char    *pszNext = NULL;
+                    uint64_t u64     = 0;
+                    int      vrc     = VERR_PARSE_ERROR;
+                    if (   pszEq
+                        && pszEq > psz
+                        && pszEq < pszEnd
+                        && (size_t)(pszEq - psz) < sizeof(szName))
+                        vrc = RTStrToUInt64Ex(pszEq + 1, &pszNext, 10, &u64);
+                    if (   (vrc != VINF_SUCCESS && vrc != VWRN_TRAILING_CHARS)
+                        || pszNext != pszEnd)
+                    {
+                        pVMM->pfnVMR3SetError(pUVM, VERR_PARSE_ERROR, RT_SRC_POS,
+                                              N_("The layout stored for the PCI device %s of the host is damaged. Remove the "
+                                                 "extra data item VBoxInternal2/HostPCILayout/%s and start the virtual machine "
+                                                 "with the device"), szHostAddr, szHostAddr);
+                        return E_INVALIDARG;
+                    }
+                    RTStrCopyEx(szName, sizeof(szName), psz, (size_t)(pszEq - psz));
+                    InsertConfigInteger(pCfgLayout, szName, u64);
+                    psz = *pszEnd ? pszEnd + 1 : pszEnd;
+                }
+            }
+        }
         idxFn++;
     }
 
@@ -1204,7 +1289,8 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
             InsertConfigInteger(pCfg,  "McfgBase",   uMcfgBase);
             InsertConfigInteger(pCfg,  "McfgLength", cbMcfgLength);
 
-            /* Add PCI passthrough devices */
+            /* Add PCI passthrough devices, in hot-plug capable slots if that is asked for. */
+            mfHostPciHotPlug = GetExtraDataBoth(virtualBox, pMachine, "VBoxInternal2/HostPCIHotPlug", &strTmp)->equals("1");
             hrc = i_attachRawPCIDevices(pUVM, pVMM, pBusMgr, pDevices);                           H();
 
             if (enmIommuType == IommuType_AMD)
@@ -1922,6 +2008,10 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 /* 64-bit prefetch window root resource: Only for ICH9 and if PAE or Long Mode is enabled (@bugref{5454}). */
                 if (fIsGuest64Bit || fEnablePAE)
                     InsertConfigInteger(pCfg,  "PciPref64Enabled", 1);
+                /* The guest takes care of PCI express hot-plug itself if PCI devices of the host are in
+                   hot-plug capable slots. */
+                if (mfHostPciHotPlug && !mHostPciDevices.empty())
+                    InsertConfigInteger(pCfg,  "PciExpressNativeHotPlug", 1);
             }
             InsertConfigInteger(pCfg,  "HostBusPciAddress", uHbcPCIAddress);
             InsertConfigInteger(pCfg,  "ShowCpu", fShowCpu);

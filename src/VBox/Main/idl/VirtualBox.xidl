@@ -9774,7 +9774,9 @@
         <see><link to="IHostPCIDevicePlugEvent"/></see>
 
         <result name="VBOX_E_INVALID_VM_STATE">
-          Virtual machine state is not stopped (PCI hotplug not yet implemented).
+          Virtual machine state is not stopped. A device which is attached can be
+          put into the running virtual machine and taken out of it, see
+          <link to="IConsole::plugHostPCIDevice"/>.
         </result>
         <result name="VBOX_E_PDM_ERROR">
           Virtual machine does not have a PCI controller allowing attachment of physical devices.
@@ -9805,7 +9807,8 @@
         <see><link to="IHostPCIDevicePlugEvent"/></see>
 
         <result name="VBOX_E_INVALID_VM_STATE">
-          Virtual machine state is not stopped (PCI hotplug not yet implemented).
+          Virtual machine state is not stopped. For taking a device out of the
+          running virtual machine see <link to="IConsole::unplugHostPCIDevice"/>.
         </result>
         <result name="VBOX_E_OBJECT_NOT_FOUND">
           This host device is not attached to this machine.
@@ -11653,10 +11656,10 @@
 
   <interface
     name="IConsole" extends="$unknown"
-    uuid="019ebb0e-aec6-71a3-9bb7-29548ef5b10c"
+    uuid="6ae00d2c-d2ce-430b-a3fc-6274f9680a8d"
     wsmap="managed"
     rest="managed"
-    reservedMethods="8" reservedAttributes="8"
+    reservedMethods="5" reservedAttributes="8"
     >
     <desc>
       The IConsole interface represents an interface to control virtual
@@ -12083,6 +12086,122 @@
       </param>
       <param name="device" type="IUSBDevice" dir="return">
         <desc>Found USB device object.</desc>
+      </param>
+    </method>
+
+    <method name="plugHostPCIDevice">
+      <desc>
+        Puts a PCI device of the host into the running virtual machine. The
+        device has to be one of those attached to the machine with
+        <link to="IMachine::attachHostPCIDevice"/>, and it has to be in a
+        hot-plug capable slot of the virtual machine which is empty: the
+        device was not there when the virtual machine was started, or it was
+        taken out since. The guest is told that a device was plugged in.
+
+        The device has to be of the same kind as the one the virtual machine
+        was started with or was configured for.
+
+        <result name="VBOX_E_INVALID_VM_STATE">
+          Virtual machine is neither running nor paused.
+        </result>
+        <result name="VBOX_E_OBJECT_NOT_FOUND">
+          No PCI device of the host with this address is attached to the machine.
+        </result>
+        <result name="VBOX_E_NOT_SUPPORTED">
+          The device is not in a hot-plug capable slot.
+        </result>
+        <result name="VBOX_E_OBJECT_IN_USE">
+          There is a device in the slot.
+        </result>
+        <result name="VBOX_E_PDM_ERROR">
+          The device could not be put into the slot: it is not there, cannot
+          be used, or is of another kind than the one the virtual machine is
+          built for. The release log has the details.
+        </result>
+      </desc>
+      <param name="hostAddress" type="unsigned long" dir="in">
+        <desc>Address of the PCI device on the host, of any of its functions.</desc>
+      </param>
+    </method>
+
+    <method name="unplugHostPCIDevice">
+      <desc>
+        Takes a PCI device of the host out of the running virtual machine,
+        which requires the device to be in a hot-plug capable slot. If the
+        guest has the slot switched on, it is asked to let go of the device
+        the way the attention button of a slot does it, and gets time for
+        doing so. The device stays attached to the machine and can be put in
+        again with <link to="IConsole::plugHostPCIDevice"/>.
+
+        <result name="VBOX_E_INVALID_VM_STATE">
+          Virtual machine is neither running nor paused.
+        </result>
+        <result name="VBOX_E_OBJECT_NOT_FOUND">
+          No PCI device of the host with this address is attached to the machine.
+        </result>
+        <result name="VBOX_E_NOT_SUPPORTED">
+          The device is not in a hot-plug capable slot.
+        </result>
+        <result name="VBOX_E_TIMEOUT">
+          The guest did not let go of the device in time and @a force is
+          not set. The device is where it was. The guest was asked and can
+          still switch the slot off, which leaves the device in the slot.
+        </result>
+        <result name="VBOX_E_PDM_ERROR">
+          Taking the device out failed.
+        </result>
+      </desc>
+      <param name="hostAddress" type="unsigned long" dir="in">
+        <desc>Address of the PCI device on the host, of any of its functions.</desc>
+      </param>
+      <param name="timeout" type="unsigned long" dir="in">
+        <desc>
+          How long to wait for the guest to let go of the device, in
+          milliseconds. Guests take five seconds and more.
+        </desc>
+      </param>
+      <param name="force" type="boolean" dir="in">
+        <desc>
+          Whether the device is taken away from the guest if the guest did
+          not let go of it in time.
+        </desc>
+      </param>
+    </method>
+
+    <method name="getHostPCIDeviceState">
+      <desc>
+        Tells how things are with a PCI device of the host which is attached
+        to the running virtual machine.
+
+        <result name="VBOX_E_INVALID_VM_STATE">
+          Virtual machine is neither running nor paused.
+        </result>
+        <result name="VBOX_E_OBJECT_NOT_FOUND">
+          No PCI device of the host with this address is attached to the machine.
+        </result>
+        <result name="VBOX_E_PDM_ERROR">
+          Asking the device failed.
+        </result>
+      </desc>
+      <param name="hostAddress" type="unsigned long" dir="in">
+        <desc>Address of the PCI device on the host, of any of its functions.</desc>
+      </param>
+      <param name="hotPluggable" type="boolean" dir="out">
+        <desc>
+          Whether the device is in a hot-plug capable slot, which is what
+          <link to="IConsole::plugHostPCIDevice"/> and
+          <link to="IConsole::unplugHostPCIDevice"/> require.
+        </desc>
+      </param>
+      <param name="present" type="boolean" dir="out">
+        <desc>Whether the device is in the virtual machine right now.</desc>
+      </param>
+      <param name="inUse" type="boolean" dir="out">
+        <desc>
+          Whether the guest can reach the device: it is in the virtual
+          machine, and in a hot-plug capable slot the guest has the slot
+          switched on.
+        </desc>
       </param>
     </method>
 

@@ -584,7 +584,7 @@ static HRESULT setExtraData(ComPtr<IMachine> &rSessionMachine, const char *pszVa
 
 
 /** Parse PCI address in format 0000:01:02.03 and convert it to the numeric representation. */
-static uint32_t parsePci(const char *pszPciAddr)
+uint32_t parsePci(const char *pszPciAddr)
 {
     uint16_t u16Domain = UINT16_MAX;
     uint8_t aVals[3] = {0, 0, 0};

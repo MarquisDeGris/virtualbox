@@ -475,6 +475,7 @@ Console::Console()
     , mfVMHasUsbController(false)
     , mfTurnResetIntoPowerOff(false)
     , mfPowerOffCausedByReset(false)
+    , mfHostPciHotPlug(false)
     , mpVmm2UserMethods(NULL)
     , m_pVMMDev(NULL)
     , mAudioVRDE(NULL)
@@ -3292,6 +3293,245 @@ HRESULT Console::findUSBDeviceById(const com::Guid &aId, ComPtr<IUSBDevice> &aDe
     RT_NOREF(aId, aDevice);
     return E_NOTIMPL;
 #endif  /* !VBOX_WITH_USB */
+}
+
+/**
+ * Gets the interface for managing a PCI device of the host which is passed
+ * through to the VM.
+ *
+ * @returns COM status code, with error info.
+ * @param   aHostAddress    The address of the device on the host, of any of its functions.
+ * @param   pVMM            The VMM vtable.
+ * @param   pUVM            The user mode VM handle.
+ * @param   ppPort          Where to return the interface.
+ *
+ * @note    The caller holds the object lock and has made sure that the VM stays.
+ */
+HRESULT Console::i_hostPciGetPort(ULONG aHostAddress, PCVMMR3VTABLE pVMM, PUVM pUVM, PPDMIPCIPASSTHROUGHPORT *ppPort)
+{
+    *ppPort = NULL;
+    PCIBusAddress const Address(aHostAddress);
+
+    /* A device is all of its functions. */
+    for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
+        for (size_t iFun = 0; iFun < mHostPciDevices[iDev].vecFunctions.size(); iFun++)
+            if ((mHostPciDevices[iDev].vecFunctions[iFun] & ~(uint32_t)7) == (aHostAddress & ~(uint32_t)7))
+            {
+                PPDMIBASE pBase = NULL;
+                int vrc = pVMM->pfnPDMR3QueryDeviceLun(pUVM, "pci-vfio", mHostPciDevices[iDev].iInstance, 0 /*iLun*/, &pBase);
+                if (RT_SUCCESS(vrc))
+                {
+                    *ppPort = PDMIBASE_QUERY_INTERFACE(pBase, PDMIPCIPASSTHROUGHPORT);
+                    if (*ppPort)
+                        return S_OK;
+                    vrc = VERR_PDM_MISSING_INTERFACE;
+                }
+                return setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                    tr("The PCI device %04x:%02x:%02x of the host can't be reached in the virtual machine (%Rrc)"),
+                                    Address.mu16Domain, Address.miBus, Address.miDevice, vrc);
+            }
+
+    return setError(VBOX_E_OBJECT_NOT_FOUND,
+                    tr("No PCI device of the host with the address %04x:%02x:%02x.%d is attached to the virtual machine"),
+                    Address.mu16Domain, Address.miBus, Address.miDevice, Address.miFn);
+}
+
+/**
+ * @callback_method_impl{FNPDMPCIPASSTHROUGHLAYOUTVALUE,
+ *      Adds a value to the string the layout of a function is stored as.}
+ */
+static DECLCALLBACK(int) consoleHostPciLayoutValue(void *pvUser, const char *pszName, uint64_t u64Value)
+{
+    Utf8Str *pStrLayout = (Utf8Str *)pvUser;
+    return pStrLayout->appendPrintfNoThrow("%s%s=%RU64", pStrLayout->isEmpty() ? "" : ";", pszName, u64Value);
+}
+
+/**
+ * Takes note of what the VM is built from for the PCI devices of the host in
+ * hot-plug capable slots: the layout each function has for its device.  The VM
+ * can be started without the devices then, as Console::i_attachRawPCIDevices()
+ * puts the layouts into the configuration.
+ *
+ * Failing to do so is logged and nothing more: the VM runs, and the next start
+ * needs the devices to be there like this one did.
+ *
+ * @param   pUVM            The user mode VM handle.
+ * @param   pVMM            The VMM vtable.
+ *
+ * @note    Called while the VM is powered up, with the object lock not held.
+ */
+void Console::i_hostPciStoreLayouts(PUVM pUVM, PCVMMR3VTABLE pVMM)
+{
+    if (!mfHostPciHotPlug)
+        return;
+
+    for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
+    {
+        PPDMIBASE pBase = NULL;
+        int vrc = pVMM->pfnPDMR3QueryDeviceLun(pUVM, "pci-vfio", mHostPciDevices[iDev].iInstance, 0 /*iLun*/, &pBase);
+        PPDMIPCIPASSTHROUGHPORT pPort = RT_SUCCESS(vrc) ? PDMIBASE_QUERY_INTERFACE(pBase, PDMIPCIPASSTHROUGHPORT) : NULL;
+        if (!pPort)
+        {
+            LogRel(("Console: No interface for managing pci-vfio#%u (%Rrc), the layout of its device is not stored\n",
+                    mHostPciDevices[iDev].iInstance, vrc));
+            continue;
+        }
+
+        for (size_t iFun = 0; iFun < mHostPciDevices[iDev].vecFunctions.size(); iFun++)
+        {
+            PCIBusAddress const Address(mHostPciDevices[iDev].vecFunctions[iFun]);
+            Utf8Str             strLayout;
+            vrc = pPort->pfnQueryLayout(pPort, (uint32_t)iFun, consoleHostPciLayoutValue, &strLayout);
+            HRESULT hrc = E_FAIL;
+            if (RT_SUCCESS(vrc))
+            {
+                BstrFmt const bstrKey("VBoxInternal2/HostPCILayout/%04x:%02x:%02x.%d",
+                                      Address.mu16Domain, Address.miBus, Address.miDevice, Address.miFn);
+                Bstr          bstrOld;
+                hrc = mMachine->GetExtraData(bstrKey.raw(), bstrOld.asOutParam());
+                if (   SUCCEEDED(hrc)
+                    && Utf8Str(bstrOld) != strLayout)
+                    hrc = mMachine->SetExtraData(bstrKey.raw(), Bstr(strLayout).raw());
+            }
+            if (FAILED(hrc))
+                LogRel(("Console: The layout of the PCI device %04x:%02x:%02x.%d of the host could not be stored (%Rrc, %Rhrc)\n",
+                        Address.mu16Domain, Address.miBus, Address.miDevice, Address.miFn, vrc, hrc));
+        }
+    }
+}
+
+HRESULT Console::plugHostPCIDevice(ULONG aHostAddress)
+{
+    LogFlowThisFuncEnter();
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (   mMachineState != MachineState_Running
+        && mMachineState != MachineState_Paused)
+        return i_setInvalidMachineStateError();
+
+    /* get the VM handle. */
+    SafeVMPtr ptrVM(this);
+    HRESULT hrc = ptrVM.hrc();
+    if (SUCCEEDED(hrc))
+    {
+        PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+        hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
+        if (SUCCEEDED(hrc))
+        {
+            /* The device does this on an EMT and tells the guest; release the lock for that. */
+            alock.release();
+            int vrc = pPort->pfnAttach(pPort);
+            if (RT_SUCCESS(vrc))
+                hrc = S_OK;
+            else if (vrc == VERR_NOT_SUPPORTED)
+                hrc = setErrorBoth(VBOX_E_NOT_SUPPORTED, vrc,
+                                   tr("The PCI device of the host is not in a hot-plug capable slot of the virtual machine"));
+            else if (vrc == VERR_ALREADY_EXISTS)
+                hrc = setErrorBoth(VBOX_E_OBJECT_IN_USE, vrc,
+                                   tr("The PCI device of the host is in the virtual machine already"));
+            else if (vrc == VERR_VM_INVALID_VM_STATE)
+                hrc = setErrorBoth(VBOX_E_INVALID_VM_STATE, vrc,
+                                   tr("The virtual machine is neither running nor paused, or its state is being saved"));
+            else if (vrc == VERR_MISMATCH)
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host is of another kind than the one the virtual machine is built for. The release log has the details"));
+            else
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host could not be put into the virtual machine (%Rrc). The release log has the details"),
+                                   vrc);
+        }
+    }
+
+    LogFlowThisFunc(("hrc=%Rhrc\n", hrc));
+    LogFlowThisFuncLeave();
+    return hrc;
+}
+
+HRESULT Console::unplugHostPCIDevice(ULONG aHostAddress, ULONG aTimeout, BOOL aForce)
+{
+    LogFlowThisFuncEnter();
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (   mMachineState != MachineState_Running
+        && mMachineState != MachineState_Paused)
+        return i_setInvalidMachineStateError();
+
+    /* get the VM handle. */
+    SafeVMPtr ptrVM(this);
+    HRESULT hrc = ptrVM.hrc();
+    if (SUCCEEDED(hrc))
+    {
+        PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+        hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
+        if (SUCCEEDED(hrc))
+        {
+            /* This waits for the guest; release the lock for that. */
+            alock.release();
+            int vrc = pPort->pfnDetach(pPort, aTimeout, RT_BOOL(aForce));
+            if (RT_SUCCESS(vrc))
+                hrc = S_OK;
+            else if (vrc == VERR_NOT_SUPPORTED)
+                hrc = setErrorBoth(VBOX_E_NOT_SUPPORTED, vrc,
+                                   tr("The PCI device of the host is not in a hot-plug capable slot of the virtual machine"));
+            else if (vrc == VERR_TIMEOUT)
+                hrc = setErrorBoth(VBOX_E_TIMEOUT, vrc,
+                                   tr("The guest did not let go of the PCI device of the host in time. It was asked to and can still do so"));
+            else
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host could not be taken out of the virtual machine (%Rrc)"), vrc);
+        }
+    }
+
+    LogFlowThisFunc(("hrc=%Rhrc\n", hrc));
+    LogFlowThisFuncLeave();
+    return hrc;
+}
+
+HRESULT Console::getHostPCIDeviceState(ULONG aHostAddress, BOOL *aHotPluggable, BOOL *aPresent, BOOL *aInUse)
+{
+    LogFlowThisFuncEnter();
+
+    *aHotPluggable = FALSE;
+    *aPresent      = FALSE;
+    *aInUse        = FALSE;
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (   mMachineState != MachineState_Running
+        && mMachineState != MachineState_Paused)
+        return i_setInvalidMachineStateError();
+
+    /* get the VM handle. */
+    SafeVMPtr ptrVM(this);
+    HRESULT hrc = ptrVM.hrc();
+    if (SUCCEEDED(hrc))
+    {
+        PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+        hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
+        if (SUCCEEDED(hrc))
+        {
+            // no need to release lock, as there are no cross-thread callbacks
+            bool fHotPlug = false;
+            bool fPresent = false;
+            bool fInUse   = false;
+            int vrc = pPort->pfnQueryState(pPort, &fHotPlug, &fPresent, &fInUse);
+            if (RT_SUCCESS(vrc))
+            {
+                *aHotPluggable = fHotPlug;
+                *aPresent      = fPresent;
+                *aInUse        = fInUse;
+            }
+            else
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("Asking for the state of the PCI device of the host failed (%Rrc)"), vrc);
+        }
+    }
+
+    LogFlowThisFunc(("hrc=%Rhrc\n", hrc));
+    LogFlowThisFuncLeave();
+    return hrc;
 }
 
 HRESULT Console::createSharedFolder(const com::Utf8Str &aName, const com::Utf8Str &aHostPath, BOOL aWritable,
@@ -11503,6 +11743,12 @@ void Console::i_powerUpThreadTask(VMPowerUpTask *pTask)
 
                 /* Release the lock before a lengthy operation. */
                 alock.release();
+
+                /*
+                 * Take note of what the VM is built from for the PCI devices of the host in
+                 * hot-plug capable slots, for starting it without them the next time.
+                 */
+                pConsole->i_hostPciStoreLayouts(pConsole->mpUVM, pVMM);
 
 #ifdef VBOX_WITH_RECORDING
                 /*

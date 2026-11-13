@@ -2740,26 +2740,45 @@ it unless this changes. -->
     <refsect2 id="vboxmanage-modifyvm-pcipassthrough">
       <title>PCI Passthrough Settings</title>
       <para>
-        The following options enable you to configure the PCI passthrough
-        feature, which currently is not available in &product-name;. It is
-        planned to bring this functionality back in the future.
+        The following options enable you to configure PCI passthrough,
+        which gives a VM a PCI Express device of the host system. This
+        is experimental. It takes a Linux host system with an IOMMU and
+        the device being bound to the <literal>vfio-pci</literal>
+        driver there, and a VM which uses the ICH9 chipset, EFI and
+        the native execution engine.
+      </para>
+      <para>
+        A device can be put into the running VM and taken out of it,
+        see the <command>plugpci</command> and
+        <command>unplugpci</command> commands of
+        <command>VBoxManage controlvm</command>, if PCI hot-plug is
+        enabled for the VM. To do so, set the extra data item
+        <literal>VBoxInternal2/HostPCIHotPlug</literal> of the VM to
+        <literal>1</literal> with the <command>VBoxManage
+        setextradata</command> command, and attach each device at the
+        guest address <literal>0000:01:00.0</literal> or
+        <literal>0000:02:00.0</literal>. The VM has to be started with
+        the device once. After that it also starts without the
+        device, which can be put in later.
       </para>
       <remark role="help-copy-synopsis"/>
       <variablelist>
         <varlistentry>
           <term><option>--pci-attach=<replaceable>host-PCI-address</replaceable>[@<replaceable>guest-PCI-bus-address</replaceable>]</option></term>
           <listitem><para>
-              Attaches the specified PCI network controller on the host
-              to the guest VM. You can optionally specify the PCI bus on
-              the guest VM on which to attach the controller.
+              Attaches the specified PCI device of the host system to
+              the VM. Specify each function of a device which has
+              several. You can optionally specify the PCI address the
+              device gets in the VM; without that it gets the address
+              it has on the host system.
 <!-- See <xref linkend="pcipassthrough" />. -->
             </para></listitem>
         </varlistentry>
         <varlistentry>
           <term><option>--pci-detach=<replaceable>host-PCI-address</replaceable></option></term>
           <listitem><para>
-              Detaches the specified PCI network controller from the
-              attached PCI bus on the guest VM.
+              Detaches the specified PCI device of the host system from
+              the VM.
 <!-- See <xref linkend="pcipassthrough" />. -->
             </para></listitem>
         </varlistentry>

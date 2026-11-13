@@ -299,6 +299,28 @@
       </group>
     </cmdsynopsis>
 
+    <cmdsynopsis id="synopsis-vboxmanage-controlvm-plugpci">
+      <command>VBoxManage controlvm</command>
+      <group choice="req">
+        <arg choice="plain"><replaceable>uuid</replaceable></arg>
+        <arg choice="plain"><replaceable>vmname</replaceable></arg>
+      </group>
+      <arg choice="plain">plugpci</arg>
+      <arg choice="req"><replaceable>host-PCI-address</replaceable></arg>
+    </cmdsynopsis>
+
+    <cmdsynopsis id="synopsis-vboxmanage-controlvm-unplugpci">
+      <command>VBoxManage controlvm</command>
+      <group choice="req">
+        <arg choice="plain"><replaceable>uuid</replaceable></arg>
+        <arg choice="plain"><replaceable>vmname</replaceable></arg>
+      </group>
+      <arg choice="plain">unplugpci</arg>
+      <arg choice="req"><replaceable>host-PCI-address</replaceable></arg>
+      <arg>--timeout=<replaceable>msec</replaceable></arg>
+      <arg>--force</arg>
+    </cmdsynopsis>
+
     <cmdsynopsis id="synopsis-vboxmanage-controlvm-audioin">
       <command>VBoxManage controlvm</command>
       <group choice="req">
@@ -1139,6 +1161,71 @@
         command to obtain information about USB devices on the host
         system.
       </para>
+    </refsect2>
+    <refsect2 id="vboxmanage-controlvm-plugpci">
+      <title>Put a Host System PCI Device Into a Virtual Machine</title>
+      <remark role="help-copy-synopsis"/>
+      <para>
+        The <command>VBoxManage controlvm
+        <replaceable>vmname</replaceable> plugpci</command> command
+        puts a PCI device of the host system into the running VM. The
+        guest OS is told the way it is told about a device which gets
+        plugged into a hot-plug capable PCI Express slot.
+      </para>
+      <para>
+        The device has to be attached to the VM, see the
+        <option>--pci-attach</option> option of the
+        <command>VBoxManage modifyvm</command> command, and PCI
+        hot-plug has to be enabled for the VM as described there. The
+        device must not be in the VM: either it was not there when the
+        VM was started, or it was taken out since. It has to be of the
+        same kind as the device the VM was last started with.
+      </para>
+      <para>
+        Specify the device by the PCI address which any of its
+        functions has on the host system, for example
+        <literal>0000:03:00.0</literal>.
+      </para>
+    </refsect2>
+    <refsect2 id="vboxmanage-controlvm-unplugpci">
+      <title>Take a Host System PCI Device Out of a Virtual Machine</title>
+      <remark role="help-copy-synopsis"/>
+      <para>
+        The <command>VBoxManage controlvm
+        <replaceable>vmname</replaceable> unplugpci</command> command
+        takes a PCI device of the host system out of the running VM.
+        The device stays attached to the VM and can be put in again
+        with the <command>plugpci</command> command. This requires PCI
+        hot-plug to be enabled for the VM, see the
+        <option>--pci-attach</option> option of the
+        <command>VBoxManage modifyvm</command> command.
+      </para>
+      <para>
+        If the guest OS is using the device, it is asked to let go of
+        it the way the attention button of a hot-plug capable slot
+        does. Guest OSes take five seconds and more for doing so.
+      </para>
+      <para>
+        Specify the device by the PCI address which any of its
+        functions has on the host system.
+      </para>
+      <variablelist>
+        <varlistentry>
+          <term><option>--timeout=<replaceable>msec</replaceable></option></term>
+          <listitem><para>
+              Specifies how long to wait for the guest OS to let go of
+              the device, in milliseconds. The default is 15000.
+            </para></listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--force</option></term>
+          <listitem><para>
+              Takes the device away from the guest OS if it did not let
+              go of it in time. Without this option the command fails
+              then and the device stays in the VM.
+            </para></listitem>
+        </varlistentry>
+      </variablelist>
     </refsect2>
     <refsect2 id="vboxmanage-controlvm-audioin">
       <title>Enable or Disable Audio Capture From the Host System</title>
