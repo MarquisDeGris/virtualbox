@@ -10,7 +10,7 @@ Updated: 2026-11-13
 | Code branch | `pci-passthrough-hotplug` @ `c5cc9847` (28 commits, one of them a `fixup!`) |
 | Branch of the merge request | `pci-passthrough-hotplug-v1` @ `52582e7d`: the code branch with the `fixup!` commit folded into the commit it belongs to, 27 commits, the same tree (`5501632b`) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
-| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, a draft: WP0 to WP6. The management (WP7) is not in it, see below |
+| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, a draft: WP0 to WP6. The management (WP7) is not in it, and neither is what a review changed afterwards, see below |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -153,7 +153,12 @@ was looked at and changed:
   it allows for both orders now.
 
 `scratch/mgmt` is at `6e85def2`. The last attempt to start a run was on
-2026-11-13 at 21:40 UTC; the answer is still the one above.
+2026-11-13 at 23:45 UTC; the answer is still the one above.
+
+What the review found in the code of the merge request is listed in its
+description under "Known problems of this head", as the fixes are not in
+it. `scratch/red-evidence-17` has the tests of the review round on top of
+the code before it and is to fail once runs can be started.
 
 ## Done
 
