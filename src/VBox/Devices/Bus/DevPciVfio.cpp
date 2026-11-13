@@ -246,6 +246,9 @@
  *    VBoxManage modifyvm vmname --pci-attach 0000:0a:00.0@0000:01:00.0
  *    VBoxManage modifyvm vmname --pci-attach 0000:0a:00.1@0000:01:00.1
  *
+ * The device has to be the only one on that bus, the VM does not start otherwise. That makes two such devices the
+ * most a VM can have.
+ *
  * Then switch hot-plug on for the VM
  *    VBoxManage setextradata vmname "VBoxInternal2/HostPCIHotPlug" 1
  *

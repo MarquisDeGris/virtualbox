@@ -122,6 +122,7 @@
 #include <iprt/process.h>
 #include <iprt/string.h>
 #include <iprt/system.h>
+#include <iprt/time.h>
 #include <iprt/base64.h>
 #include <iprt/memsafer.h>
 
@@ -3452,36 +3453,57 @@ HRESULT Console::unplugHostPCIDevice(ULONG aHostAddress, ULONG aTimeout, BOOL aF
 {
     LogFlowThisFuncEnter();
 
-    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
-
-    if (   mMachineState != MachineState_Running
-        && mMachineState != MachineState_Paused)
-        return i_setInvalidMachineStateError();
-
-    /* get the VM handle. */
-    SafeVMPtr ptrVM(this);
-    HRESULT hrc = ptrVM.hrc();
-    if (SUCCEEDED(hrc))
+    /*
+     * The guest is waited for in pieces, and the VM is let go of in between:
+     * powering the VM off waits for everybody who holds on to it.
+     */
+    RTMSINTERVAL const cMsPiece = 250;
+    uint64_t const     msStart  = RTTimeMilliTS();
+    HRESULT            hrc      = S_OK;
+    for (;;)
     {
+        AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+        if (   mMachineState != MachineState_Running
+            && mMachineState != MachineState_Paused)
+        {
+            hrc = i_setInvalidMachineStateError();
+            break;
+        }
+
+        /* get the VM handle. */
+        SafeVMPtr ptrVM(this);
+        hrc = ptrVM.hrc();
+        if (FAILED(hrc))
+            break;
+
         PPDMIPCIPASSTHROUGHPORT pPort = NULL;
         hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
-        if (SUCCEEDED(hrc))
-        {
-            /* This waits for the guest; release the lock for that. */
-            alock.release();
-            int vrc = pPort->pfnDetach(pPort, aTimeout, RT_BOOL(aForce));
-            if (RT_SUCCESS(vrc))
-                hrc = S_OK;
-            else if (vrc == VERR_NOT_SUPPORTED)
-                hrc = setErrorBoth(VBOX_E_NOT_SUPPORTED, vrc,
-                                   tr("The PCI device of the host is not in a hot-plug capable slot of the virtual machine"));
-            else if (vrc == VERR_TIMEOUT)
-                hrc = setErrorBoth(VBOX_E_TIMEOUT, vrc,
-                                   tr("The guest did not let go of the PCI device of the host in time. It was asked to and can still do so"));
-            else
-                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
-                                   tr("The PCI device of the host could not be taken out of the virtual machine (%Rrc)"), vrc);
-        }
+        if (FAILED(hrc))
+            break;
+
+        /* This waits for the guest; release the lock for that. */
+        alock.release();
+        uint64_t const     cMsElapsed = RTTimeMilliTS() - msStart;
+        RTMSINTERVAL const cMsLeft    = cMsElapsed < aTimeout ? (RTMSINTERVAL)(aTimeout - cMsElapsed) : 0;
+        bool const         fLast      = cMsLeft <= cMsPiece;
+        int const vrc = pPort->pfnDetach(pPort, fLast ? cMsLeft : cMsPiece, fLast && RT_BOOL(aForce));
+        if (   vrc == VERR_TIMEOUT
+            && !fLast)
+            continue;
+
+        if (RT_SUCCESS(vrc))
+            hrc = S_OK;
+        else if (vrc == VERR_NOT_SUPPORTED)
+            hrc = setErrorBoth(VBOX_E_NOT_SUPPORTED, vrc,
+                               tr("The PCI device of the host is not in a hot-plug capable slot of the virtual machine"));
+        else if (vrc == VERR_TIMEOUT)
+            hrc = setErrorBoth(VBOX_E_TIMEOUT, vrc,
+                               tr("The guest did not let go of the PCI device of the host in time. It was asked to and can still do so"));
+        else
+            hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                               tr("The PCI device of the host could not be taken out of the virtual machine (%Rrc)"), vrc);
+        break;
     }
 
     LogFlowThisFunc(("hrc=%Rhrc\n", hrc));

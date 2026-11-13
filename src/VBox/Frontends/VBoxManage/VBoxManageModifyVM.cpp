@@ -583,7 +583,13 @@ static HRESULT setExtraData(ComPtr<IMachine> &rSessionMachine, const char *pszVa
 }
 
 
-/** Parse PCI address in format 0000:01:02.03 and convert it to the numeric representation. */
+/**
+ * Parse PCI address in format 0000:01:02.3 and convert it to the numeric representation.
+ *
+ * The address has to end the string or to be followed by the '@' of a guest
+ * address.  A number which is out of range for its place makes the address
+ * invalid, as it would stand for another device otherwise.
+ */
 uint32_t parsePci(const char *pszPciAddr)
 {
     uint16_t u16Domain = UINT16_MAX;
@@ -591,19 +597,22 @@ uint32_t parsePci(const char *pszPciAddr)
 
     char *pszNext = (char *)pszPciAddr;
     int vrc = RTStrToUInt16Ex(pszNext, &pszNext, 16, &u16Domain);
-    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != ':')
+    if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != ':' || u16Domain == UINT16_MAX)
         return UINT32_MAX;
 
     vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[0]);
-    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != ':')
+    if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != ':')
         return UINT32_MAX;
 
     vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[1]);
-    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != '.')
+    if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != '.' || aVals[1] > 0x1f)
         return UINT32_MAX;
 
     vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[2]);
-    if (RT_FAILURE(vrc) || pszNext == NULL)
+    if (   (vrc != VINF_SUCCESS && vrc != VWRN_TRAILING_CHARS)
+        || pszNext == NULL
+        || (*pszNext != '\0' && *pszNext != '@')
+        || aVals[2] > 7)
         return UINT32_MAX;
 
     return ((uint32_t)u16Domain << 16) | (aVals[0] << 8) | (aVals[1] << 3) | (aVals[2] << 0);

@@ -866,6 +866,7 @@ private:
     HRESULT i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *BusMgr, PCFGMNODE pDevices);
     HRESULT i_hostPciGetPort(ULONG aHostAddress, PCVMMR3VTABLE pVMM, PUVM pUVM, PPDMIPCIPASSTHROUGHPORT *ppPort);
     void    i_hostPciStoreLayouts(PUVM pUVM, PCVMMR3VTABLE pVMM);
+    int     i_hostPciCheckSlots(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *pBusMgr);
     struct LEDSET;
     typedef struct LEDSET *PLEDSET;
     PPDMLED volatile *i_getLedSet(uint32_t iLedSet);
@@ -1135,6 +1136,8 @@ private:
     {
         /** The instance of the pci-vfio device which passes it through. */
         uint32_t                iInstance;
+        /** Where its first function is for the guest (PCIBusAddress::asLong). */
+        uint32_t                uGuestAddress;
         /** The addresses of its functions on the host (PCIBusAddress::asLong), in the
          * order in which they are the functions of the pci-vfio instance. */
         std::vector<uint32_t>   vecFunctions;

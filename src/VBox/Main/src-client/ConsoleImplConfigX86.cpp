@@ -308,8 +308,9 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
          *    3. Functions need to be ascending starting with 0.
          */
 
-        /* New device (ignores function)? */
-        if (   hostAddress.mu16Domain != hostPciAddrCur.mu16Domain
+        /* New device (ignores function)?  The first one is, whatever its address. */
+        if (   iDev == 0
+            || hostAddress.mu16Domain != hostPciAddrCur.mu16Domain
             || hostAddress.miBus      != hostPciAddrCur.miBus
             || hostAddress.miDevice   != hostPciAddrCur.miDevice)
         {
@@ -323,7 +324,8 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
                 return hrc;
 
             HostPciDevice HostDev;
-            HostDev.iInstance = iDev - 1;
+            HostDev.iInstance     = iDev - 1;
+            HostDev.uGuestAddress = guestAddress.asLong();
             mHostPciDevices.push_back(HostDev);
 
             if (mfHostPciHotPlug)
@@ -332,11 +334,14 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
                  * The device goes into the hot-plug capable slot of the root port in front
                  * of it.  That takes a root port on the first bus which was created for this
                  * device, see BusAssignmentManager::assignPCIDeviceImpl(), and the device has
-                 * to be where a slot has its device.
+                 * to be where a slot has its device.  That nothing else ends up on the bus of
+                 * the slot is checked when everything has its address, see
+                 * Console::i_hostPciCheckSlots().
                  */
                 PCFGMNODE pBridgeCfg = NULL;
                 if (   (guestAddress.miBus == 1 || guestAddress.miBus == 2)
-                    && guestAddress.miDevice == 0)
+                    && guestAddress.miDevice == 0
+                    && guestAddress.miFn == 0)
                 {
                     char szBridge[16];
                     RTStrPrintf(szBridge, sizeof(szBridge), "%d", guestAddress.miBus - 1);
@@ -350,9 +355,9 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
                     || pVMM->pfnCFGMR3Exists(pBridgeCfg, "HotPlug"))
                 {
                     pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
-                                          N_("With hot-plug for PCI devices of the host, each of them has to be device 0 on "
-                                             "guest PCI bus 1 or 2 and the only device on that bus. This is not so for the "
-                                             "host device %04x:%02x:%02x"),
+                                          N_("With hot-plug for PCI devices of the host, each of them has to be at the "
+                                             "guest PCI address 01:00.0 or 02:00.0 and the only device on that bus. This "
+                                             "is not so for the host device %04x:%02x:%02x"),
                                           hostAddress.mu16Domain, hostAddress.miBus, hostAddress.miDevice);
                     return E_INVALIDARG;
                 }
@@ -429,6 +434,45 @@ HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignm
                           N_("Host PCI device passthrough is not supported on this host"));
     return E_NOTIMPL;
 #endif
+}
+
+
+/**
+ * Checks that each PCI device of the host which is in a hot-plug capable slot
+ * has the secondary bus of the root port with that slot to itself.  Whatever is
+ * on that bus is the device in the slot for the root port, and the guest does
+ * not reach it while the slot is empty or switched off.
+ *
+ * @returns VBox status code, with the error of the VM set on failure.
+ * @param   pUVM        The user mode VM handle.
+ * @param   pVMM        The VMM vtable.
+ * @param   pBusMgr     Who knows the PCI addresses of all devices of the VM.
+ */
+int Console::i_hostPciCheckSlots(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *pBusMgr)
+{
+    if (   !mfHostPciHotPlug
+        || mHostPciDevices.empty())
+        return VINF_SUCCESS;
+
+    std::vector<BusAssignmentManager::PCIDeviceInfo> vecAttached;
+    pBusMgr->listAttachedPCIDevices(vecAttached);
+    for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
+    {
+        PCIBusAddress const GuestAddress(mHostPciDevices[iDev].uGuestAddress);
+        for (size_t i = 0; i < vecAttached.size(); i++)
+            if (   vecAttached[i].guestAddress.miBus == GuestAddress.miBus
+                && vecAttached[i].guestAddress != GuestAddress)
+                return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                             N_("With hot-plug for PCI devices of the host, each of them has to be the only "
+                                                "device on its guest PCI bus. The device '%s' of the virtual machine is on "
+                                                "guest PCI bus %d as well, at %02x:%02x.%d. Attach the PCI device of the "
+                                                "host at 01:00.0 or 02:00.0, whichever is free, or give the virtual machine "
+                                                "fewer storage controllers or network adapters"),
+                                             vecAttached[i].strDeviceName.c_str(), GuestAddress.miBus,
+                                             vecAttached[i].guestAddress.miBus, vecAttached[i].guestAddress.miDevice,
+                                             vecAttached[i].guestAddress.miFn);
+    }
+    return VINF_SUCCESS;
 }
 
 
@@ -1288,7 +1332,8 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
             InsertConfigInteger(pCfg,  "McfgLength", cbMcfgLength);
 
             /* Add PCI passthrough devices, in hot-plug capable slots if that is asked for. */
-            mfHostPciHotPlug = GetExtraDataBoth(virtualBox, pMachine, "VBoxInternal2/HostPCIHotPlug", &strTmp)->equals("1");
+            hrc = pMachine->GetExtraData(Bstr("VBoxInternal2/HostPCIHotPlug").raw(), bstr.asOutParam());    H();
+            mfHostPciHotPlug = Utf8Str(bstr).equals("1");
             hrc = i_attachRawPCIDevices(pUVM, pVMM, pBusMgr, pDevices);                           H();
 
             if (enmIommuType == IommuType_AMD)
@@ -2090,6 +2135,14 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
          * Configure DBGF (Debug(ger) Facility) and DBGC (Debugger Console).
          */
         vrc = i_configGuestDbg(virtualBox, pMachine, pRoot);                                VRC();
+
+        /*
+         * Everything has its PCI address now: the PCI devices of the host in hot-plug
+         * capable slots have to be alone on their buses.
+         */
+        vrc = i_hostPciCheckSlots(pUVM, pVMM, pBusMgr);
+        if (RT_FAILURE(vrc))
+            return vrc;
     }
     catch (ConfigError &x)
     {
