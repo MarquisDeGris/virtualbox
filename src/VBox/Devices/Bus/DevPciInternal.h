@@ -96,9 +96,10 @@ AssertCompileMemberAlignment(DEVPCIBUS, apDevices, 64);
  * between the port and the slot changes its state.
  *
  * The link is up while there is a device in the slot, the guest has the power
- * of the slot switched on and has not disabled the link.  The guest can't reach
- * the device while the link is down, and it expects a device coming back from
- * that to be in the state it has after a reset.
+ * of the slot switched on, has not disabled the link and does not hold the
+ * secondary bus of the port in reset.  The guest can't reach the device while
+ * the link is down, and it expects a device coming back from that to be in the
+ * state it has after a reset.
  *
  * @param   pDevIns     The device instance which registered the callback.
  * @param   fLinkUp     The new state of the link.

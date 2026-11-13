@@ -127,6 +127,8 @@ typedef struct
 #define ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_ON    UINT16_C(0x0100)
 /** Slot control: the power indicator is off. */
 #define ICH9PCIBRIDGE_EXP_SLTCTL_PWRI_OFF   UINT16_C(0x0300)
+/** Bridge control: secondary bus reset. */
+#define ICH9PCIBRIDGE_BRIDGE_CTL_BUS_RESET  UINT16_C(0x0040)
 
 
 /*********************************************************************************************************************************
@@ -3682,9 +3684,17 @@ static DECLCALLBACK(void) ich9pciReset(PPDMDEVINS pDevIns)
  *
  * Everything on the secondary bus of the port is the device in the slot.  The
  * link to it is up while there is a device, the guest has the power of the slot
- * on and has not disabled the link.  While the link is down, config space
- * accesses to the secondary bus and to the buses below it are answered like
- * there was nothing, whatever the devices there would make of them.
+ * on, has not disabled the link and does not hold the secondary bus in reset.
+ * While the link is down, config space accesses to the secondary bus and to the
+ * buses below it are answered like there was nothing, whatever the devices
+ * there would make of them.
+ *
+ * A guest need not ask for being told when a device is put into the slot or
+ * taken out of it, as the slot has an attention button: the button is what
+ * makes such a guest look for a device then.  So the button is pressed along
+ * with putting a device in if that does not bring the link up, which it does
+ * not while the slot is without power, and the guest has the power of an empty
+ * slot off.
  *
  * A device which comes and goes at run time registers with the port, tells it
  * when that happens and gets told when the link changes.  Without one, the slot
@@ -3830,25 +3840,38 @@ static void ich9pcibridgeR3SlotUpdate(PPDMDEVINS pDevIns, uint16_t fEvents)
     /*
      * Presence is detected with and without power.
      */
-    uint16_t uSltSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA);
+    uint16_t uSltSta   = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA);
+    bool     fInserted = false;
     if (pSlot->fPresent != RT_BOOL(uSltSta & VBOX_PCI_EXP_SLTSTA_PRES))
     {
         uSltSta ^= VBOX_PCI_EXP_SLTSTA_PRES;
         fEvents |= VBOX_PCI_EXP_SLTSTA_PRSD;
+        fInserted = pSlot->fPresent;
     }
 
     /*
-     * The link.
+     * The link.  The secondary bus reset holds the device in the slot in reset,
+     * and there is no link to a device in reset.
      */
-    bool const fLinkUp =    pSlot->fPresent
-                         && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL) & VBOX_PCI_EXP_SLTCTL_PWRC)
-                         && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKCTL) & VBOX_PCI_EXP_LNKCTL_DISABLE);
+    /* safe, only needs to go to the config space array */
+    bool const fBusReset = RT_BOOL(PDMPciDevGetWord(pPciDev, VBOX_PCI_BRIDGE_CONTROL) & ICH9PCIBRIDGE_BRIDGE_CTL_BUS_RESET);
+    bool const fLinkUp   =    pSlot->fPresent
+                           && !fBusReset
+                           && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL) & VBOX_PCI_EXP_SLTCTL_PWRC)
+                           && !(ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKCTL) & VBOX_PCI_EXP_LNKCTL_DISABLE);
     uint16_t const uLnkSta = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA);
     if (fLinkUp != RT_BOOL(uLnkSta & VBOX_PCI_EXP_LNKSTA_DL_ACT))
     {
         ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_LNKSTA, uLnkSta ^ VBOX_PCI_EXP_LNKSTA_DL_ACT);
         fEvents |= VBOX_PCI_EXP_SLTSTA_LLCHG;
     }
+
+    /*
+     * The attention button, pressed for a device which was put in and has no
+     * link: the guest takes it into use when it is asked to, see above.
+     */
+    if (fInserted && !fLinkUp)
+        fEvents |= VBOX_PCI_EXP_SLTSTA_ATNB;
 
     ich9pcibridgeR3ExpCapSetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTSTA, uSltSta | fEvents);
 
@@ -3912,6 +3935,11 @@ static void ich9pcibridgeR3SlotReset(PPDMDEVINS pDevIns)
                          | (pSlot->abCfgInit[ICH9PCIBRIDGE_EXP_CAP_OFFSET + off] & fChangeable));
     }
 
+    /* The secondary bus is not held in reset.  The reset of the bridge leaves the bridge control alone. */
+    /* safe, only needs to go to the config space array */
+    PDMPciDevSetWord(pPciDev, VBOX_PCI_BRIDGE_CONTROL,
+                     (uint16_t)(PDMPciDevGetWord(pPciDev, VBOX_PCI_BRIDGE_CONTROL) & ~ICH9PCIBRIDGE_BRIDGE_CTL_BUS_RESET));
+
     /* The power, the indicators and the read-only state, without events. */
     uint16_t uSltCtl = ich9pcibridgeR3ExpCapGetU16(pPciDev, ICH9PCIBRIDGE_EXP_SLTCTL);
     uSltCtl &= ~(VBOX_PCI_EXP_SLTCTL_ATNI | VBOX_PCI_EXP_SLTCTL_PWRI | VBOX_PCI_EXP_SLTCTL_PWRC);
@@ -3959,6 +3987,16 @@ static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDev
     Assert(pPciDev == pDevIns->apPciDevs[0]);
     Assert(cb <= 4);
 
+    /*
+     * The guest gets here with the PCI lock held.  A reset of the VM, loading a
+     * saved state and the fake PCI BIOS write to the config space without it,
+     * and they are not alone with the slot: the device in it comes and goes on
+     * other threads.
+     */
+    PDEVPCIBUSCC const pBusCC = PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC);
+    int const          rcLock = pBusCC->pPciHlpR3->pfnLock(pDevIns, VERR_IGNORED);
+    AssertRCReturn(rcLock, rcLock);
+
     VBOXSTRICTRC rcStrict = VINF_SUCCESS;
     uint16_t     fEvents  = 0;
     if (   uAddress >= ICH9PCIBRIDGE_EXP_CAP_OFFSET + ICH9PCIBRIDGE_EXP_CAP_SIZE
@@ -3994,6 +4032,8 @@ static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDev
         }
 
     ich9pcibridgeR3SlotUpdate(pDevIns, fEvents);
+
+    pBusCC->pPciHlpR3->pfnUnlock(pDevIns);
     return rcStrict;
 }
 
@@ -4081,7 +4121,9 @@ DECLHIDDEN(int) devpciR3HotPlugSlotRegisterClient(PPDMDEVINS pDevInsPort, PPDMDE
 
 /**
  * Tells a port with a hot-plug capable slot that a device was put into the slot
- * or taken out of it.  The guest is notified.
+ * or taken out of it.  The guest is notified: of the presence and the link
+ * changing, and by the attention button if a device was put in and there is no
+ * link to it, see ich9pcibridgeR3SlotUpdate().
  *
  * @param   pDevInsPort     The device instance of the port, see devpciR3HotPlugSlotFind().
  * @param   fPresent        Whether there is a device in the slot now.
@@ -4159,9 +4201,9 @@ DECLHIDDEN(bool) devpciR3HotPlugSlotIsLinkUp(PPDMDEVINS pDevInsPort)
 
 /**
  * @callback_method_impl{FNSSMDEVLOADDONE,
- *      Port with a hot-plug capable slot: checks that the state is one of a port
- *      with such a slot and tells the guest what happened to the slot since the
- *      state was saved.}
+ *      Checks that the state is one of a port with a hot-plug capable slot if the
+ *      port has one and of a port without if it has none, and tells the guest
+ *      what happened to the slot since the state was saved.}
  */
 static DECLCALLBACK(int) ich9pcibridgeR3SlotLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
@@ -4173,6 +4215,22 @@ static DECLCALLBACK(int) ich9pcibridgeR3SlotLoadDone(PPDMDEVINS pDevIns, PSSMHAN
     /* Nothing to do here if loading failed, this gets called nevertheless. */
     if (RT_FAILURE(pHlp->pfnSSMHandleGetStatus(pSSM)))
         return VINF_SUCCESS;
+
+    /*
+     * Without a slot: the state must not be one of a port with a slot, as the
+     * guest would go on with a slot which has nothing behind its registers.
+     */
+    if (!PDMINS_2_DATA(pDevIns, PDEVPCIBUS)->fHotPlugSlot)
+    {
+        /* safe, only needs to go to the config space array */
+        if (   PDMPciDevGetByte(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET) == VBOX_PCI_CAP_ID_EXP
+            && (PDMPciDevGetWord(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + 2) & VBOX_PCI_EXP_FLAGS_SLOT)
+            && (PDMPciDevGetDWord(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + ICH9PCIBRIDGE_EXP_SLTCAP) & VBOX_PCI_EXP_SLTCAP_HPC))
+            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                            N_("The state was saved with a different hot-plug configuration of PCI bridge #%u"),
+                                            pDevIns->iInstance);
+        return VINF_SUCCESS;
+    }
 
     /*
      * The config space of the port came from the saved state, the parts the
@@ -4500,7 +4558,7 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
                                 "pgm" /* before */,
                                 NULL, NULL, NULL,
                                 NULL, devpciR3BridgeCommonSaveExec, NULL,
-                                NULL, devpciR3BridgeCommonLoadExec, fHotPlug ? ich9pcibridgeR3SlotLoadDone : NULL);
+                                NULL, devpciR3BridgeCommonLoadExec, ich9pcibridgeR3SlotLoadDone);
     AssertLogRelRCReturn(rc, rc);
 
     return VINF_SUCCESS;

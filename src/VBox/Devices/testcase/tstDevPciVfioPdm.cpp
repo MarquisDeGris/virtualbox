@@ -440,6 +440,10 @@ typedef struct TSTPDM
     uint32_t            cReqs;
     /** Number of requests made so far. */
     uint32_t volatile   cReqsTotal;
+    /** Whether the interrupt line of the PCI devices is high for the interrupt controller. */
+    bool volatile       fIntxHigh;
+    /** How often the interrupt line of the PCI devices went high. */
+    uint32_t volatile   cIntxRaised;
     /** Whether requests wait until the test asks for them to be done. */
     bool                fManualReqs;
     /** Number of blocks currently allocated from the MM heap. */
@@ -1385,7 +1389,11 @@ static DECLCALLBACK(void) tstPdmHlp_PCISetIrq(PPDMDEVINS pDevIns, PPDMPCIDEV pPc
 
     PTSTPDMPCIBUS pBus = tstPdmPciBusFromDev(pPciDev);
     AssertReturnVoid(pBus);
+
+    /* PDM takes the lock which is the PCI lock for this. */
+    RTCritSectEnter(&g_Pdm.CritSectPci);
     pBus->Reg.pfnSetIrqR3(pBus->pDevIns, pPciDev, iIrq, iLevel, 0 /*uTagSrc*/);
+    RTCritSectLeave(&g_Pdm.CritSectPci);
 }
 
 
@@ -1429,7 +1437,14 @@ static DECLCALLBACK(void) tstPdmPciHlp_IsaSetIrq(PPDMDEVINS pDevIns, int iIrq, i
 /** @interface_method_impl{PDMPCIHLPR3,pfnIoApicSetIrq} */
 static DECLCALLBACK(void) tstPdmPciHlp_IoApicSetIrq(PPDMDEVINS pDevIns, PCIBDF uBusDevFn, int iIrq, int iLevel, uint32_t uTagSrc)
 {
-    RT_NOREF(pDevIns, uBusDevFn, iIrq, iLevel, uTagSrc);
+    RT_NOREF(pDevIns, uBusDevFn, iIrq, uTagSrc);
+
+    /* The tests have one device which uses the line, so one line is all there is to it. */
+    bool const fHigh = RT_BOOL(iLevel & PDM_IRQ_LEVEL_HIGH);
+    if (fHigh && !ASMAtomicXchgBool(&g_Pdm.fIntxHigh, true))
+        ASMAtomicIncU32(&g_Pdm.cIntxRaised);
+    else if (!fHigh)
+        ASMAtomicWriteBool(&g_Pdm.fIntxHigh, false);
 }
 
 
@@ -2949,6 +2964,60 @@ uint32_t tstPdmPciCfgRead(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, unsigne
 void tstPdmPciCfgWrite(uint8_t iBus, uint8_t uDevFn, uint32_t offReg, uint32_t u32, unsigned cb)
 {
     tstPdmPhysWrite(TSTPDM_MCFG_BASE + ((RTGCPHYS)iBus << 20) + ((RTGCPHYS)uDevFn << 12) + offReg, &u32, cb);
+}
+
+
+/**
+ * Checks whether the calling thread holds the PCI lock.
+ *
+ * @returns true if it does, false if not.
+ */
+bool tstPdmPciLockIsOwner(void)
+{
+    return g_Pdm.fInitialized && RTCritSectIsOwner(&g_Pdm.CritSectPci);
+}
+
+
+/**
+ * Takes the PCI lock, like an EMT which is in the middle of a config space access.
+ */
+void tstPdmPciLock(void)
+{
+    AssertReturnVoid(g_Pdm.fInitialized);
+    RTCritSectEnter(&g_Pdm.CritSectPci);
+}
+
+
+/**
+ * Releases the PCI lock taken with tstPdmPciLock().
+ */
+void tstPdmPciUnlock(void)
+{
+    AssertReturnVoid(g_Pdm.fInitialized);
+    RTCritSectLeave(&g_Pdm.CritSectPci);
+}
+
+
+/**
+ * Checks whether the interrupt line of the PCI devices is high for the interrupt
+ * controller, which is what INTx of a PCI device comes down to.
+ *
+ * @returns true if it is high, false if it is low.
+ */
+bool tstPdmIntxIsHigh(void)
+{
+    return ASMAtomicReadBool(&g_Pdm.fIntxHigh);
+}
+
+
+/**
+ * Returns how often the interrupt line of the PCI devices went high.
+ *
+ * @returns Number of times.
+ */
+uint32_t tstPdmIntxGetRaisedCount(void)
+{
+    return ASMAtomicReadU32(&g_Pdm.cIntxRaised);
 }
 
 

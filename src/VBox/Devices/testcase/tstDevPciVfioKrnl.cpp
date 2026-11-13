@@ -134,6 +134,9 @@ typedef struct TSTVFIODEV
     uint32_t            cBusResets;
     /** Number of interrupts triggered per interrupt index. */
     uint32_t            acIrqsTriggered[TSTVFIO_IRQ_INDEX_COUNT];
+    /** Number of vectors the host has for each interrupt index, 0 for as many as the
+     * function has, see tstVfioKrnlDevSetIrqsAvailable(). */
+    uint32_t            acIrqsAvailable[TSTVFIO_IRQ_INDEX_COUNT];
     /** The I/O address space the function is attached to, 0 if none. */
     uint32_t            idIoas;
     /** Whether the function is bound to an IOMMUFD context, or was handed out by its group. */
@@ -384,6 +387,10 @@ static void tstVfioKrnlDevIrqDisable(PTSTVFIODEV pDev, uint32_t uIrqIndex)
             __real_close(pDev->apaiIrqFds[uIrqIndex][i]);
             pDev->apaiIrqFds[uIrqIndex][i] = -1;
         }
+
+    /* INTx is not masked when it gets set up the next time. */
+    if (uIrqIndex == VFIO_PCI_INTX_IRQ_INDEX)
+        pDev->fIntxMasked = false;
 }
 
 
@@ -770,6 +777,11 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
     {
         if (fData == VFIO_IRQ_SET_DATA_EVENTFD)
         {
+            /* The host is short of vectors: vfio-pci sets up none and tells how many there are. */
+            if (   pDev->acIrqsAvailable[pSet->index]
+                && pSet->start + pSet->count > pDev->acIrqsAvailable[pSet->index])
+                return (int)pDev->acIrqsAvailable[pSet->index];
+
             int32_t const *paiNew = (int32_t const *)(pSet + 1);
             for (uint32_t i = 0; i < pSet->count; i++)
             {
@@ -1299,6 +1311,7 @@ int tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg)
         pDev->fGone       = false;
         pDev->fRemoved    = false;
         pDev->fIntxMasked = false;
+        RT_ZERO(pDev->acIrqsAvailable);
     }
     else
         rc = VERR_RESOURCE_BUSY;
@@ -1388,6 +1401,24 @@ uint32_t tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex)
             cIrqs++;
     RTCritSectLeave(&g_Krnl.CritSect);
     return cIrqs;
+}
+
+
+/**
+ * Sets how many vectors the host has for an interrupt index of the PCI function.
+ * Asked for more, the host sets up none and tells how many it has.
+ *
+ * @param   pDev                The PCI function.
+ * @param   uIrqIndex           The VFIO interrupt index.
+ * @param   cIrqs               The number of vectors, 0 for as many as the function has.
+ */
+void tstVfioKrnlDevSetIrqsAvailable(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t cIrqs)
+{
+    AssertReturnVoid(uIrqIndex < TSTVFIO_IRQ_INDEX_COUNT);
+
+    RTCritSectEnter(&g_Krnl.CritSect);
+    pDev->acIrqsAvailable[uIrqIndex] = cIrqs;
+    RTCritSectLeave(&g_Krnl.CritSect);
 }
 
 

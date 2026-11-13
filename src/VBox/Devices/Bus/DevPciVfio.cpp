@@ -473,8 +473,9 @@ typedef struct VFIOPCIFUN
     /** Flag whether the guest finds nothing where the function was.  This follows fGone
      * once the guest mappings of the BARs are removed, see pciVfioFunGoneOnEmt(). */
     bool volatile        fGoneForGuest;
-    /** Flag whether memory of the device stayed mapped when the function went out of
-     * service, because putting ordinary memory into its place failed. */
+    /** Flag whether something of the device stayed in use when the function went out of
+     * service: memory of it stayed mapped because putting ordinary memory into its
+     * place failed, or the device file stayed open. */
     bool volatile        fDevMemLeft;
     /** What takes the place of the device file when the function goes out of service:
      * a file descriptor which refuses everything the device file is used for. */
@@ -541,7 +542,8 @@ typedef struct VFIOPCIFUN
     /** The interrupt type currently set up with VFIO, UINT8_MAX if none.
      * This is what the thread changing the interrupt configuration goes by. */
     uint8_t              uIrqMode;
-    /** The number of vectors set up with VFIO for uIrqMode. */
+    /** The number of vectors VFIO was asked to set up for uIrqMode.  A host which is
+     * short of vectors has set up fewer, see pciVfioIrqReconfigure(). */
     uint32_t             cIrqVectors;
     /** The IRQ mode the poller currently works in. */
     uint8_t              uIrqModeCur;
@@ -551,6 +553,11 @@ typedef struct VFIOPCIFUN
     volatile uint32_t    uIrqSeqReq;
     /** Sequence number of the last mode switch the poller has completed. */
     volatile uint32_t    uIrqSeqAck;
+    /** Counts how often INTx was set up with VFIO.  An INTx interrupt is good for the
+     * setup it came from only, see pciVfioIntxRaiseOnEmt(). */
+    volatile uint32_t    uIntxGen;
+    /** Whether the INTx interrupt of the function is raised for the guest. */
+    bool volatile        fIntxHigh;
 
     /** The interrupt polling thread. */
     PPDMTHREAD           pThrdIrq;
@@ -649,6 +656,9 @@ typedef struct VFIOPCI
     /** When the attention button of the slot was pressed last to ask the guest to let
      * go of the device, 0 if it wasn't since the link to the slot went down last. */
     uint64_t volatile    msAttnPressed;
+    /** Counts how often a device was put into the slot, for telling whether the device
+     * in the slot is still the one something was decided about. */
+    uint32_t volatile    uSlotGen;
     /** Serializes what is done about the slot being empty or not: putting a device in,
      * completing the removal of one on an EMT, and saving and loading the state of the
      * VM, which are for an empty slot only. */
@@ -1854,6 +1864,94 @@ static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
 
 
 /**
+ * Raises the INTx interrupt of a function for the guest, on an EMT.
+ *
+ * Raising it takes the PCI lock, and the interrupt thread must not wait for that
+ * lock: whoever changes the interrupt setup holds it and waits for the thread,
+ * see pciVfioIrqPollerSwitchMode().  By the time this gets its turn the setup
+ * the interrupt came from may be history, the interrupt is dropped then.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ * @param   iPciFun     The function.
+ * @param   uIntxGen    VFIOPCIFUN::uIntxGen when the interrupt came.
+ */
+static DECLCALLBACK(int) pciVfioIntxRaiseOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciFun, uintptr_t uIntxGen)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    AssertReturn(iPciFun < RT_ELEMENTS(pThis->aPciFuns), VERR_INVALID_PARAMETER);
+    PVFIOPCIFUN   pFun    = &pThis->aPciFuns[iPciFun];
+    PPDMPCIDEV    pPciDev = pDevIns->apPciDevs[iPciFun];
+    PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
+    AssertPtrReturn(pPciHlp, VERR_INTERNAL_ERROR_3);
+
+    /* Not while a device is put into the slot or taken out of it, and not while the guest changes the interrupt setup. */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    rc = pPciHlp->pfnLock(pDevIns, VERR_IGNORED);
+    if (RT_SUCCESS(rc))
+    {
+        if (   !pFun->fGone
+            && pFun->uIrqMode == VFIO_PCI_INTX_IRQ_INDEX
+            && ASMAtomicReadU32(&pFun->uIntxGen) == (uint32_t)uIntxGen)
+        {
+            ASMAtomicWriteBool(&pFun->fIntxHigh, true);
+            PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, 0 /*iIrq*/, PDM_IRQ_LEVEL_HIGH);
+        }
+        pPciHlp->pfnUnlock(pDevIns);
+    }
+    else
+        AssertRC(rc);
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Lowers the INTx interrupt of a function if it is raised for the guest.  This
+ * is for when the interrupt can't be coming from the device any more: the guest
+ * has disabled it or uses another kind of interrupt, the device was reset or it
+ * is gone.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ */
+static void pciVfioIntxLower(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+{
+    if (ASMAtomicXchgBool(&pFun->fIntxHigh, false))
+        PDMDevHlpPCISetIrqEx(pThis->pDevIns, pThis->pDevIns->apPciDevs[pFun->uPciFun], 0 /*iIrq*/, PDM_IRQ_LEVEL_LOW);
+}
+
+
+/**
+ * Empties the eventfds of the interrupts of a function.  What the device has left
+ * in them under an interrupt setup which is over is no interrupt of the setup
+ * which begins.  The interrupt thread is not looking at them when this is called.
+ *
+ * @param   pFun        The function.
+ * @param   cFdEvts     The number of eventfds to empty, starting with the first one.
+ */
+static void pciVfioIrqEvtFdsDrain(PCVFIOPCIFUN pFun, uint32_t cFdEvts)
+{
+    for (uint32_t i = 0; i < cFdEvts && i < pFun->cFdEvts; i++)
+    {
+        /* Reading an eventfd which is empty would block. */
+        struct pollfd PollFd;
+        PollFd.fd      = pFun->paFdEvts[i];
+        PollFd.events  = POLLIN;
+        PollFd.revents = 0;
+        if (   poll(&PollFd, 1, 0 /*timeout*/) == 1
+            && (PollFd.revents & POLLIN))
+        {
+            uint64_t      u64Ign = 0;
+            ssize_t const cbRead = read(PollFd.fd, &u64Ign, sizeof(u64Ign));
+            RT_NOREF(cbRead);
+        }
+    }
+}
+
+
+/**
  * The IRQ poller thread.
  *
  * @returns VBox status code.
@@ -1949,7 +2047,14 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
                     else if (pFun->uIrqModeCur == VFIO_PCI_MSI_IRQ_INDEX)
                         pciVfioMsiRaise(pDevIns, pFun, pPciDev, uVec);
                     else
-                        PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, uVec, 1);
+                    {
+                        /* An EMT raises it, this thread must not wait for the PCI lock which that takes. */
+                        int rc2 = PDMDevHlpVMReqCallNoWait(pDevIns, VMCPUID_ANY, (PFNRT)pciVfioIntxRaiseOnEmt, 3, pDevIns,
+                                                           (uintptr_t)pFun->uPciFun, (uintptr_t)ASMAtomicReadU32(&pFun->uIntxGen));
+                        if (RT_FAILURE(rc2))
+                            LogRelMax(16, ("VFIO#%d.%u: Failed to schedule raising the interrupt of the function (%Rrc)\n",
+                                           pThis->iInstance, pFun->uPciFun, rc2));
+                    }
 
                     if (pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX)
                     {
@@ -2134,6 +2239,10 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
         if (rcLnx == -1)
             return RTErrConvertFromErrno(errno);
 
+        /* INTx doesn't stay raised for the guest when the device has no means to raise it any more. */
+        if (pFun->uIrqMode == VFIO_PCI_INTX_IRQ_INDEX)
+            pciVfioIntxLower(pThis, pFun);
+
         pFun->uIrqMode    = UINT8_MAX;
         pFun->cIrqVectors = 0;
     }
@@ -2150,6 +2259,12 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
                  && cVectors <= pFun->cFdEvts,
                  VERR_OUT_OF_RANGE);
 
+    /* What is in the eventfds from before is no interrupt of this setup, and an INTx
+       interrupt which is on its way to the guest is none of it either. */
+    pciVfioIrqEvtFdsDrain(pFun, cVectors);
+    if (uVfioIrq == VFIO_PCI_INTX_IRQ_INDEX)
+        ASMAtomicIncU32(&pFun->uIntxGen);
+
     size_t const         cbIrqSet = sizeof(struct vfio_irq_set) + cVectors * sizeof(int32_t);
     struct vfio_irq_set *pIrqSet  = (struct vfio_irq_set *)RTMemTmpAllocZ(cbIrqSet);
     if (!pIrqSet)
@@ -2165,11 +2280,30 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
     for (uint32_t i = 0; i < cVectors; i++)
         paiFds[i] = pFun->paFdEvts[i];
 
-    int       rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, pIrqSet);
-    int const rc    = rcLnx != -1 ? VINF_SUCCESS : RTErrConvertFromErrno(errno);
+    /*
+     * The host may be short of interrupt vectors.  It sets up none then and tells
+     * how many it has, which the device gets: the vectors beyond those do not
+     * work, and a guest which uses the first ones only is none the wiser.
+     */
+    uint32_t cVectorsSet = cVectors;
+    int      rcLnx       = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, pIrqSet);
+    if (   rcLnx > 0
+        && (uint32_t)rcLnx < cVectors)
+    {
+        cVectorsSet    = (uint32_t)rcLnx;
+        pIrqSet->argsz = (uint32_t)(sizeof(struct vfio_irq_set) + cVectorsSet * sizeof(int32_t));
+        pIrqSet->count = cVectorsSet;
+        rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, pIrqSet);
+    }
+    int const rc = rcLnx == 0  ? VINF_SUCCESS
+                 : rcLnx == -1 ? RTErrConvertFromErrno(errno)
+                 :               VERR_OUT_OF_RESOURCES;
     RTMemTmpFree(pIrqSet);
     if (RT_FAILURE(rc))
         return rc;
+    if (cVectorsSet < cVectors)
+        LogRelMax(32, ("VFIO#%d.%u: The host has %u of the %u vectors of interrupt type %u for the device, the others do not work\n",
+                       pThis->iInstance, pFun->uPciFun, cVectorsSet, cVectors, uVfioIrq));
 
     pFun->uIrqMode    = uVfioIrq;
     pFun->cIrqVectors = cVectors;
@@ -3879,6 +4013,9 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
             Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
         }
 
+        /* A function which isn't there has no interrupt raised. */
+        pciVfioIntxLower(pThis, pFun);
+
         /* From here on the guest finds nothing where the function was. */
         ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
 
@@ -3967,11 +4104,21 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
             }
         }
     }
-    ASMAtomicWriteBool(&pFun->fDevMemLeft, fDevMemLeft);
 
     /* The device itself.  This also takes it out of the I/O address space and ends its interrupts. */
-    if (dup3(pFun->iFdInert, pFun->iFdVfio, O_CLOEXEC) == -1)
-        LogRel(("VFIO#%d.%u: Failed to let go of the device (%d)\n", pThis->iInstance, pFun->uPciFun, errno));
+    int      rcLnx;
+    unsigned cTries = 0;
+    do
+        rcLnx = dup3(pFun->iFdInert, pFun->iFdVfio, O_CLOEXEC);
+    while (   rcLnx == -1
+           && (errno == EINTR || errno == EBUSY)
+           && ++cTries < 100);
+    if (rcLnx == -1)
+    {
+        LogRel(("VFIO#%d.%u: Failed to let go of the device (%d), it stays in use\n", pThis->iInstance, pFun->uPciFun, errno));
+        fDevMemLeft = true;
+    }
+    ASMAtomicWriteBool(&pFun->fDevMemLeft, fDevMemLeft);
     pFun->fIoasAttached = false;
 }
 
@@ -4048,15 +4195,30 @@ static void pciVfioSlotAskGuest(PVFIOPCI pThis)
  * hot-plug capable slot it is in, see pciVfioFunSetGone().  The guest is told that
  * the slot is empty.
  *
+ * This is one thing for whoever puts a device into the slot: the slot is not
+ * found empty before the guest was told so, and nobody is in the middle of a
+ * config space access to the device when the next one is put in.
+ *
  * @param   pThis       The VFIO PCI device instance, in a hot-plug capable slot.
  * @param   pszWhy      The reason, for the log.
+ * @param   puSlotGen   VFIOPCI::uSlotGen of the device this is about.  Nothing is
+ *                      done if another one was put into the slot meanwhile.  NULL
+ *                      for whatever is in the slot.
  */
-static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy)
+static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy, uint32_t const *puSlotGen)
 {
-    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
-        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
-            pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy);
-    devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, false /*fPresent*/);
+    int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRC(rcLock);
+    if (   !puSlotGen
+        || *puSlotGen == ASMAtomicReadU32(&pThis->uSlotGen))
+    {
+        for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+            if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+                pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy);
+        devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, false /*fPresent*/);
+    }
+    if (RT_SUCCESS(rcLock))
+        RTCritSectLeave(&pThis->CritSectSlot);
 }
 
 
@@ -4076,8 +4238,10 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
     PVFIOPCI pThis = (PVFIOPCI)pvUser;
     RT_NOREF(hThreadSelf);
 
-    /* When the time the guest got for letting go of the device is up, 0 if it wasn't asked. */
+    /* When the time the guest got for letting go of the device is up, 0 if it wasn't asked,
+       and which device that is about. */
     uint64_t msLetGoDeadline = 0;
+    uint32_t uSlotGenLetGo   = 0;
 
     while (!ASMAtomicReadBool(&pThis->fWatcherStop))
     {
@@ -4147,26 +4311,31 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                     pciVfioFunSetGone(pThis, pFun,
                                       afRequest[i] ? "the host wants the device back" : "the host reported an error of the device");
                 else if (!afRequest[i])
-                    pciVfioSlotEmpty(pThis, "the host reported an error of the device");
+                    pciVfioSlotEmpty(pThis, "the host reported an error of the device", NULL /*puSlotGen*/);
                 else if (   !pciVfioFunAnswers(pFun)
                          || !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort))
                     /* Unplugged, or nothing the guest would have to let go of. */
-                    pciVfioSlotEmpty(pThis, "the host wants the device back");
+                    pciVfioSlotEmpty(pThis, "the host wants the device back", NULL /*puSlotGen*/);
                 else
                 {
                     /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
                     pciVfioSlotAskGuest(pThis);
                     if (!msLetGoDeadline)
+                    {
                         msLetGoDeadline = RT_MAX(RTTimeMilliTS() + pThis->cMsGuestRelease, 1);
+                        uSlotGenLetGo   = ASMAtomicReadU32(&pThis->uSlotGen);
+                    }
                 }
             }
 
-        /* The guest has let go of the device when the link to the slot is down. */
+        /* The guest has let go of the device when the link to the slot is down.  The device the
+           guest was asked about may be gone by now and another one may be in the slot, which is
+           not what the host wants back. */
         if (   msLetGoDeadline
             && (   !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort)
                 || RTTimeMilliTS() >= msLetGoDeadline))
         {
-            pciVfioSlotEmpty(pThis, "the host wants the device back");
+            pciVfioSlotEmpty(pThis, "the host wants the device back", &uSlotGenLetGo);
             msLetGoDeadline = 0;
         }
     }
@@ -4443,7 +4612,7 @@ static DECLCALLBACK(int) pciVfioPortDetach(PPDMIPCIPASSTHROUGHPORT pInterface, R
         RTThreadSleep(10);
     }
 
-    pciVfioSlotEmpty(pThis, "it was detached");
+    pciVfioSlotEmpty(pThis, "it was detached", NULL /*puSlotGen*/);
     return VINF_SUCCESS;
 }
 
@@ -4756,6 +4925,7 @@ static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
      * Back in service.  The device starts out disabled and reset, like it does
      * after a reset of the VM.  The guest gets at it once it has the link up.
      */
+    ASMAtomicIncU32(&pThis->uSlotGen);
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
         {
@@ -5190,7 +5360,7 @@ static DECLCALLBACK(int) pciVfioLoadPrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
     pThis->fLoadReattach = false;
     if (!pciVfioIsOutOfService(pThis))
     {
-        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded");
+        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded", NULL /*puSlotGen*/);
         pThis->fLoadReattach = true;
     }
     if (pciVfioSlotIsEmptyForState(pThis))
