@@ -237,6 +237,25 @@
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/InterceptMmio" 1
  *
  * After that you can start the VM with either the usual GUI or VBoxHeadless.
+ *
+ * @section sec_dev_vfio_configuration_hotplug     Configuration for hot-plug
+ *
+ * For a device which is to be taken out of the VM and put into it while the VM runs, leave out the extradata for
+ * pci-vfio from above, ExposeVga excepted, and attach each function of the device to the VM, at device 0 of guest
+ * PCI bus 1 or 2
+ *    VBoxManage modifyvm vmname --pci-attach 0000:0a:00.0@0000:01:00.0
+ *    VBoxManage modifyvm vmname --pci-attach 0000:0a:00.1@0000:01:00.1
+ *
+ * Then switch hot-plug on for the VM
+ *    VBoxManage setextradata vmname "VBoxInternal2/HostPCIHotPlug" 1
+ *
+ * This puts the device into the hot-plug capable slot of a root port and has the guest take care of PCI express
+ * hot-plug itself. While the VM runs the device is taken out and put in with
+ *    VBoxManage controlvm vmname unplugpci 0000:0a:00.0
+ *    VBoxManage controlvm vmname plugpci 0000:0a:00.0
+ *
+ * The VM has to be started with the device once. What it is built from for the device is stored with the VM then,
+ * and from there on the VM also starts without the device.
  */
 
 
