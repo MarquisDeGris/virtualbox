@@ -53,6 +53,13 @@ full build of an earlier state). What was written after that is on
     `unplugpci`, the state in `VBoxManage showvminfo`; man pages.
   - Main cannot be run in the test without hardware. What it does is
     part of the hardware test.
+  - Changelog entries.
+  - Checked without a compiler, which is no substitute for one: the XML
+    files which were changed (API definition, the two man pages, the
+    changelog) have their elements balanced; the two new subcommands
+    leave `controlvm` within the number of help scopes its generated
+    help can have (55 of 60); the signatures of the new `IConsole`
+    methods follow what the wrapper generator makes of comparable ones.
 
 [HWTEST.md](HWTEST.md) has the procedure for the hardware test as a
 draft.
