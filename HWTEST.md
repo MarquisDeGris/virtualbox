@@ -48,6 +48,12 @@ For the hot-plug tests (parts E to K) in addition **(WP7)**:
 
     VBoxManage setextradata <vm> VBoxInternal2/HostPCIHotPlug 1
 
+With hot-plug the device has to be alone on its guest bus. Some storage
+controllers and network adapters of a VM get their addresses on guest bus 1
+or 2 as well; the VM does not start then and the message names the device
+which is in the way. Attach the PCI device at `0000:02:00.0` instead, or
+take the controller out of the VM.
+
 Until WP7 is built the same is reached with extra data which goes straight
 into the configuration of the devices:
 
@@ -130,6 +136,16 @@ With the hot-plug settings of part 2.
    `PciExpressNativeHotPlug` setting, that is the most important thing to
    report, with the VM log and, if it gets that far, a screenshot of the
    device manager.
+3. Linux guest, a reset of the device through its bus. Not built yet, see
+   the status page. Unbind the driver of the device in the guest, then
+
+       echo bus > /sys/bus/pci/devices/0000:01:00.0/reset_method
+       echo 1 > /sys/bus/pci/devices/0000:01:00.0/reset
+
+   The log of the VM has `The link to the hot-plug slot is down` and, right
+   after it, `up`, and the device was reset on the host in between. The
+   guest does not take this for the device having been unplugged. Bind the
+   driver again: the device works.
 
 ### F. Taking the device out **(WP7)**
 
@@ -147,6 +163,9 @@ With the hot-plug settings of part 2.
    `--timeout 2000`): the command fails with a message that the guest did
    not let go, the device stays. With `--force` the device is taken away
    regardless and the guest finds the slot empty.
+5. With a guest which does not react and `--timeout 60000`: power the VM
+   off from another terminal while the command waits. The VM powers off at
+   once, the command ends with a message.
 
 ### G. Putting the device in **(WP7)**
 
@@ -155,6 +174,11 @@ With the hot-plug settings of part 2.
 2. The log has `VFIO#0: A device was put into the slot`. A Linux guest
    logs `pciehp: Slot(...): Card present` and `Link Up`, finds the device
    and loads its driver; Windows shows the device again. The device works.
+   The guest is told by the attention button of the slot along with the
+   device being there, so a line about the button in the log of the guest
+   is fine, and a guest may take five seconds before it switches the slot
+   on. **Note down what Windows does here and how long it takes**: this is
+   the place where guests differ, and none has been tried.
 3. Repeat parts F and G ten times. Afterwards the number of open files of
    the VM process is what it was before (`ls /proc/<pid>/fd | wc -l`), and
    the guest still has all its memory.
@@ -216,6 +240,13 @@ Steps 2 and 3 start the VM without the device, which needs part I to work.
    configuration, or attached to it, or after another kind of device was
    passed through when the state was saved: refused with a message, the VM
    does not start from that state.
+4. **(WP7)** A VM with hot-plug switched on and something else on the guest
+   bus of the PCI device, for example a second SATA controller with the
+   device at `0000:01:00.0`: the VM does not start, the message names the
+   controller.
+5. **(WP7)** A host address with a number which is out of range, such as
+   `0000:03:00.8`, is refused by `VBoxManage` and does not stand for
+   another device.
 
 ### L. Sleep and resume of the host
 

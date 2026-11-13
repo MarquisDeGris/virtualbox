@@ -47,8 +47,9 @@ full build of an earlier state). What was written after that is on
   - Hot-plug is switched on for a VM with the extra data item
     `VBoxInternal2/HostPCIHotPlug`. Main then gives the root port in front
     of each PCI device of the host the hot-plug capable slot and has the
-    ACPI tables grant native hot-plug. The device has to be attached as
-    device 0 of guest bus 1 or 2.
+    ACPI tables grant native hot-plug. The device has to be attached at
+    guest address 01:00.0 or 02:00.0 and to be alone on that bus, so a VM
+    has two such devices at most.
   - After the VM was created Main asks each passthrough device for its
     layout and stores it as extra data
     (`VBoxInternal2/HostPCILayout/<host address>`); it goes into the
@@ -66,10 +67,65 @@ full build of an earlier state). What was written after that is on
     help can have (55 of 60); the signatures of the new `IConsole`
     methods follow what the wrapper generator makes of comparable ones.
 
+- A review of everything above and of the hot-plug code of WP5 and WP6:
+  three independent readings, then each point checked against the code,
+  and for the behaviour of guests and of the host kernel against the
+  sources of Linux and QEMU. What it changed, with tests where the
+  testcase reaches it, which makes it 55 tests and three random tests
+  once they can run:
+  - Root port: the attention button is pressed along with a device being
+    put into the slot if that does not bring the link up. A Linux guest
+    does not ask for being told about presence changes of a slot with a
+    button and has the power of an empty slot off; it would not have
+    noticed a device put into the running VM. The tests had a guest which
+    asked for all events, there is one now which asks like Linux does.
+  - Root port: the secondary bus reset of the bridge control register
+    takes the link down for as long as it is set, which resets the device
+    in the slot. Guests reset devices without a function level reset this
+    way. A reset of the VM clears the bit.
+  - Root port: all writes to its config space take the PCI lock. The
+    guest comes with it, a reset of the VM and loading a saved state did
+    not, while the device in the slot comes and goes on other threads.
+  - Root port: a port without the slot refuses the saved state of a port
+    with it; the other direction was refused already.
+  - Passthrough device: a host which is short of interrupt vectors sets
+    up none and tells how many it has. The device takes those instead of
+    going without interrupts.
+  - Passthrough device: taking the device out of the slot is one step for
+    whoever puts a device in.
+  - Passthrough device: INTx is raised on an EMT. The thread which waits
+    for the interrupts did it and could wait for the PCI lock while the
+    holder of that lock waited for the thread, which cost five seconds
+    and the change of the interrupt setup the guest had asked for. INTx
+    is lowered when the device cannot be the one raising it any more: the
+    guest disabled it or uses MSI or MSI-X, the device was reset, or it
+    is gone. INTx still does not work beyond the first interrupt (WP8).
+  - Passthrough device: an interrupt which the device raised under an
+    earlier interrupt setup, and which nobody got around to, is no
+    interrupt of the next setup or of the next device in the slot.
+  - Passthrough device: a device which could not be let go of counts as
+    still in use, so no state is saved. The time a guest was given for a
+    device does not count for the next device in the slot.
+  - Main: the check that the PCI device of the host is alone on its guest
+    bus is made when all devices of the VM have their addresses, as some
+    storage controllers and network adapters get theirs on guest bus 1
+    and 2 as well. The VM does not start otherwise.
+  - Main: hot-plug is a setting of the VM only, not of all VMs.
+    `IConsole::unplugHostPCIDevice` waits for the guest in pieces, so the
+    VM can be powered off while it waits.
+  - `VBoxManage`: a host PCI address with a number which is out of range
+    is invalid instead of standing for another device.
+  - Looked at and left: a guest which has no MSI for the root port gets
+    no slot events (the slot has no interrupt pin, see the decisions);
+    memory of the device stays mapped in the VM process until the process
+    ends, as before this work.
+
 [HWTEST.md](HWTEST.md) has the procedure for the hardware test as a
 draft.
 
 Nothing of it goes onto the code branch before it was built and tested.
+`scratch/mgmt` is at `c51373a0`. The last attempt to start a run was on
+2026-11-13 at 21:40 UTC; the answer is still the one above.
 
 ## Done
 
@@ -474,6 +530,13 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-12 | The mock saves and loads states as a stream of typed items, with a unit standing in for PGM which writes to every MMIO2 page | A get which does not match its put shows, and so does a load which reaches device memory |
 | 2026-11-12 | The management gets the layout of a function as values under the names they have in the configuration and stores them as they are | Nothing outside the device has to know what a layout consists of, and nothing has to change there when it gets another value |
 | 2026-11-12 | A random test for the device in the slot with checks after every operation, next to the tests for single cases | The cases nobody thought of are sequences; the first run with interrupts in it found a defect the driver has had all along |
+| 2026-11-13 | The attention button of the slot is pressed along with a device being put in when that does not bring the link up | A guest with a slot which has a button need not ask for presence changes, and Linux does not; other virtual machines press the button on insertion for the same reason. With the power of the slot on, the link coming up tells the guest and the button stays alone, as a press on a slot which is on asks for the opposite |
+| 2026-11-13 | The slot keeps its attention button | Without it there is no way to ask the guest to let go of a device in an orderly way |
+| 2026-11-13 | The secondary bus reset of the root port takes the link to the slot down | A guest which resets a device this way goes on as if the device had been reset; with the link going down it is |
+| 2026-11-13 | INTx is raised on an EMT and lowered when the interrupt setup it came from ends or the device goes | The thread waiting for interrupts must not wait for a lock whose holder waits for it; a line raised by a device which is gone or uses another interrupt must not stay raised |
+| 2026-11-13 | A host which has fewer interrupt vectors than asked for: the device takes what there is | The alternative is a device without any interrupt; guests mostly use the first vectors |
+| 2026-11-13 | A PCI device of the host in a hot-plug slot has to be alone on its guest bus, checked when the VM starts | Everything on the bus of the slot comes and goes for the guest with the device; an emulated controller there would vanish with it |
+| 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
 
