@@ -766,9 +766,6 @@ struct PCIBusAddress
         if (mu16Domain < a.mu16Domain)
             return true;
 
-        if (mu16Domain > a.mu16Domain)
-            return false;
-
         if (miBus < a.miBus)
             return true;
 
