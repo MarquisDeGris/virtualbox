@@ -38,6 +38,11 @@ full build of an earlier state). What was written after that is on
 - The interfaces of the passthrough device are found at LUN 0 of the device
   instance, which is where Main looks for the interfaces of a device
   (`PDMR3QueryDeviceLun`); with a test.
+- Host PCI addresses are ordered by their domain first
+  (`PCIBusAddress::operator<`). With addresses from more than one domain
+  the order was not a consistent one, and the configuration of a VM is
+  built in that order. With a test, which makes it 50 tests and three
+  fuzz tests once they can run.
 - WP7, the management, as a first complete draft:
   - Hot-plug is switched on for a VM with the extra data item
     `VBoxInternal2/HostPCIHotPlug`. Main then gives the root port in front
