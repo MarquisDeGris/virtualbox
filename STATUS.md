@@ -86,8 +86,10 @@ full build of an earlier state). What was written after that is on
   - Root port: all writes to its config space take the PCI lock. The
     guest comes with it, a reset of the VM and loading a saved state did
     not, while the device in the slot comes and goes on other threads.
-  - Root port: a port without the slot refuses the saved state of a port
-    with it; the other direction was refused already.
+  - Root port: if the device in its slot comes and goes, the port does not
+    let the VM be built with anything else on its secondary bus. Main
+    checks the same from the configuration (below); the port does not
+    rely on that.
   - Passthrough device: a host which is short of interrupt vectors sets
     up none and tells how many it has. The device takes those instead of
     going without interrupts.
@@ -124,7 +126,33 @@ full build of an earlier state). What was written after that is on
 draft.
 
 Nothing of it goes onto the code branch before it was built and tested.
-`scratch/mgmt` is at `c51373a0`. The last attempt to start a run was on
+What the review round wrote was read once more by three readers who had
+not seen it, in place of the compiler and of a first test run: one for the
+device code, one who went through every new and changed test step by step
+against the code, one for Main and `VBoxManage`. None found anything which
+would not compile, and the tests came out as written. What they did find
+was looked at and changed:
+
+- The interrupt eventfds are all emptied before an interrupt setup, not
+  only as many as the setup has vectors, and they no longer make a reader
+  wait. INTx is lowered before its setup is taken down, as that can fail.
+- A check added in the first round is gone again: a port without the slot
+  refusing the saved state of a port with one. It went by config space
+  which the guest of such a port can write to, so a guest could have kept
+  its own state from being loaded. A state which does not fit is refused
+  by the passthrough device, which has a unit of its own in the state.
+- The time a guest gets in `IConsole::unplugHostPCIDevice` counts from
+  when it is asked. A mistake in the configuration of the PCI devices of
+  the host ends the VM start with its message and without a release
+  assertion. The message about a PCI bridge on the bus of the slot says
+  what the bridge is there for.
+- `VBoxManage`: the numbers of a host PCI address take no prefix, and
+  `@` may follow the address only where a guest address can.
+- A test which was there before could fail now and then (the reset count
+  when the guest lets go of a device while another thread detaches it);
+  it allows for both orders now.
+
+`scratch/mgmt` is at `6e85def2`. The last attempt to start a run was on
 2026-11-13 at 21:40 UTC; the answer is still the one above.
 
 ## Done
