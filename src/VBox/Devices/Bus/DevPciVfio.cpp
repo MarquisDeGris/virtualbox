@@ -1931,25 +1931,20 @@ static void pciVfioIntxLower(PVFIOPCI pThis, PVFIOPCIFUN pFun)
  * in them under an interrupt setup which is over is no interrupt of the setup
  * which begins.  The interrupt thread is not looking at them when this is called.
  *
+ * All of them are emptied, as the interrupt thread looks at all the eventfds an
+ * interrupt type can have, whether the guest uses that many vectors or not.
+ * Reading takes all there is in an eventfd, and it does not wait if there is
+ * nothing.
+ *
  * @param   pFun        The function.
- * @param   cFdEvts     The number of eventfds to empty, starting with the first one.
  */
-static void pciVfioIrqEvtFdsDrain(PCVFIOPCIFUN pFun, uint32_t cFdEvts)
+static void pciVfioIrqEvtFdsDrain(PCVFIOPCIFUN pFun)
 {
-    for (uint32_t i = 0; i < cFdEvts && i < pFun->cFdEvts; i++)
+    for (uint32_t i = 0; i < pFun->cFdEvts; i++)
     {
-        /* Reading an eventfd which is empty would block. */
-        struct pollfd PollFd;
-        PollFd.fd      = pFun->paFdEvts[i];
-        PollFd.events  = POLLIN;
-        PollFd.revents = 0;
-        if (   poll(&PollFd, 1, 0 /*timeout*/) == 1
-            && (PollFd.revents & POLLIN))
-        {
-            uint64_t      u64Ign = 0;
-            ssize_t const cbRead = read(PollFd.fd, &u64Ign, sizeof(u64Ign));
-            RT_NOREF(cbRead);
-        }
+        uint64_t      u64Ign = 0;
+        ssize_t const cbRead = read(pFun->paFdEvts[i], &u64Ign, sizeof(u64Ign));
+        RT_NOREF(cbRead);
     }
 }
 
@@ -2042,7 +2037,8 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
                     paIrqFds[i].revents = 0;
                     uint64_t u64;
                     ssize_t cb = read(paIrqFds[i].fd, &u64, sizeof(u64));
-                    Assert(cb == sizeof(u64)); RT_NOREF(cb);
+                    if (cb != (ssize_t)sizeof(u64)) /* Nothing in it after all, the eventfds don't make a reader wait. */
+                        continue;
 
                     uint16_t const uVec = i - 1;
                     if (pFun->uIrqModeCur == VFIO_PCI_MSIX_IRQ_INDEX)
@@ -2227,6 +2223,15 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
      */
     if (pFun->uIrqMode != UINT8_MAX)
     {
+        /* INTx doesn't stay raised for the guest when the device is to lose the means of
+           raising it, and an interrupt which is on its way to the guest is not wanted any
+           more.  This comes first, as what follows can fail. */
+        if (pFun->uIrqMode == VFIO_PCI_INTX_IRQ_INDEX)
+        {
+            ASMAtomicIncU32(&pFun->uIntxGen);
+            pciVfioIntxLower(pThis, pFun);
+        }
+
         int rc = pciVfioIrqPollerSwitchMode(pThis, pFun, UINT8_MAX);
         if (RT_FAILURE(rc))
             return rc;
@@ -2241,10 +2246,6 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
         int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &IrqSet);
         if (rcLnx == -1)
             return RTErrConvertFromErrno(errno);
-
-        /* INTx doesn't stay raised for the guest when the device has no means to raise it any more. */
-        if (pFun->uIrqMode == VFIO_PCI_INTX_IRQ_INDEX)
-            pciVfioIntxLower(pThis, pFun);
 
         pFun->uIrqMode    = UINT8_MAX;
         pFun->cIrqVectors = 0;
@@ -2264,7 +2265,7 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
 
     /* What is in the eventfds from before is no interrupt of this setup, and an INTx
        interrupt which is on its way to the guest is none of it either. */
-    pciVfioIrqEvtFdsDrain(pFun, cVectors);
+    pciVfioIrqEvtFdsDrain(pFun);
     if (uVfioIrq == VFIO_PCI_INTX_IRQ_INDEX)
         ASMAtomicIncU32(&pFun->uIntxGen);
 
@@ -4305,20 +4306,25 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
         for (nfds_t i = 1; i < cFds; i++)
             if (aFds[i].revents & POLLIN)
             {
-                uint64_t      u64Ign = 0;
-                ssize_t const cbRead = read(aFds[i].fd, &u64Ign, sizeof(u64Ign));
-                RT_NOREF(cbRead);
+                /* Which device this is about is noted down before the notification is taken.
+                   If another device was put into the slot meanwhile, the notification is gone,
+                   see pciVfioNotifierSetup(), or it is not about the device in the slot. */
+                uint32_t const uSlotGen = ASMAtomicReadU32(&pThis->uSlotGen);
+                uint64_t       u64Ign   = 0;
+                ssize_t const  cbRead   = read(aFds[i].fd, &u64Ign, sizeof(u64Ign));
+                if (cbRead != (ssize_t)sizeof(u64Ign))
+                    continue;
                 PVFIOPCIFUN const pFun = &pThis->aPciFuns[aiPciFuns[i]];
                 if (!pThis->pDevInsPort)
                     /* Nobody to ask and nobody to tell. */
                     pciVfioFunSetGone(pThis, pFun,
                                       afRequest[i] ? "the host wants the device back" : "the host reported an error of the device");
                 else if (!afRequest[i])
-                    pciVfioSlotEmpty(pThis, "the host reported an error of the device", NULL /*puSlotGen*/);
+                    pciVfioSlotEmpty(pThis, "the host reported an error of the device", &uSlotGen);
                 else if (   !pciVfioFunAnswers(pFun)
                          || !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort))
                     /* Unplugged, or nothing the guest would have to let go of. */
-                    pciVfioSlotEmpty(pThis, "the host wants the device back", NULL /*puSlotGen*/);
+                    pciVfioSlotEmpty(pThis, "the host wants the device back", &uSlotGen);
                 else
                 {
                     /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
@@ -4326,7 +4332,7 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                     if (!msLetGoDeadline)
                     {
                         msLetGoDeadline = RT_MAX(RTTimeMilliTS() + pThis->cMsGuestRelease, 1);
-                        uSlotGenLetGo   = ASMAtomicReadU32(&pThis->uSlotGen);
+                        uSlotGenLetGo   = uSlotGen;
                     }
                 }
             }
@@ -5958,7 +5964,7 @@ static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV
         pFun->cFdEvts = cMaxVectors;
         for (uint32_t i = 0; i < cMaxVectors; i++)
         {
-            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->paFdEvts[i]);
+            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC | LNX_EFD_NONBLOCK, &pFun->paFdEvts[i]);
             if (RT_FAILURE(rc))
                 return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                        N_("Failed to create event file descriptor %u out of %u for interrupts"), i, cMaxVectors);
@@ -6310,7 +6316,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
 
         for (uint32_t i = 0; i < cMaxVectors; i++)
         {
-            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->paFdEvts[i]);
+            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC | LNX_EFD_NONBLOCK, &pFun->paFdEvts[i]);
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Failed to create event file descriptor %u out of %u for interrupts"),

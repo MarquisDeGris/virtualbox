@@ -4255,6 +4255,32 @@ static void tstPortDevice(void)
         RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 1);
     }
     tstFixtureTeardown();
+
+    /*
+     * The device in the slot comes and goes, so it has the bus of the slot to
+     * itself: with anything else there, here a bridge to a third bus, the VM is
+     * not built.
+     */
+    pDev = NULL;
+    rc = tstPortFixtureSetup("RootCmplxRootPort", true /*fHotPlug*/, &Model, &pDev, &pDevInsPort, &pDevInsDev);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        PCFGMNODE pCfgInst = tstCfgNodeCreate(NULL, "1");
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIBusNo", 1), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIDeviceNo", 3), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgInst, "PCIFunctionNo", 0), VINF_SUCCESS);
+        tstCfgNodeCreate(pCfgInst, "Config");
+        rc = tstPdmDevCreate(&g_DevicePciIch9Bridge, 1 /*iInstance*/, pCfgInst, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("ich9pcibridge on the bus of the slot: %Rrc - %s\n", rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            rc = tstPdmInitComplete();
+            RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("%Rrc - %s\n", rc, tstPdmGetLastError()));
+            RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("no message\n"));
+        }
+    }
+    tstFixtureTeardown();
 }
 
 
@@ -4394,8 +4420,9 @@ static void tstPortSavedState(void)
     }
 
     /*
-     * The other way around: a port without a hot-plug capable slot takes its own
-     * state and not the one of a port with such a slot.
+     * A port without a hot-plug capable slot has nothing to refuse: its guest can
+     * write to these places of the config space, and whatever it wrote there has
+     * to load again.
      */
     PPDMDEVINS pDevInsPort = NULL;
     int rc = tstPortFixtureSetup("RootCmplxRootPort", false /*fHotPlug*/, NULL, NULL, &pDevInsPort, NULL);
@@ -4408,11 +4435,8 @@ static void tstPortSavedState(void)
 
         uint8_t * const pbCfg = &pDevInsPort->apPciDevs[0]->abConfig[0];
         pbCfg[TSTPORT_EXP_FLAGS + 1] |= (uint8_t)(VBOX_PCI_EXP_FLAGS_SLOT >> 8);
+        pbCfg[TSTPORT_SLTCAP]        |= VBOX_PCI_EXP_SLTCAP_HPC;
         RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VINF_SUCCESS);
-        pbCfg[TSTPORT_SLTCAP] |= VBOX_PCI_EXP_SLTCAP_HPC;
-        RTTESTI_CHECK_RC(tstPdmLoadStateDone(VERR_SSM_INTEGRITY_CRC), VINF_SUCCESS);
-        RTTESTI_CHECK_RC(tstPdmLoadStateDone(VINF_SUCCESS), VERR_SSM_LOAD_CONFIG_MISMATCH);
-        RTTESTI_CHECK_MSG(*tstPdmGetLastError() != '\0', ("no message\n"));
     }
     tstFixtureTeardown();
 }
@@ -4927,8 +4951,10 @@ static void tstSlotDetach(void)
                         RTTESTI_CHECK_RC(RTThreadWait(hThread, RT_MS_30SEC, NULL), VINF_SUCCESS);
                         RTTESTI_CHECK_RC(Args.rc, VINF_SUCCESS);
                     }
-                    /* The device was reset when the guest switched the slot off. */
-                    RTTESTI_CHECK(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore + 1);
+                    /* The device was reset when the guest switched the slot off, unless the thread
+                       which detaches it was faster: that one goes by the link, which is down before
+                       the device is told, and a device which is out of service is not reset. */
+                    RTTESTI_CHECK(tstVfioKrnlDevGetResetCount(pDev) - cResetsBefore <= 1);
                     break;
                 }
 
@@ -6688,13 +6714,18 @@ static void tstSlotIrqLeftOver(void)
     int rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
     if (RT_SUCCESS(rc))
     {
-        /* The guest uses the device with MSI. */
+        /* The guest uses the device with MSI, with all four vectors it has. */
         tstSlotGuestEnableDevice();
         tstSlotCheckMsi(__LINE__, pDev);
+        uint32_t const fMsgCtrlOld = tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2, 2);
+        tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2,
+                          (fMsgCtrlOld & ~(uint32_t)VBOX_PCI_MSI_FLAGS_QSIZE) | (2 << 4) | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_MSI_IRQ_INDEX) == 4);
 
-        /* The VM stands still.  The device raises an interrupt, is taken out, and one is put in. */
+        /* The VM stands still.  The device raises two interrupts, is taken out, and one is put in. */
         tstPdmSuspend();
         RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 2), VINF_SUCCESS);
         RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         uint32_t const cReqsBefore = tstPdmGetRequestCount();

@@ -4201,9 +4201,13 @@ DECLHIDDEN(bool) devpciR3HotPlugSlotIsLinkUp(PPDMDEVINS pDevInsPort)
 
 /**
  * @callback_method_impl{FNSSMDEVLOADDONE,
- *      Checks that the state is one of a port with a hot-plug capable slot if the
- *      port has one and of a port without if it has none, and tells the guest
- *      what happened to the slot since the state was saved.}
+ *      Port with a hot-plug capable slot: checks that the state is one of a port
+ *      with such a slot and tells the guest what happened to the slot since the
+ *      state was saved.}
+ *
+ * @remarks A port without the slot has no such check.  What it could go by is
+ *          config space its guest can write to, and whatever a guest wrote
+ *          there has to load again.
  */
 static DECLCALLBACK(int) ich9pcibridgeR3SlotLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
 {
@@ -4215,22 +4219,6 @@ static DECLCALLBACK(int) ich9pcibridgeR3SlotLoadDone(PPDMDEVINS pDevIns, PSSMHAN
     /* Nothing to do here if loading failed, this gets called nevertheless. */
     if (RT_FAILURE(pHlp->pfnSSMHandleGetStatus(pSSM)))
         return VINF_SUCCESS;
-
-    /*
-     * Without a slot: the state must not be one of a port with a slot, as the
-     * guest would go on with a slot which has nothing behind its registers.
-     */
-    if (!PDMINS_2_DATA(pDevIns, PDEVPCIBUS)->fHotPlugSlot)
-    {
-        /* safe, only needs to go to the config space array */
-        if (   PDMPciDevGetByte(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET) == VBOX_PCI_CAP_ID_EXP
-            && (PDMPciDevGetWord(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + 2) & VBOX_PCI_EXP_FLAGS_SLOT)
-            && (PDMPciDevGetDWord(pPciDev, ICH9PCIBRIDGE_EXP_CAP_OFFSET + ICH9PCIBRIDGE_EXP_SLTCAP) & VBOX_PCI_EXP_SLTCAP_HPC))
-            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
-                                            N_("The state was saved with a different hot-plug configuration of PCI bridge #%u"),
-                                            pDevIns->iInstance);
-        return VINF_SUCCESS;
-    }
 
     /*
      * The config space of the port came from the saved state, the parts the
@@ -4285,7 +4273,27 @@ static DECLCALLBACK(int) ich9pcibridgeR3InitComplete(PPDMDEVINS pDevIns)
     /* What is on the secondary bus is known now: set the hot-plug capable slot up for it. */
     if (PDMINS_2_DATA(pDevIns, PDEVPCIBUS)->fHotPlugSlot)
     {
-        PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot.fInitComplete = true;
+        PDEVPCIBUS const    pBus  = PDMINS_2_DATA(pDevIns, PDEVPCIBUS);
+        PDEVPCIHPSLOT const pSlot = &PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC)->HotPlugSlot;
+
+        /*
+         * Everything on the secondary bus is the device in the slot.  If that is a
+         * device which comes and goes, nothing else can be there: it would come and
+         * go for the guest with that device.  Whoever configures the VM sees to
+         * that; this is for when that went wrong.
+         */
+        if (pSlot->pDevInsClient)
+            for (uint32_t uDevFn = 0; uDevFn < RT_ELEMENTS(pBus->apDevices); uDevFn++)
+                if (   pBus->apDevices[uDevFn]
+                    && pBus->apDevices[uDevFn]->Int.s.CTX_SUFF(pDevIns) != pSlot->pDevInsClient)
+                    return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                               N_("PCI bridge #%u has a hot-plug capable slot with a device which comes and "
+                                                  "goes. The device '%s' can't be on the bus of that slot as well, at "
+                                                  "%02x:%02x.%u"),
+                                               pDevIns->iInstance, pBus->apDevices[uDevFn]->pszNameR3,
+                                               pBus->iBus, uDevFn >> 3, uDevFn & 7);
+
+        pSlot->fInitComplete = true;
         ich9pcibridgeR3SlotReset(pDevIns);
     }
     return VINF_SUCCESS;
@@ -4558,7 +4566,7 @@ static DECLCALLBACK(int) ich9pcibridgeR3Construct(PPDMDEVINS pDevIns, int iInsta
                                 "pgm" /* before */,
                                 NULL, NULL, NULL,
                                 NULL, devpciR3BridgeCommonSaveExec, NULL,
-                                NULL, devpciR3BridgeCommonLoadExec, ich9pcibridgeR3SlotLoadDone);
+                                NULL, devpciR3BridgeCommonLoadExec, fHotPlug ? ich9pcibridgeR3SlotLoadDone : NULL);
     AssertLogRelRCReturn(rc, rc);
 
     return VINF_SUCCESS;
