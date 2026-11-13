@@ -208,6 +208,7 @@ typedef FNTSTPDMSTATEHOOK *PFNTSTPDMSTATEHOOK;
 int             tstPdmInit(uint32_t cbRam);
 void            tstPdmTerm(void);
 int             tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PPDMDEVINS *ppDevIns);
+int             tstPdmQueryDeviceLun(const char *pszDevice, uint32_t iInstance, uint32_t iLun, PPDMIBASE *ppBase);
 void            tstPdmSetExecutionEngine(uint8_t bExecEngine);
 int             tstPdmInitComplete(void);
 void            tstPdmPowerOn(void);

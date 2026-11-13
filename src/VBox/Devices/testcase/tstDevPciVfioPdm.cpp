@@ -152,6 +152,8 @@ typedef struct TSTPDMDEV
     size_t              cbDevIns;
     /** The instance node of the configuration (the parent of "Config"). */
     PCFGMNODE           pCfgInst;
+    /** The base interface the device has at LUN 0, NULL if it has no such LUN. */
+    PPDMIBASE           pLun0Base;
 } TSTPDMDEV;
 /** Pointer to a device instance record. */
 typedef TSTPDMDEV *PTSTPDMDEV;
@@ -2093,6 +2095,25 @@ static DECLCALLBACK(int) tstPdmHlp_SSMRegister(PPDMDEVINS pDevIns, uint32_t uVer
 }
 
 
+/** @interface_method_impl{PDMDEVHLPR3,pfnDriverAttach} */
+static DECLCALLBACK(int) tstPdmHlp_DriverAttach(PPDMDEVINS pDevIns, uint32_t iLun, PPDMIBASE pBaseInterface,
+                                                PPDMIBASE *ppBaseInterface, const char *pszDesc)
+{
+    RT_NOREF(pszDesc);
+    *ppBaseInterface = NULL;
+    PTSTPDMDEV pDev = (PTSTPDMDEV)pDevIns->Internal.s.pDev;
+    AssertReturn(pDev, VERR_INTERNAL_ERROR_3);
+    AssertReturn(g_Pdm.fCreating, VERR_VM_INVALID_VM_STATE);
+    AssertPtrReturn(pBaseInterface, VERR_INVALID_POINTER);
+    AssertReturn(iLun == 0, VERR_NOT_SUPPORTED);
+    AssertReturn(!pDev->pLun0Base, VERR_PDM_DRIVER_ALREADY_ATTACHED);
+
+    /* The LUN is there from now on.  The configuration has no driver for it. */
+    pDev->pLun0Base = pBaseInterface;
+    return VERR_PDM_NO_ATTACHED_DRIVER;
+}
+
+
 /** @interface_method_impl{PDMDEVHLPR3,pfnDBGFInfoRegister} */
 static DECLCALLBACK(int) tstPdmHlp_DBGFInfoRegister(PPDMDEVINS pDevIns, const char *pszName, const char *pszDesc,
                                                     PFNDBGFHANDLERDEV pfnHandler)
@@ -2183,6 +2204,7 @@ static void tstPdmHlpInit(void)
     g_tstPdmDevHlpR3.pfnSetDeviceCritSect               = tstPdmHlp_SetDeviceCritSect;
     g_tstPdmDevHlpR3.pfnSSMRegister                     = tstPdmHlp_SSMRegister;
     g_tstPdmDevHlpR3.pfnDBGFInfoRegister                = tstPdmHlp_DBGFInfoRegister;
+    g_tstPdmDevHlpR3.pfnDriverAttach                    = tstPdmHlp_DriverAttach;
     g_tstPdmDevHlpR3.pfnCFGMQueryString                 = tstPdmHlp_CFGMQueryString;
     g_tstPdmDevHlpR3.pfnCFGMQueryStringDef              = tstPdmHlp_CFGMQueryStringDef;
     g_tstPdmDevHlpR3.pfnCFGMQueryU64Def                 = tstPdmHlp_CFGMQueryU64Def;
@@ -2418,6 +2440,41 @@ int tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PP
     AssertRelease(g_Pdm.cZombies < RT_ELEMENTS(g_Pdm.aZombies));
     g_Pdm.aZombies[g_Pdm.cZombies++] = *pDev;
     RT_ZERO(*pDev);
+    return rc;
+}
+
+
+/**
+ * Queries the base interface of a LUN of a device, like PDMR3QueryDeviceLun
+ * does it for whoever manages the VM.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_PDM_DEVICE_NOT_FOUND if there is no device by that name.
+ * @retval  VERR_PDM_DEVICE_INSTANCE_NOT_FOUND if the device has no such instance.
+ * @retval  VERR_PDM_LUN_NOT_FOUND if the instance has no such LUN.
+ * @param   pszDevice           The name of the device.
+ * @param   iInstance           The instance.
+ * @param   iLun                The LUN.
+ * @param   ppBase              Where to return the base interface.
+ */
+int tstPdmQueryDeviceLun(const char *pszDevice, uint32_t iInstance, uint32_t iLun, PPDMIBASE *ppBase)
+{
+    *ppBase = NULL;
+    AssertReturn(g_Pdm.fInitialized, VERR_WRONG_ORDER);
+    int rc = VERR_PDM_DEVICE_NOT_FOUND;
+    for (uint32_t i = 0; i < g_Pdm.cDevs; i++)
+        if (!strcmp(g_Pdm.aDevs[i].pDevIns->pReg->szName, pszDevice))
+        {
+            rc = VERR_PDM_DEVICE_INSTANCE_NOT_FOUND;
+            if (g_Pdm.aDevs[i].pDevIns->iInstance == iInstance)
+            {
+                if (   iLun != 0
+                    || !g_Pdm.aDevs[i].pLun0Base)
+                    return VERR_PDM_LUN_NOT_FOUND;
+                *ppBase = g_Pdm.aDevs[i].pLun0Base;
+                return VINF_SUCCESS;
+            }
+        }
     return rc;
 }
 

@@ -138,7 +138,8 @@
  *
  * Whoever manages the VM does all of this through the PDMIPCIPASSTHROUGHPORT interface of the
  * device: taking the device out of the slot, putting it in, asking how things are with it, and
- * getting the layout to store for the next start of the VM.
+ * getting the layout to store for the next start of the VM. The interface is found at LUN 0 of
+ * the device instance, which has no driver.
  *
  * @section sec_dev_vfio_requirements
  *
@@ -5867,6 +5868,15 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                 pciVfioLoadPrep, pciVfioLoadExec, pciVfioLoadDone);
     if (RT_FAILURE(rc))
         return rc;
+
+    /* The management finds the interfaces of the device at LUN 0, see pciVfioQueryInterface().
+       There is no driver for it to be attached. */
+    PPDMIBASE pDrvBase = NULL;
+    rc = PDMDevHlpDriverAttach(pDevIns, 0 /*iLun*/, &pDevIns->IBase, &pDrvBase, "Management Port");
+    if (   RT_FAILURE(rc)
+        && rc != VERR_PDM_NO_ATTACHED_DRIVER)
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                   N_("Failed to set up the LUN for the management of the passed through PCI device"));
 
     /*
      * Validate configuration.
