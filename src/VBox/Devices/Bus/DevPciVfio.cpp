@@ -36,16 +36,109 @@
  *
  * @section sec_dev_vfio_shortcomings
  *
- * The current emulation only supports MSI based interrupts. The legacy INTx style
+ * The emulation supports MSI and MSI-X interrupts. The legacy INTx style
  * doesn't work currently because VFIO auto masks those after they fired to prevent
  * an interrupt storm on the host and requires explicit unmasking after the guest
  * handled it but we currently lack a callback mechanism from the I/O APIC to get notified
  * about EOI events from the guest for the device.
- * MSI-X interrupt support is not implemented right now, so the passed through device needs
- * to support MSI in order to be supported.
+ * The passed through device therefore needs to support MSI or MSI-X.
  *
- * Saved states are not supported, and will never be as we can't capture the PCIe device state
- * and replay it when resuming.
+ * The state of the device can't be saved, and never will be as we can't capture the PCIe device
+ * state and replay it when resuming. Saving the state of the VM and teleporting it are refused
+ * while the device is part of the VM, and a saved state isn't loaded into a VM which has the
+ * device, as it can only have been made without it. A device in a hot-plug capable slot is the
+ * exception: the state can be saved while the slot is empty, see @ref sec_dev_vfio_hotplug.
+ *
+ * @section sec_dev_vfio_guest_view     What the guest gets to see
+ *
+ * The config space is assembled from what the device has: the identification registers, the BARs
+ * with their sizes and types, and the capabilities this emulation knows how to deal with. Each
+ * config space byte is either emulated, passed through to the device or not there for the guest;
+ * capabilities which are not handled are left out of the capability list. A device whose
+ * capability lists loop or overlap is refused.
+ *
+ * The MSI capability is emulated with the layout it has on the device. MSI-X is emulated with a
+ * table and pending bit array of the guest's own at the place where the device has them; the
+ * table of the device belongs to the host kernel and is never reachable by the guest. Interrupts
+ * arrive through eventfds, one per vector, and are forwarded with what the guest has programmed,
+ * masked ones are held back and marked pending.
+ *
+ * Memory BARs are mapped into the guest where VFIO allows it, except for the pages holding the
+ * MSI-X table and pending bit array, which are trapped. Trapped accesses, I/O port BARs and the
+ * legacy VGA ranges go through the device file descriptor. A device which doesn't answer reads as
+ * all ones and ignores writes, the guest never gets an error for it.
+ *
+ * @section sec_dev_vfio_memory         Guest memory
+ *
+ * All guest RAM is made available to the device through the IOMMU when the VM is constructed, at
+ * guest physical addresses. If this fails the VM doesn't start. The mappings stay as they are for
+ * as long as the VM exists, which is why the guest memory has to stay at the same place in the VM
+ * process, see the requirements. The guest can't enable bus mastering without them.
+ *
+ * @section sec_dev_vfio_reset          Reset
+ *
+ * A reset of the VM disables interrupts, bus mastering and decoding of each function and then
+ * resets it. Functions which can't be reset on their own, as is common for devices with several
+ * functions, are reset through the bus they are on, which the host kernel permits if everything on
+ * that bus is passed through to the VM. If there is no way to reset a function it stays disabled
+ * until the guest sets it up again, but keeps the rest of its state; this is noted in the release
+ * log.
+ *
+ * @section sec_dev_vfio_removal        The host taking the device back
+ *
+ * The host can want the device back while the VM exists, when it gets unplugged above all, and it
+ * can report an error of the device it can't recover from. A thread which doesn't depend on the
+ * state of the VM watches out for both. The function is taken out of service then, see
+ * pciVfioFunSetGone(): accesses of the guest are answered like those to hardware which isn't
+ * there, the device memory mapped into the guest is replaced by ordinary memory in place, and the
+ * device is let go of so the host isn't kept waiting. An EMT then removes the guest mappings of
+ * the BARs, and from there on the guest finds nothing where the function was. Other functions of
+ * the device stay in service.
+ *
+ * Unless the device is in a hot-plug capable slot, see below, the guest isn't asked and isn't told,
+ * for it this is hardware which stops answering. There is no way back either: the function stays
+ * out of service until the VM is powered off.
+ *
+ * @section sec_dev_vfio_hotplug        Hot-plug capable slot
+ *
+ * A device behind a PCI express root port with a hot-plug capable slot is the device in that slot,
+ * with all its functions. The port has such a slot with the HotPlug setting of ich9pcibridge, and
+ * the guest makes use of it if the ACPI device has the PciExpressNativeHotPlug setting. The guest
+ * can switch the slot off and on then, which disables and resets the device like a reset of the VM
+ * does.
+ *
+ * Before a device in such a slot is taken away from the guest, the guest is asked to let go of it
+ * by the attention button of the slot and gets time for it; it shows that it is done by switching
+ * the slot off. This is how it goes when the host wants the device back while the device still
+ * answers, and when the device is detached on request, see pciVfioPortDetach(). A guest which
+ * doesn't react loses the device the hard way when the time is up, if it is the host which waits
+ * or if the one who made the request insists. The slot is empty afterwards and the guest is told
+ * so. An error of the device reported by the host and a device which no longer answers empty the
+ * slot at once.
+ *
+ * A device can be put into the empty slot while the VM runs, see pciVfioPortAttach(). It has to be
+ * like the device the VM was started with as far as the VM was built around that one: the BARs,
+ * the place of the MSI-X table, the size of the ROM and the interrupts. A device which is not is
+ * refused. The guest is told that there is a device in the slot and takes it from there.
+ *
+ * The VM can also start without the device and get it later. It has to know what to be built
+ * from then, which is the Layout node in the configuration of each function, see
+ * pciVfioFunLayoutFromCfg(). The values are those pciVfioPortQueryLayout() tells for a VM which
+ * was started with the device. A device which is there when the VM starts is what counts, the
+ * configured layout is not looked at then.
+ *
+ * The state of the VM can be saved and the VM can be teleported while the slot is empty, and
+ * only then: the device has to be taken out first, and no device is put in while the state is
+ * being saved. The guest finds the slot empty when the state is loaded. If the VM which loads
+ * the state has the device, the device is taken out of the slot before anything is loaded and
+ * put in again afterwards, which is a device being plugged in for the guest. This way whatever
+ * reads and writes the memory of the VM for the saved state gets the ordinary memory keeping
+ * the place of the device memory, and never the memory of a device. A state is only loaded
+ * into a VM which is built from the same layout as the one which saved it.
+ *
+ * Whoever manages the VM does all of this through the PDMIPCIPASSTHROUGHPORT interface of the
+ * device: taking the device out of the slot, putting it in, asking how things are with it, and
+ * getting the layout to store for the next start of the VM.
  *
  * @section sec_dev_vfio_requirements
  *
@@ -54,6 +147,10 @@
  *     - Linux host with at least kernel 6.12
  *     - The VM needs to have ICH9 configured
  *     - The VM needs to have UEFI configured
+ *     - The VM needs to use the native execution engine (KVM), as the guest memory has to stay
+ *       at a fixed place in the VM process while a device can access it
+ *     - The user running the VM needs to be allowed to lock all of the guest memory (RLIMIT_MEMLOCK),
+ *       it is made available to the device when the VM starts
  *
  * @section sec_dev_vfio_configuration
  *
@@ -105,7 +202,10 @@
  *
  * Make /dev/vfio/devices/vfio0, /dev/vfio/devices/vfio1 and /dev/iommu read/write accessible to the user running the VM.
  *
- * Create a VM and configure it to make use of the ICH9 chipset and enable EFI. Then add the following extradata to the VM
+ * Create a VM and configure it to make use of the ICH9 chipset and enable EFI. Select the native execution engine with
+ *    VBoxManage modifyvm vmname --vm-execution-engine native-api
+ *
+ * Then add the following extradata to the VM
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/ich9pcibridge/0/Config/ExpressEnabled" 1
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/ich9pcibridge/0/Config/ExpressPortType" "RootCmplxRootPort"
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/ExposeVga" 1
@@ -127,6 +227,14 @@
  * fails because both devices want to register those ranges. Disable the emulated graphics controller with
  *    VBoxManage modifyvm vmname --graphicscontroller none
  *
+ * Instead of the VFIO device node with VfioPath a function can be given by its address on the host, the node is
+ * looked up in sysfs then. The address has to have the form the host kernel uses for it
+ *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/HostAddress" 0000:0a:00.0
+ *
+ * The InterceptMmio setting of a function makes all accesses to its memory BARs go through the device emulation
+ * instead of mapping the BARs into the guest. This is slow and meant for debugging
+ *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/InterceptMmio" 1
+ *
  * After that you can start the VM with either the usual GUI or VBoxHeadless.
  */
 
@@ -142,11 +250,18 @@
 #include <VBox/vmm/pdmdev.h>
 #include <VBox/vmm/stam.h>
 #include <VBox/vmm/pdmpcidev.h>
+#include <VBox/vmm/vmapi.h>
+#include <iprt/asm.h>
 #include <iprt/assert.h>
+#include <iprt/critsect.h>
+#include <iprt/ctype.h>
 #include <iprt/dir.h>
 #include <iprt/mem.h>
 #include <iprt/path.h>
 #include <iprt/string.h>
+#include <iprt/thread.h>
+#include <iprt/time.h>
+#include <iprt/uuid.h>
 #include <iprt/errcore.h>
 
 #include <iprt/linux/sysfs.h>
@@ -177,6 +292,10 @@
 
 /** eventfd2() syscall for the interrupt handling. */
 #define LNX_SYSCALL_EVENTFD2          290
+/** Flag for eventfd2(): close the file descriptor on exec, same value as O_CLOEXEC. */
+#define LNX_EFD_CLOEXEC               O_CLOEXEC
+/** Flag for eventfd2(): reading doesn't block, same value as O_NONBLOCK. */
+#define LNX_EFD_NONBLOCK              O_NONBLOCK
 
 /** Invalid access. */
 #define VFIO_PCI_CFG_SPACE_ACCESS_INVALID     0
@@ -186,6 +305,22 @@
 #define VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT  2
 /** Emulate the access using a special handler. */
 #define VFIO_PCI_CFG_SPACE_ACCESS_EMULATE     3
+
+/** Start of the legacy VGA memory range. */
+#define VFIO_PCI_VGA_MEM_START                UINT32_C(0x000a0000)
+/** Size of the legacy VGA memory range. */
+#define VFIO_PCI_VGA_MEM_SIZE                 UINT32_C(0x00020000)
+
+/** How long the attention button of a hot-plug capable slot is left alone after it was
+ * pressed, in milliseconds.  A guest takes five seconds from the button being pressed
+ * to doing something about it, and what it does takes time too.  Pressing the button
+ * again meanwhile takes the request back or, once the slot is off, asks for the
+ * opposite. */
+#define VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS       (10 * RT_MS_1SEC)
+
+/** The version of the saved state unit.  The unit has the layout the VM is built
+ * from for each function, nothing of the device. */
+#define VFIO_PCI_SAVED_STATE_VERSION          1
 
 
 /*********************************************************************************************************************************
@@ -205,6 +340,41 @@ typedef struct MSIXTBLENTRY
 typedef MSIXTBLENTRY *PMSIXTBLENTRY;
 
 
+/** Maximum number of segments a memory BAR gets split into: the two page
+ * ranges holding the MSI-X table and the pending bit array, and what is in
+ * front of, between and behind them. */
+#define VFIO_PCI_BAR_SEGS_MAX       5
+
+
+/**
+ * A part of a memory BAR which is either mapped into the guest or trapped.
+ */
+typedef struct VFIOPCIBARSEG
+{
+    /** The VFIO PCI function this segment belongs to. */
+    uint8_t             iPciFun;
+    /** The BAR this segment belongs to. */
+    uint8_t             iBar;
+    /** Flag whether accesses to the segment are trapped (true) or whether the
+     * device memory is mapped into the guest (false). */
+    bool                fTrapped;
+    /** Offset of the segment in the BAR. */
+    uint64_t            offBar;
+    /** Size of the segment, a multiple of the guest page size. */
+    uint64_t            cbSeg;
+    /** Type dependent handle. */
+    union
+    {
+        /** MMIO region of a trapped segment. */
+        IOMMMIOHANDLE   hMmio;
+        /** MMIO2 region of a mapped segment. */
+        PGMMMIO2HANDLE  hMmio2;
+    } hnd;
+} VFIOPCIBARSEG;
+typedef VFIOPCIBARSEG *PVFIOPCIBARSEG;
+typedef const VFIOPCIBARSEG *PCVFIOPCIBARSEG;
+
+
 /**
  * A single PCI BAR.
  */
@@ -214,33 +384,54 @@ typedef struct VFIOPCIBAR
     uint8_t             iPciFun;
     /** Region type, 0 - disabled, 1 - PIO, 2 - MMIO. */
     uint8_t             bType;
-    /** Flag whether MMIO region intercepts are enabled. */
+    /** Flag whether all of an MMIO region is trapped and handled through regular
+     * MMIO handlers, because it was configured that way or because the region
+     * can't be mapped. */
     bool                fInterceptMmio;
+    /** Number of segments of an MMIO region. */
+    uint8_t             cSegs;
     /** The address space flags for an MMIO region. */
     PCIADDRESSSPACE     enmAddrSpace;
     /** Size of the region. */
     uint64_t            cbRegion;
-    /** Type dependent data. */
-    union
-    {
-        /** Start offset of the PIO region. */
-        uint64_t        offPio;
-        /** Start of the MMIO mapping. */
-        volatile void   *pvMmio;
-    } u;
-    /** Type dependent handle. */
-    union
-    {
-        /** I/O port region. */
-        IOMIOPORTHANDLE hIoPort;
-        /** MMIO region. */
-        IOMMMIOHANDLE   hMmio;
-        /** MMIO2 region. */
-        PGMMMIO2HANDLE  hMmio2;
-    } hnd;
+    /** Start offset of the region in the VFIO device file. */
+    uint64_t            offVfio;
+    /** Start of the mapping of an MMIO region, NULL if the region is not mapped. */
+    volatile void       *pvMmio;
+    /** I/O port region handle of a PIO region. */
+    IOMIOPORTHANDLE     hIoPort;
+    /** The segments of an MMIO region, sorted by offset and without gaps. */
+    VFIOPCIBARSEG       aSegs[VFIO_PCI_BAR_SEGS_MAX];
 } VFIOPCIBAR;
 typedef VFIOPCIBAR *PVFIOPCIBAR;
 typedef const VFIOPCIBAR *PCVFIOPCIBAR;
+
+
+/**
+ * What the VM was built from for a function, as far as it isn't kept with the
+ * BARs.  A device which is put into the slot while the VM runs has to match it.
+ */
+typedef struct VFIOPCIFUNLAYOUT
+{
+    /** Size of the PCI config space. */
+    size_t              cbPciCfg;
+    /** Size of the ROM, 0 if there is none. */
+    size_t              cbRom;
+    /** The number of interrupt vectors for each interrupt type. */
+    uint32_t            acIrqVectors[3];
+    /** The BAR which VFIO says holds the MSI-X state, UINT8_MAX if none. */
+    uint8_t             iBarMsix;
+    /** Flag whether the guest gets MSI-X. */
+    bool                fMsix;
+    /** Offset of the MSI-X table in its BAR. */
+    uint32_t            offMsixTbl;
+    /** Size of the MSI-X table in bytes. */
+    uint32_t            cbMsixTbl;
+    /** Offset of the MSI-X pending bit array in its BAR. */
+    uint32_t            offMsixPba;
+    /** Size of the MSI-X pending bit array in bytes. */
+    uint32_t            cbMsixPba;
+} VFIOPCIFUNLAYOUT;
 
 
 /**
@@ -254,6 +445,24 @@ typedef struct VFIOPCIFUN
     uint32_t             uPciFun;
     /** The vfio cdev file descriptor .*/
     int                  iFdVfio;
+    /** Flag whether the function is attached to the I/O address space (IOMMUFD only). */
+    bool                 fIoasAttached;
+    /** Flag whether the function is out of service because the host took the device
+     * back or reported an error of it.  iFdVfio refers to what iFdInert refers to then. */
+    bool volatile        fGone;
+    /** Flag whether the guest finds nothing where the function was.  This follows fGone
+     * once the guest mappings of the BARs are removed, see pciVfioFunGoneOnEmt(). */
+    bool volatile        fGoneForGuest;
+    /** Flag whether memory of the device stayed mapped when the function went out of
+     * service, because putting ordinary memory into its place failed. */
+    bool volatile        fDevMemLeft;
+    /** What takes the place of the device file when the function goes out of service:
+     * a file descriptor which refuses everything the device file is used for. */
+    int                  iFdInert;
+    /** The eventfd the host signals when it wants the device back, -1 if it doesn't offer that. */
+    int                  iFdEvtReq;
+    /** The eventfd the host signals on an error of the device it can't recover from, -1 if it doesn't offer that. */
+    int                  iFdEvtErr;
 
     /** The start offset of the PCI config space. */
     uint64_t             offPciCfg;
@@ -304,40 +513,53 @@ typedef struct VFIOPCIFUN
     /** The eventfd to wakeup the IRQ poller. */
     int                  iFdWakeup;
 
-    /** The eventfds being pre-created. */
-    int                  afdEvts[VBOX_MSI_MAX_ENTRIES];
-    /** The current IRQ mode. */
+    /** The eventfds being pre-created, one for each vector of the interrupt
+     * type with the most vectors. */
+    int                  *paFdEvts;
+    /** Number of entries in paFdEvts. */
+    uint32_t             cFdEvts;
+    /** The interrupt type currently set up with VFIO, UINT8_MAX if none.
+     * This is what the thread changing the interrupt configuration goes by. */
+    uint8_t              uIrqMode;
+    /** The number of vectors set up with VFIO for uIrqMode. */
+    uint32_t             cIrqVectors;
+    /** The IRQ mode the poller currently works in. */
     uint8_t              uIrqModeCur;
-    /** The new confogured IRQ mode. */
+    /** The IRQ mode the poller shall switch to. */
     volatile uint8_t     uIrqModeNew;
+    /** Sequence number of the last mode switch requested from the poller. */
+    volatile uint32_t    uIrqSeqReq;
+    /** Sequence number of the last mode switch the poller has completed. */
+    volatile uint32_t    uIrqSeqAck;
 
     /** The interrupt polling thread. */
     PPDMTHREAD           pThrdIrq;
 
     /** The MSI capability offset if enabled. */
     uint8_t              offMsiCtrl;
+    /** Flag whether the MSI capability has a 64-bit message address. */
+    bool                 fMsi64Bit;
+    /** Flag whether the MSI capability has per-vector masking. */
+    bool                 fMsiMaskable;
 
     /** The MSI-X capability offset if enabled. */
     uint8_t              offMsixCtrl;
-    /** Size of the MSI-X region. */
-    size_t               cbMsix;
-    /** Pointer to the MSI-X region memory. */
-    uint8_t              *pbMsix;
-    /** Pointer to the MSI-X table entries. */
+    /** Offset of the MSI-X table in the BAR given by iBarMsix. */
+    uint32_t             offMsixTbl;
+    /** Size of the MSI-X table in bytes. */
+    uint32_t             cbMsixTbl;
+    /** Offset of the MSI-X pending bit array in the BAR given by iBarMsix. */
+    uint32_t             offMsixPba;
+    /** Size of the MSI-X pending bit array in bytes. */
+    uint32_t             cbMsixPba;
+    /** The MSI-X table the guest sees.  The table of the device is managed by
+     * the host kernel and never exposed to the guest. */
     PMSIXTBLENTRY        paMsixTbl;
-    /** Pointer to the PBA array. */
+    /** The MSI-X pending bit array the guest sees. */
     volatile uint64_t    *pbmMsixPba;
-    /** MSI-X region handle. */
-    PGMMMIO2HANDLE       hMsix;
-    /** MSI-X intercept handle for the non aligned case. */
-    IOMMMIOHANDLE        hMsixMmio;
-#if 0
-    /** The write protection layer for the MSI-X MMIO2 region. */
-    PGMPHYSHANDLERTYPE   hMsixWrHndType;
-    /** The physical guest address the MSI-X region is currently mapped at. */
-    RTGCPHYS             GCPhysMsix;
-#endif
 
+    /** What the VM was built from, set once by the constructor. */
+    VFIOPCIFUNLAYOUT     Layout;
 } VFIOPCIFUN;
 /** Pointer to the a VFIO PCI function. */
 typedef VFIOPCIFUN *PVFIOPCIFUN;
@@ -384,6 +606,40 @@ typedef struct VFIOPCI
 
     /** Flag whether the guest RAM was mapped to the IOMMU. */
     bool                 fGuestRamMapped;
+    /** Flag whether the I/O address space was allocated (IOMMUFD only). */
+    bool                 fIoasAllocated;
+    /** Flag whether a failure of setting up a device is a matter for the log.  It is
+     * once the constructor is done, and when the constructor tries to open a device
+     * it can do without.  Otherwise it stops the VM construction. */
+    bool                 fSetupErrorsToLog;
+
+    /** The thread watching for the host wanting a function back or reporting an error on it. */
+    RTTHREAD             hThrdWatcher;
+    /** The eventfd for waking up the watcher thread. */
+    int                  iFdWatcherWakeup;
+    /** Flag telling the watcher thread to terminate. */
+    bool volatile        fWatcherStop;
+
+    /** The root port with the hot-plug capable slot the device is in, NULL if the
+     * device is somewhere else. */
+    PPDMDEVINSR3         pDevInsPort;
+    /** How long the guest gets for letting go of the device before it is taken away
+     * from it because the host wants it back, in milliseconds. */
+    uint32_t             cMsGuestRelease;
+    /** When the attention button of the slot was pressed last to ask the guest to let
+     * go of the device, 0 if it wasn't since the link to the slot went down last. */
+    uint64_t volatile    msAttnPressed;
+    /** Serializes what is done about the slot being empty or not: putting a device in,
+     * completing the removal of one on an EMT, and saving and loading the state of the
+     * VM, which are for an empty slot only. */
+    RTCRITSECT           CritSectSlot;
+    /** Flag whether the device was taken out of the slot for loading a saved state and
+     * is to be put in again when that is done. */
+    bool                 fLoadReattach;
+    /** Flag whether the saved state being loaded has the unit of this device. */
+    bool                 fLoadUnitSeen;
+    /** The interface for whoever manages the VM. */
+    PDMIPCIPASSTHROUGHPORT IPassthroughPort;
 } VFIOPCI;
 /** Pointer to the raw PCI instance data. */
 typedef VFIOPCI *PVFIOPCI;
@@ -442,6 +698,36 @@ DECLINLINE(int) pciVfioLnxEventfd2(uint32_t uValInit, uint32_t fFlags, int *piFd
 
     *piFdEvt = rcLnx;
     return VINF_SUCCESS;
+}
+
+
+/**
+ * Reports a failure of setting up a device.
+ *
+ * While the VM is constructed this is a VM error, the VM doesn't start.  When a
+ * device is put into the slot of a running VM it goes to the release log, the
+ * VM goes on without the device.
+ *
+ * @returns rc.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   rc          The status code.
+ * @param   SRC_POS     The source position of the caller.
+ * @param   pszFormat   The message.
+ * @param   ...         Arguments for the message.
+ */
+static int pciVfioSetError(PVFIOPCI pThis, int rc, RT_SRC_POS_DECL, const char *pszFormat, ...)
+{
+    va_list va;
+    va_start(va, pszFormat);
+    if (!pThis->fSetupErrorsToLog)
+        rc = pThis->pDevIns->pHlpR3->pfnVMSetErrorV(pThis->pDevIns, rc, RT_SRC_POS_ARGS, pszFormat, va);
+    else
+    {
+        RT_SRC_POS_NOREF();
+        LogRel(("VFIO#%d: %N (%Rrc)\n", pThis->iInstance, pszFormat, &va, rc));
+    }
+    va_end(va);
+    return rc;
 }
 
 
@@ -529,6 +815,44 @@ DECLINLINE(int) pciVfioCfgSpaceWriteU64(PCVFIOPCIFUN pFun, uint32_t offReg, uint
 
 
 /**
+ * Reads from or writes to a region of the device through the device file
+ * descriptor on behalf of the guest.
+ *
+ * A device which doesn't answer is treated like one which isn't there: reads
+ * return all ones and writes are dropped.  There is no failure status, it is
+ * nothing the guest could be blamed for.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   offVfio     Offset into the device file.
+ * @param   pv          Where to store what was read, or what to write.
+ * @param   cb          Number of bytes to access.
+ * @param   fWrite      Flag whether this is a write (true) or a read (false).
+ */
+static void pciVfioFdAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, uint64_t offVfio, void *pv, size_t cb, bool fWrite)
+{
+    if (pFun->fGone)
+    {
+        if (!fWrite)
+            memset(pv, 0xff, cb);
+        return;
+    }
+
+    ssize_t const cbDone = fWrite
+                         ? pwrite(pFun->iFdVfio, pv, cb, offVfio)
+                         : pread(pFun->iFdVfio, pv, cb, offVfio);
+    if (cbDone != (ssize_t)cb)
+    {
+        int const iErrno = cbDone < 0 ? errno : 0;
+        if (!fWrite)
+            memset(pv, 0xff, cb);
+        LogRelMax(32, ("VFIO#%d.%u: %s %zu byte(s) at offset %#RX64 of the device file failed with %d\n", pThis->iInstance,
+                       pFun->uPciFun, fWrite ? "Writing" : "Reading", cb, offVfio, iErrno));
+    }
+}
+
+
+/**
  * @callback_method_impl{FNIOMIOPORTNEWOUT}
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioWrite(PPDMDEVINS pDevIns, void *pvUser, RTIOPORT offPort, uint32_t u32, unsigned cb)
@@ -536,10 +860,9 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioWrite(PPDMDEVINS pDevIns, void *pvUs
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[pBar->iPciFun];
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, &u32, cb, pBar->u.offPio + offPort);
-    if (cbWritten != cb)
-        return RTErrConvertFromErrno(errno);
+    AssertReturn(cb <= sizeof(u32), VINF_SUCCESS);
 
+    pciVfioFdAccess(pThis, pFun, pBar->offVfio + offPort, &u32, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -552,11 +875,344 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioRead(PPDMDEVINS pDevIns, void *pvUse
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
     PCVFIOPCIFUN pFun = &pThis->aPciFuns[pBar->iPciFun];
-    ssize_t cbRead = pread(pFun->iFdVfio, pu32, cb, pBar->u.offPio + offPort);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
+    AssertReturn(cb <= sizeof(*pu32), VERR_IOM_IOPORT_UNUSED);
 
+    uint32_t u32 = UINT32_MAX;
+    pciVfioFdAccess(pThis, pFun, pBar->offVfio + offPort, &u32, cb, false /*fWrite*/);
+    *pu32 = u32;
     return VINF_SUCCESS;
+}
+
+
+/**
+ * Sends a message signalled interrupt of a function to the interrupt controller.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pPciDev     The PCI device of the function raising the interrupt.
+ * @param   uAddr       The message address.
+ * @param   uData       The message data.
+ */
+static void pciVfioMsgSend(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint64_t uAddr, uint32_t uData)
+{
+    /* Can't use PDMDevHlpPCISetIrqEx here as the PCI stuff is not aware of the MSI and MSI-X support of this device. */
+    /** @todo This isn't pretty as it accesses stuff internal to the PCI subsystem. */
+    PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
+    AssertPtrReturnVoid(pPciHlp);
+    PPDMDEVINS pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
+    AssertPtrReturnVoid(pDevInsBus);
+    PDEVPCIBUS pBus = PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS);
+    uint16_t const uBusDevFn = PCIBDF_MAKE(pBus->iBus, pPciDev->uDevFn);
+
+    MSIMSG Msi;
+    Msi.Addr.u64 = uAddr;
+    Msi.Data.u32 = uData;
+    pPciHlp->pfnIoApicSendMsi(pDevIns, uBusDevFn, &Msi, 0 /*uTagSrc*/);
+}
+
+
+/**
+ * Returns the config space offset of the MSI message data register.
+ *
+ * The mask bits follow at +4 and the pending bits at +8 if the capability has
+ * per-vector masking.
+ *
+ * @returns Config space offset.
+ * @param   pFun        The function, which has to have an MSI capability.
+ */
+DECLINLINE(uint32_t) pciVfioMsiGetDataOff(PCVFIOPCIFUN pFun)
+{
+    return pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL
+         + (pFun->fMsi64Bit ? VBOX_MSI_CAP_MESSAGE_DATA_64 : VBOX_MSI_CAP_MESSAGE_DATA_32);
+}
+
+
+/**
+ * Checks whether an MSI vector can be delivered right now: MSI is enabled and
+ * the vector is not masked.
+ *
+ * @returns true if the vector can be delivered, false if it has to be held back.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+DECLINLINE(bool) pciVfioMsiIsVectorOpen(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    if (!(PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl) & VBOX_PCI_MSI_FLAGS_ENABLE))
+        return false;
+    return    !pFun->fMsiMaskable
+           || !(PDMPciDevGetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 4) & RT_BIT_32(idxVector));
+}
+
+
+/**
+ * Sends the MSI message the guest has configured to the interrupt controller.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function raising the interrupt.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsiSend(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    uint32_t const offCap = pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL;
+    uint64_t       uAddr  = PDMPciDevGetDWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO);
+    if (pFun->fMsi64Bit)
+        uAddr |= (uint64_t)PDMPciDevGetDWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI) << 32;
+
+    /* The vector number replaces the low bits of the message data, as many as the guest has enabled vectors for. */
+    uint32_t const cVectorsLog2 = (PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl) & VBOX_PCI_MSI_FLAGS_QSIZE) >> 4;
+    uint32_t const fVectorMask  = RT_BIT_32(RT_MIN(cVectorsLog2, 5)) - 1;
+    uint32_t const uData        =   (PDMPciDevGetWord(pPciDev, pciVfioMsiGetDataOff(pFun)) & ~fVectorMask)
+                                  | (idxVector & fVectorMask);
+
+    pciVfioMsgSend(pDevIns, pPciDev, uAddr, uData);
+}
+
+
+/**
+ * Delivers an MSI vector if it is pending and can be delivered now.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function, which has to have an MSI capability with per-vector masking.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsiDeliverPending(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    uint32_t volatile *pfPending = (uint32_t volatile *)&pPciDev->abConfig[pciVfioMsiGetDataOff(pFun) + 8];
+    if (   pciVfioMsiIsVectorOpen(pFun, pPciDev, idxVector)
+        && ASMAtomicBitTestAndClear(pfPending, (int32_t)idxVector))
+        pciVfioMsiSend(pDevIns, pFun, pPciDev, idxVector);
+}
+
+
+/**
+ * Handles an MSI interrupt of the device: delivers it to the guest or records
+ * it as pending if the guest has it masked.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function raising the interrupt.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsiRaise(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    if (pciVfioMsiIsVectorOpen(pFun, pPciDev, idxVector))
+        pciVfioMsiSend(pDevIns, pFun, pPciDev, idxVector);
+    else if (pFun->fMsiMaskable)
+    {
+        /* The guest might be unmasking the vector right now, so look again after recording it. */
+        ASMAtomicBitSet((uint32_t volatile *)&pPciDev->abConfig[pciVfioMsiGetDataOff(pFun) + 8], (int32_t)idxVector);
+        pciVfioMsiDeliverPending(pDevIns, pFun, pPciDev, idxVector);
+    }
+    /* else: The guest has disabled MSI in the meantime, the interrupt is lost like on real hardware. */
+}
+
+
+/**
+ * Sends the MSI-X message the guest has configured for a vector to the
+ * interrupt controller.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function raising the interrupt.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsixSend(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    PMSIXTBLENTRY pVec = &pFun->paMsixTbl[idxVector];
+    pciVfioMsgSend(pDevIns, pPciDev, ((uint64_t)pVec->u32MsgAddrUpper << 32) | pVec->u32MsgAddr, pVec->u32MsgData);
+}
+
+
+/**
+ * Checks whether an MSI-X vector can be delivered right now: MSI-X is enabled
+ * and neither the function nor the vector is masked.
+ *
+ * @returns true if the vector can be delivered, false if it has to be held back.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+DECLINLINE(bool) pciVfioMsixIsVectorOpen(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    uint16_t const fMsixCtrl = PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl);
+    return    (fMsixCtrl & (VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK)) == VBOX_PCI_MSIX_FLAGS_ENABLE
+           && !(pFun->paMsixTbl[idxVector].u32VecCtrl & RT_BIT_32(0));
+}
+
+
+/**
+ * Delivers an MSI-X vector if it is pending and can be delivered now.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsixDeliverPending(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    if (   pciVfioMsixIsVectorOpen(pFun, pPciDev, idxVector)
+        && ASMAtomicBitTestAndClear(pFun->pbmMsixPba, (int32_t)idxVector))
+        pciVfioMsixSend(pDevIns, pFun, pPciDev, idxVector);
+}
+
+
+/**
+ * Handles an MSI-X interrupt of the device: delivers it to the guest or
+ * records it as pending if the guest has it masked.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function raising the interrupt.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   idxVector   The vector.
+ */
+static void pciVfioMsixRaise(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t idxVector)
+{
+    if (pciVfioMsixIsVectorOpen(pFun, pPciDev, idxVector))
+        pciVfioMsixSend(pDevIns, pFun, pPciDev, idxVector);
+    else
+    {
+        /* The guest might be unmasking the vector right now, so look again after recording it. */
+        ASMAtomicBitSet(pFun->pbmMsixPba, (int32_t)idxVector);
+        pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, idxVector);
+    }
+}
+
+
+/**
+ * Handles a guest write to the MSI-X table.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   offTbl      Offset into the table, the caller made sure the access is inside of it.
+ * @param   pv          What to write.
+ * @param   cb          Number of bytes to write.
+ */
+static void pciVfioMsixTblWrite(PPDMDEVINS pDevIns, PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t offTbl,
+                                void const *pv, size_t cb)
+{
+    memcpy((uint8_t *)pFun->paMsixTbl + offTbl, pv, cb);
+
+    /* Only the mask bit of the vector control is implemented.  A vector which just
+       got unmasked is sent what it has pending. */
+    uint32_t const idxFirst = offTbl / sizeof(MSIXTBLENTRY);
+    uint32_t const idxLast  = (uint32_t)((offTbl + cb - 1) / sizeof(MSIXTBLENTRY));
+    for (uint32_t idxVector = idxFirst; idxVector <= idxLast; idxVector++)
+    {
+        pFun->paMsixTbl[idxVector].u32VecCtrl &= RT_BIT_32(0);
+        pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, idxVector);
+    }
+}
+
+
+/**
+ * Reads from or writes to the device memory behind a memory BAR on behalf of
+ * the guest.
+ *
+ * This always goes through the device file, also for a BAR which is mapped
+ * into this process.  The host kernel takes the mapping away at times, while
+ * the device doesn't decode memory for instance, and touching it then gets the
+ * process a signal.  An access through the device file just fails.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pBar        The BAR.
+ * @param   offBar      Offset into the BAR, the caller made sure the access is inside of it.
+ * @param   pv          Where to store what was read, or what to write.
+ * @param   cb          Number of bytes to access.
+ * @param   fWrite      Flag whether this is a write (true) or a read (false).
+ */
+static void pciVfioBarDevAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCVFIOPCIBAR pBar, uint64_t offBar, void *pv, size_t cb,
+                                bool fWrite)
+{
+    pciVfioFdAccess(pThis, pFun, pBar->offVfio + offBar, pv, cb, fWrite);
+}
+
+
+/**
+ * Handles a guest access to a trapped segment of a memory BAR.
+ *
+ * The access is taken apart into what hits the MSI-X table, the MSI-X pending
+ * bit array and the device memory around them.
+ *
+ * @param   pDevIns     The device instance.
+ * @param   pSeg        The segment being accessed.
+ * @param   off         Offset into the segment.
+ * @param   pv          Where to store what was read, or what to write.
+ * @param   cb          Number of bytes to access.
+ * @param   fWrite      Flag whether this is a write (true) or a read (false).
+ */
+static void pciVfioBarSegAccess(PPDMDEVINS pDevIns, PCVFIOPCIBARSEG pSeg, RTGCPHYS off, void *pv, unsigned cb, bool fWrite)
+{
+    PVFIOPCI     pThis   = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun    = &pThis->aPciFuns[pSeg->iPciFun];
+    PCVFIOPCIBAR pBar    = &pFun->aBars[pSeg->iBar];
+    PPDMPCIDEV   pPciDev = pDevIns->apPciDevs[pSeg->iPciFun];
+    bool const   fMsix   = pFun->offMsixCtrl && pFun->iBarMsix == pSeg->iBar;
+    uint64_t     offBar  = pSeg->offBar + off;
+    uint8_t     *pb      = (uint8_t *)pv;
+
+    while (cb > 0)
+    {
+        /* Find out what the access hits first and how far that reaches. */
+        enum { kNothing, kDevice, kMsixTbl, kMsixPba } enmWhat;
+        uint64_t cbChunk = cb;
+        if (offBar >= pBar->cbRegion)
+            enmWhat = kNothing; /* The padding behind a BAR which doesn't end on a page boundary. */
+        else
+        {
+            enmWhat = kDevice;
+            cbChunk = RT_MIN(cbChunk, pBar->cbRegion - offBar);
+            if (fMsix)
+            {
+                if (offBar - pFun->offMsixTbl < pFun->cbMsixTbl)
+                {
+                    enmWhat = kMsixTbl;
+                    cbChunk = RT_MIN(cbChunk, (uint64_t)pFun->offMsixTbl + pFun->cbMsixTbl - offBar);
+                }
+                else if (offBar - pFun->offMsixPba < pFun->cbMsixPba)
+                {
+                    enmWhat = kMsixPba;
+                    cbChunk = RT_MIN(cbChunk, (uint64_t)pFun->offMsixPba + pFun->cbMsixPba - offBar);
+                }
+                else
+                {
+                    if (offBar < pFun->offMsixTbl)
+                        cbChunk = RT_MIN(cbChunk, pFun->offMsixTbl - offBar);
+                    if (offBar < pFun->offMsixPba)
+                        cbChunk = RT_MIN(cbChunk, pFun->offMsixPba - offBar);
+                }
+            }
+        }
+
+        switch (enmWhat)
+        {
+            case kDevice:
+                pciVfioBarDevAccess(pThis, pFun, pBar, offBar, pb, (size_t)cbChunk, fWrite);
+                break;
+            case kMsixTbl:
+                if (fWrite)
+                    pciVfioMsixTblWrite(pDevIns, pFun, pPciDev, (uint32_t)(offBar - pFun->offMsixTbl), pb, (size_t)cbChunk);
+                else
+                    memcpy(pb, (uint8_t const *)pFun->paMsixTbl + (offBar - pFun->offMsixTbl), (size_t)cbChunk);
+                break;
+            case kMsixPba:
+                /* Read-only for the guest. */
+                if (!fWrite)
+                    memcpy(pb, (uint8_t const *)pFun->pbmMsixPba + (offBar - pFun->offMsixPba), (size_t)cbChunk);
+                break;
+            default:
+                if (!fWrite)
+                    memset(pb, 0xff, (size_t)cbChunk);
+                break;
+        }
+
+        offBar += cbChunk;
+        pb     += cbChunk;
+        cb     -= (unsigned)cbChunk;
+    }
 }
 
 
@@ -565,22 +1221,7 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioPioRead(PPDMDEVINS pDevIns, void *pvUse
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
-
-    Assert(pBar->bType == 2);
-    volatile uint8_t *pb = (volatile uint8_t *)pBar->u.pvMmio + off;
-    switch (cb)
-    {
-        case 1: *(uint8_t *)pv = *pb; break;
-        case 2: *(uint16_t *)pv = *(volatile uint16_t *)pb; break;
-        case 4: *(uint32_t *)pv = *(volatile uint32_t *)pb; break;
-        case 8: *(uint64_t *)pv = *(volatile uint64_t *)pb; break;
-        default:
-            memcpy(pv, (const void *)pb, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
+    pciVfioBarSegAccess(pDevIns, (PCVFIOPCIBARSEG)pvUser, off, pv, cb, false /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -590,70 +1231,7 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioRead(PPDMDEVINS pDevIns, void *pvUs
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIBAR pBar = (PCVFIOPCIBAR)pvUser;
-
-    Assert(pBar->bType == 2);
-    volatile uint8_t *pb = (volatile uint8_t *)pBar->u.pvMmio + off;
-    switch (cb)
-    {
-        case 1: *(volatile uint8_t *)pb  = *(uint8_t const *)pv;  break;
-        case 2: *(volatile uint16_t *)pb = *(uint16_t const *)pv; break;
-        case 4: *(volatile uint32_t *)pb = *(uint32_t const *)pv; break;
-        case 8: *(volatile uint64_t *)pb = *(uint64_t const *)pv; break;
-        default:
-            memcpy((void *)pb, pv, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
-    return VINF_SUCCESS;
-}
-
-
-/**
- * @callback_method_impl{FNIOMMMIONEWREAD}
- */
-static DECLCALLBACK(VBOXSTRICTRC) pciVfioMsixMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
-{
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
-
-    volatile uint8_t *pb = (volatile uint8_t *)pFun->pbMsix + off;
-    switch (cb)
-    {
-        case 1: *(uint8_t *)pv = *pb; break;
-        case 2: *(uint16_t *)pv = *(volatile uint16_t *)pb; break;
-        case 4: *(uint32_t *)pv = *(volatile uint32_t *)pb; break;
-        case 8: *(uint64_t *)pv = *(volatile uint64_t *)pb; break;
-        default:
-            memcpy(pv, (const void *)pb, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
-    return VINF_SUCCESS;
-}
-
-
-/**
- * @callback_method_impl{FNIOMMMIONEWWRITE}
- */
-static DECLCALLBACK(VBOXSTRICTRC) pciVfioMsixMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
-{
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
-
-    volatile uint8_t *pb = (volatile uint8_t *)pFun->pbMsix + off;
-    switch (cb)
-    {
-        case 1: *(volatile uint8_t *)pb  = *(uint8_t const *)pv;  break;
-        case 2: *(volatile uint16_t *)pb = *(uint16_t const *)pv; break;
-        case 4: *(volatile uint32_t *)pb = *(uint32_t const *)pv; break;
-        case 8: *(volatile uint64_t *)pb = *(uint64_t const *)pv; break;
-        default:
-            memcpy((void *)pb, pv, cb); /** @todo Not correct as memcpy and volatile doesn't mix well */
-            break;
-    }
-
+    pciVfioBarSegAccess(pDevIns, (PCVFIOPCIBARSEG)pvUser, off, (void *)(uintptr_t)pv, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -666,7 +1244,7 @@ DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_
 
     int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_REGION_INFO, pRegionInfo);
     if (rcLnx == -1)
-        return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                 N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, errno);
 
     const int iInstance = pThis->iInstance;
@@ -687,8 +1265,25 @@ DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_
 }
 
 
+/**
+ * Checks whether VFIO flags a region as one where the MSI-X table may be mapped.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   uRegion     The VFIO region.
+ * @param   cbInfo      Size of the region information including its capabilities, as VFIO reported it.
+ * @param   pfMsix      Where to return whether the region has the capability.
+ */
 static int pciVfioBarContainsMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRegion, uint32_t cbInfo, bool *pfMsix)
 {
+    *pfMsix = false;
+    if (   cbInfo < sizeof(struct vfio_region_info) + sizeof(struct vfio_info_cap_header)
+        || cbInfo > _64K)
+        return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                   N_("The information for region %u of the VFIO device has an unexpected size of %u bytes"),
+                                   uRegion, cbInfo);
+
     struct vfio_region_info *pRegionInfo = (struct vfio_region_info *)RTMemTmpAllocZ(cbInfo);
     if (!pRegionInfo)
         return VERR_NO_TMP_MEMORY;
@@ -696,28 +1291,38 @@ static int pciVfioBarContainsMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRe
     pRegionInfo->argsz = cbInfo;
     pRegionInfo->index = uRegion;
 
+    int rc = VINF_SUCCESS;
     int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_REGION_INFO, pRegionInfo);
-    if (rcLnx == -1)
-        return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, errno);
-
-    AssertReturnStmt(pRegionInfo->cap_offset != 0, RTMemTmpFree(pRegionInfo), VERR_INVALID_STATE);
-    uint32_t offCap = pRegionInfo->cap_offset;
-    *pfMsix = false;
-    while (offCap)
+    if (rcLnx != -1)
     {
-        struct vfio_info_cap_header *pHdr = (struct vfio_info_cap_header *)((uint8_t *)pRegionInfo + offCap);
-        if (pHdr->id == VFIO_REGION_INFO_CAP_MSIX_MAPPABLE)
+        /* Walk the capabilities, they form a list linked by offsets into the buffer. */
+        uint32_t offCap = pRegionInfo->cap_offset;
+        for (unsigned cCapsLeft = 64; offCap != 0; cCapsLeft--)
         {
-            *pfMsix = true;
-            break;
-        }
+            if (   !cCapsLeft
+                || offCap < sizeof(*pRegionInfo)
+                || offCap > cbInfo - sizeof(struct vfio_info_cap_header))
+            {
+                rc = pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                         N_("The capabilities of region %u of the VFIO device are malformed"), uRegion);
+                break;
+            }
 
-        offCap = pHdr->next;
+            struct vfio_info_cap_header const *pHdr = (struct vfio_info_cap_header const *)((uint8_t *)pRegionInfo + offCap);
+            if (pHdr->id == VFIO_REGION_INFO_CAP_MSIX_MAPPABLE)
+            {
+                *pfMsix = true;
+                break;
+            }
+            offCap = pHdr->next;
+        }
     }
+    else
+        rc = pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                 N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, errno);
 
     RTMemTmpFree(pRegionInfo);
-    return VINF_SUCCESS;
+    return rc;
 }
 
 
@@ -743,11 +1348,11 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
         {
             /* PIO. */
             pFun->aBars[uRegion].bType    = 1;
-            pFun->aBars[uRegion].u.offPio = RegionInfo.offset;
+            pFun->aBars[uRegion].offVfio = RegionInfo.offset;
 
             rc = PDMDevHlpPCIIORegionCreateIoEx(pDevIns, pPciDev, uRegion, RegionInfo.size,
                                                 pciVfioPioWrite, pciVfioPioRead, &pFun->aBars[uRegion],
-                                                "PIO", NULL /*paExtDescs*/, &pFun->aBars[uRegion].hnd.hIoPort);
+                                                "PIO", NULL /*paExtDescs*/, &pFun->aBars[uRegion].hIoPort);
             AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Cannot register PCI I/O region")));
         }
         else
@@ -765,15 +1370,30 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
                     pFun->iBarMsix = uRegion;
             }
 
-            Assert(RegionInfo.flags & VFIO_REGION_INFO_FLAG_MMAP);
-            int fProt =   ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_READ)  ? PROT_READ  : 0)
-                        | ((RegionInfo.flags & VFIO_REGION_INFO_FLAG_WRITE) ? PROT_WRITE : 0);
-            pFun->aBars[uRegion].bType    = 2;
-            pFun->aBars[uRegion].u.pvMmio = mmap(NULL, RegionInfo.size, fProt, MAP_FILE | MAP_SHARED, pFun->iFdVfio, RegionInfo.offset);
-            if (pFun->aBars[uRegion].u.pvMmio == MAP_FAILED)
-                return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                           N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
-                                           uRegion, RegionInfo.offset, RegionInfo.size, errno);
+            /*
+             * Map the region if VFIO allows it, if it can be read and written and if it
+             * consists of whole pages.  A region which can't be mapped is accessed through
+             * the device file descriptor, which means trapping every access of the guest.
+             */
+            PVFIOPCIBAR    pBar          = &pFun->aBars[uRegion];
+            uint32_t const fVfioMappable = VFIO_REGION_INFO_FLAG_MMAP | VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
+            pBar->bType   = 2;
+            pBar->offVfio = RegionInfo.offset;
+            pBar->pvMmio  = NULL;
+            if (   (RegionInfo.flags & fVfioMappable) == fVfioMappable
+                && !(RegionInfo.size & GUEST_PAGE_OFFSET_MASK))
+            {
+                void *pvMmio = mmap(NULL, RegionInfo.size, PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, pFun->iFdVfio,
+                                    RegionInfo.offset);
+                if (pvMmio == MAP_FAILED)
+                    return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                               N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
+                                               uRegion, RegionInfo.offset, RegionInfo.size, errno);
+                pBar->pvMmio = pvMmio;
+            }
+            else
+                LogRel(("VFIO#%d.%u: BAR%u can't be mapped (flags %#RX32, size %#RX64), trapping all accesses to it\n",
+                        pThis->iInstance, pFun->uPciFun, uRegion, RegionInfo.flags, RegionInfo.size));
 
             uint32_t enmAddrSpace = PCI_ADDRESS_SPACE_MEM;
             if ((u32PciBar & (RT_BIT_32(2) | RT_BIT_32(1))) == PCI_ADDRESS_SPACE_BAR64)
@@ -781,9 +1401,9 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
             if (u32PciBar & PCI_ADDRESS_SPACE_MEM_PREFETCH)
                 enmAddrSpace |= PCI_ADDRESS_SPACE_MEM_PREFETCH;
 
-            pFun->aBars[uRegion].fInterceptMmio = pFun->fInterceptMmio;
-            pFun->aBars[uRegion].enmAddrSpace   = (PCIADDRESSSPACE)enmAddrSpace;
-            /* MMIO mapping happens at a later stage. */
+            pBar->fInterceptMmio = pFun->fInterceptMmio || !pBar->pvMmio;
+            pBar->enmAddrSpace   = (PCIADDRESSSPACE)enmAddrSpace;
+            /* The MMIO regions get created at a later stage. */
         }
     }
     else /* Not available. */
@@ -798,13 +1418,11 @@ static int pciVfioSetupBar(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns,
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioWrite(PPDMDEVINS pDevIns, void *pvUser, RTIOPORT offPort, uint32_t u32, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
+    AssertReturn(cb <= sizeof(u32), VINF_SUCCESS);
 
-    ssize_t cbRead = pwrite(pFun->iFdVfio, &u32, cb, pFun->offVga + offPort);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
-
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + offPort, &u32, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -814,13 +1432,13 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioWrite(PPDMDEVINS pDevIns, void *p
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioRead(PPDMDEVINS pDevIns, void *pvUser, RTIOPORT offPort, uint32_t *pu32, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
+    AssertReturn(cb <= sizeof(*pu32), VERR_IOM_IOPORT_UNUSED);
 
-    ssize_t cbRead = pread(pFun->iFdVfio, pu32, cb, pFun->offVga + offPort);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
-
+    uint32_t u32 = UINT32_MAX;
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + offPort, &u32, cb, false /*fWrite*/);
+    *pu32 = u32;
     return VINF_SUCCESS;
 }
 
@@ -830,13 +1448,10 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaPioRead(PPDMDEVINS pDevIns, void *pv
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioRead(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
 
-    ssize_t cbRead = pread(pFun->iFdVfio, pv, cb, pFun->offVga + off);
-    if (cbRead != cb)
-        return RTErrConvertFromErrno(errno);
-
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + off, pv, cb, false /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -846,13 +1461,10 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioRead(PPDMDEVINS pDevIns, void *p
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioWrite(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, void const *pv, unsigned cb)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
 
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, pv, cb, pFun->offVga + off);
-    if (cbWritten != cb)
-        return RTErrConvertFromErrno(errno);
-
+    pciVfioFdAccess(pThis, pFun, pFun->offVga + off, (void *)(uintptr_t)pv, cb, true /*fWrite*/);
     return VINF_SUCCESS;
 }
 
@@ -862,57 +1474,61 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioWrite(PPDMDEVINS pDevIns, void *
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioVgaMmioFill(PPDMDEVINS pDevIns, void *pvUser, RTGCPHYS off, uint32_t u32Item, unsigned cbItem, unsigned cItems)
 {
-    RT_NOREF(pDevIns);
-    PCVFIOPCIFUN pFun = (PCVFIOPCIFUN)pvUser;
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCVFIOPCIFUN pFun  = (PCVFIOPCIFUN)pvUser;
+    AssertReturn(cbItem == 1 || cbItem == 2 || cbItem == 4, VINF_SUCCESS);
 
-    uint8_t abVal[4] = { 0 };
-    for (uint8_t i = 0; i < RT_ELEMENTS(abVal); i++)
+    /* What is filled has to be inside the legacy video memory range, the offset is the absolute address. */
+    if (   off <  VFIO_PCI_VGA_MEM_START
+        || off >= VFIO_PCI_VGA_MEM_START + VFIO_PCI_VGA_MEM_SIZE)
+        return VINF_SUCCESS;
+    uint64_t cbLeft = RT_MIN((uint64_t)cbItem * cItems, VFIO_PCI_VGA_MEM_START + VFIO_PCI_VGA_MEM_SIZE - off);
+
+    /* Write it in pieces from a buffer full of items; the buffer size is a multiple of all item sizes. */
+    uint8_t abBuf[_1K];
+    for (unsigned i = 0; i < sizeof(abBuf); i++)
+        abBuf[i] = (uint8_t)(u32Item >> ((i % cbItem) * 8));
+    while (cbLeft > 0)
     {
-        abVal[i] = u32Item & 0xff;
-        u32Item >>= 8;
+        size_t const cbChunk = (size_t)RT_MIN(cbLeft, sizeof(abBuf));
+        pciVfioFdAccess(pThis, pFun, pFun->offVga + off, abBuf, cbChunk, true /*fWrite*/);
+        off    += cbChunk;
+        cbLeft -= cbChunk;
     }
+    return VINF_SUCCESS;
+}
 
-    ssize_t const cb = (ssize_t)cbItem * cItems;
-    uint8_t *pb = (uint8_t *)RTMemTmpAlloc(cb);
-    if (!pb)
-        return VERR_NO_MEMORY;
 
-    uint8_t *pbCur = pb;
+/**
+ * Creates the legacy VGA I/O port and memory ranges for a function.
+ *
+ * @returns VBox status code.
+ * @param   pFun        The function.
+ * @param   pDevIns     The device instance.
+ */
+static int pciVfioVgaCreateRanges(PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
+{
+    int rc = PDMDevHlpIoPortCreateExAndMap(pDevIns, 0x3b0, 0x3bb - 0x3b0 + 1, IOM_IOPORT_F_ABS,
+                                           pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
+                                           "VFIO VGA #1", NULL /*paExtDescs*/, &pFun->hVgaIoPort1);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3b0 - 0x3bb failed");
 
-    switch (cbItem)
-    {
-        case 1:
-            for (uint32_t i = 0; i < cItems; i++)
-                *pbCur++ = abVal[0];
-            break;
-        case 2:
-            for (uint32_t i = 0; i < cItems; i++)
-            {
-                pbCur[0] = abVal[0];
-                pbCur[1] = abVal[1];
-                pbCur += 2;
-            }
-            break;
-        case 4:
-            for (uint32_t i = 0; i < cItems; i++)
-            {
-                pbCur[0] = abVal[0];
-                pbCur[1] = abVal[1];
-                pbCur[2] = abVal[2];
-                pbCur[3] = abVal[3];
-                pbCur += 4;
-            }
-            break;
-        default:
-            AssertFailedReturn(VERR_NOT_SUPPORTED);
-    }
+    rc = PDMDevHlpIoPortCreateExAndMap(pDevIns, 0x3c0, 0x3df - 0x3c0 + 1, IOM_IOPORT_F_ABS,
+                                       pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
+                                       "VFIO VGA #2", NULL /*paExtDescs*/, &pFun->hVgaIoPort2);
+    if (RT_FAILURE(rc))
+        return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3c0 - 0x3df failed");
 
-    ssize_t cbWritten = pwrite(pFun->iFdVfio, pb, cb, pFun->offVga + off);
-    RTMemTmpFree(pb);
-
-    if (cbWritten != cb)
-        return RTErrConvertFromErrno(errno);
-
+    /*
+     * The MDA/CGA/EGA/VGA/whatever fixed MMIO area.
+     */
+    rc = PDMDevHlpMmioCreateExAndMap(pDevIns, VFIO_PCI_VGA_MEM_START, VFIO_PCI_VGA_MEM_SIZE,
+                                     IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU | IOMMMIO_FLAGS_ABS,
+                                     NULL /*pPciDev*/, UINT32_MAX /*iPciRegion*/,
+                                     pciVfioVgaMmioWrite, pciVfioVgaMmioRead, pciVfioVgaMmioFill, pFun,
+                                     "VFIO VGA - VGA Video Buffer", &pFun->hVgaMmio);
+    AssertRCReturn(rc, rc);
     return VINF_SUCCESS;
 }
 
@@ -924,37 +1540,17 @@ static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
     if (RT_FAILURE(rc))
         return rc;
 
-    AssertLogRelMsgReturn(   RegionInfo.flags
-                          && RegionInfo.size,
-                          ("VGA/GPU does not support VFIO_PCI_VGA_REGION_INDEX\n"),
-                          VERR_NOT_SUPPORTED);
+    if (   !RegionInfo.flags
+        || !RegionInfo.size)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("The device has no legacy VGA ranges which could be exposed to the guest"));
 
     pFun->offVga = RegionInfo.offset;
 
-    /* Register the legacy VGA I/O port and MMIO ranges. */
-    rc = PDMDevHlpIoPortCreateExAndMap(pDevIns, 0x3b0, 0x3bb - 0x3b0 + 1, IOM_IOPORT_F_ABS,
-                                       pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
-                                       "VFIO VGA #1", NULL /*paExtDescs*/, &pFun->hVgaIoPort1);
-    if (RT_FAILURE(rc))
-        return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3b0 - 0x3bb failed");
-
-    rc = PDMDevHlpIoPortCreateExAndMap(pDevIns, 0x3c0, 0x3df - 0x3c0 + 1, IOM_IOPORT_F_ABS,
-                                       pciVfioVgaPioWrite, pciVfioVgaPioRead, NULL, NULL, pFun, /** @todo String I/O */
-                                       "VFIO VGA #2", NULL /*paExtDescs*/, &pFun->hVgaIoPort2);
-    if (RT_FAILURE(rc))
-        return PDMDEV_SET_ERROR(pDevIns, rc, "Mapping legacy VGA ports 0x3b0 - 0x3bb failed");
-
-    /*
-     * The MDA/CGA/EGA/VGA/whatever fixed MMIO area.
-     */
-    rc = PDMDevHlpMmioCreateExAndMap(pDevIns, 0x000a0000, 0x00020000,
-                                     IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU | IOMMMIO_FLAGS_ABS,
-                                     NULL /*pPciDev*/, UINT32_MAX /*iPciRegion*/,
-                                     pciVfioVgaMmioWrite, pciVfioVgaMmioRead, pciVfioVgaMmioFill, pFun,
-                                     "VFIO VGA - VGA Video Buffer", &pFun->hVgaMmio);
-    AssertRCReturn(rc, rc);
-
-    return VINF_SUCCESS;
+    rc = pciVfioVgaCreateRanges(pFun, pDevIns);
+    if (RT_SUCCESS(rc))
+        pFun->fVga = true;
+    return rc;
 }
 
 
@@ -1027,6 +1623,38 @@ DECLCALLBACK(int) pciVfioRomRegionMapUnmap(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDe
 }
 
 
+/**
+ * Creates the ROM of a function for the guest: memory which the ROM of the
+ * device gets copied to, and what it takes to keep the guest from writing to it.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the size of the ROM set.
+ * @param   pPciDev     The PCI device of the function.
+ */
+static int pciVfioRomCreate(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+
+    /** @todo Currently we will map the ROM as MMIO2 region as we lack the necessary
+     * infrastructure to register ROMs for PCI BARs. This is wrong because MMIO2 regions
+     * are mapped read/write. To protect against writes we put an access handler over the region,
+     * which will discard (and log) all writes.
+     */
+    int rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pPciDev, VBOX_PCI_ROM_SLOT, pFun->cbRom,
+                                               PCI_ADDRESS_SPACE_MEM_PREFETCH, 0 /*fFlags*/,
+                                               pciVfioRomRegionMapUnmap, "ROM",
+                                               &pFun->pvRom, &pFun->hRom);
+    AssertLogRelRCReturn(rc, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                                 N_("Failed to allocate %zu bytes of ROM"), pFun->cbRom));
+
+    rc = PDMDevHlpPGMHandlerPhysicalTypeRegister(pDevIns, PGMPHYSHANDLERKIND_WRITE,
+                                                 pciVfioRomWriteHandler, "VFIO ROM", &pFun->hRomAccHndType);
+    AssertRCReturn(rc, rc);
+    return VINF_SUCCESS;
+}
+
+
 static int pciVfioSetupRom(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, PPDMDEVINS pDevIns)
 {
     struct vfio_region_info RegionInfo; RT_ZERO(RegionInfo);
@@ -1039,30 +1667,17 @@ static int pciVfioSetupRom(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev,
         && RegionInfo.size == 0)
         return VINF_SUCCESS;
 
-    /** @todo Currently we will map the ROM as MMIO2 region as we lack the necessary
-     * infrastructure to register ROMs for PCI BARs. This is wrong because MMIO2 regions
-     * are mapped read/write. To protect against writes we put an access handler over the region,
-     * which will discard (and log) all writes.
-     */
-
     pFun->offRom = RegionInfo.offset;
     pFun->cbRom  = RegionInfo.size;
 
-    rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pPciDev, VBOX_PCI_ROM_SLOT, pFun->cbRom,
-                                           PCI_ADDRESS_SPACE_MEM_PREFETCH, 0 /*fFlags*/,
-                                           pciVfioRomRegionMapUnmap, "ROM",
-                                           &pFun->pvRom, &pFun->hRom);
-    AssertLogRelRCReturn(rc, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                                 N_("Failed to allocate %zu bytes of ROM"), pFun->cbRom));
+    rc = pciVfioRomCreate(pThis, pFun, pPciDev);
+    if (RT_FAILURE(rc))
+        return rc;
 
     ssize_t cbRead = pread(pFun->iFdVfio, pFun->pvRom, pFun->cbRom, pFun->offRom);
     if (cbRead != (ssize_t)pFun->cbRom)
         return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                    N_("Failed to read %zu bytes of ROM from the device"), pFun->cbRom);
-
-    rc = PDMDevHlpPGMHandlerPhysicalTypeRegister(pThis->pDevIns, PGMPHYSHANDLERKIND_WRITE,
-                                                 pciVfioRomWriteHandler, "VFIO ROM", &pFun->hRomAccHndType);
-    AssertRCReturn(rc, rc);
 
     return VINF_SUCCESS;
 }
@@ -1075,72 +1690,146 @@ DECLCALLBACK(int) pciVfioMmioMapUnmap(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, ui
                                       RTGCPHYS GCPhysAddress, RTGCPHYS cb, PCIADDRESSSPACE enmType)
 {
     RT_NOREF(enmType, cb);
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
-    int      rc;
-    Assert(pPciDev == pDevIns->apPciDevs[pPciDev->uDevFn & 0x7]);
-    PVFIOPCIFUN pFun = &pThis->aPciFuns[pPciDev->uDevFn & 0x7];
-    PCVFIOPCIBAR pBar = &pFun->aBars[iRegion];
+    PVFIOPCI     pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    Assert(pPciDev == pDevIns->apPciDevs[pPciDev->idxSubDev]);
+    PVFIOPCIFUN  pFun  = &pThis->aPciFuns[pPciDev->idxSubDev];
+    PCVFIOPCIBAR pBar  = &pFun->aBars[iRegion];
 
     Log(("pciVfioMmioMapUnmap: iRegion=%d GCPhysAddress=%RGp cb=%RGp enmType=%d\n", iRegion, GCPhysAddress, cb, enmType));
 
-    if (pBar->fInterceptMmio)
+    /* The segments of the BAR follow each other without gaps. */
+    for (uint8_t iSeg = 0; iSeg < pBar->cSegs; iSeg++)
     {
+        PCVFIOPCIBARSEG pSeg = &pBar->aSegs[iSeg];
+        int             rc;
         if (GCPhysAddress != NIL_RTGCPHYS)
         {
-            /* Map the region. */
-            rc = PDMDevHlpMmioMap(pDevIns, pBar->hnd.hMmio, GCPhysAddress);
-            AssertRC(rc);
-
-            /* Map the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmioMap(pDevIns, pFun->hMsixMmio, GCPhysAddress + pBar->cbRegion);
-                AssertRC(rc);
-            }
+            if (pSeg->fTrapped)
+                rc = PDMDevHlpMmioMap(pDevIns, pSeg->hnd.hMmio, GCPhysAddress + pSeg->offBar);
+            else
+                rc = PDMDevHlpMmio2Map(pDevIns, pSeg->hnd.hMmio2, GCPhysAddress + pSeg->offBar);
         }
+        else if (pSeg->fTrapped)
+            rc = PDMDevHlpMmioUnmap(pDevIns, pSeg->hnd.hMmio);
         else
-        {
-            rc = PDMDevHlpMmioUnmap(pDevIns, pBar->hnd.hMmio);
-            AssertRC(rc);
-
-            /* Unmap the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmioUnmap(pDevIns, pFun->hMsixMmio);
-                AssertRC(rc);
-            }
-        }
-    }
-    else
-    {
-        if (GCPhysAddress != NIL_RTGCPHYS)
-        {
-            /* Map the region. */
-            rc = PDMDevHlpMmio2Map(pDevIns, pBar->hnd.hMmio2, GCPhysAddress);
-            AssertRC(rc);
-
-            /* Map the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmio2Map(pDevIns, pFun->hMsix, GCPhysAddress + pBar->cbRegion);
-                AssertRC(rc);
-            }
-        }
-        else
-        {
-            rc = PDMDevHlpMmio2Unmap(pDevIns, pBar->hnd.hMmio2);
-            AssertRC(rc);
-
-            /* Unmap the MSI-X state if this is the BAR. */
-            if (pFun->iBarMsix == iRegion)
-            {
-                rc = PDMDevHlpMmio2Unmap(pDevIns, pFun->hMsix);
-                AssertRC(rc);
-            }
-        }
+            rc = PDMDevHlpMmio2Unmap(pDevIns, pSeg->hnd.hMmio2);
+        AssertRC(rc);
     }
 
     return VINF_PCI_MAPPING_DONE;
+}
+
+
+/**
+ * Creates the MMIO and MMIO2 regions for a memory BAR and registers the BAR
+ * with the PCI bus.
+ *
+ * The guest gets to see the BAR with the size it has on the device.  The device
+ * memory is mapped into the guest, except for the pages holding the MSI-X table
+ * and the MSI-X pending bit array, which are trapped.  All of the BAR is
+ * trapped if it can't be mapped or if this was requested in the configuration.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function the BAR belongs to.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   iBar        The BAR.
+ */
+static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint8_t iBar)
+{
+    PPDMDEVINS     pDevIns      = pThis->pDevIns;
+    PVFIOPCIBAR    pBar         = &pFun->aBars[iBar];
+    uint64_t const cbBarAligned = RT_ALIGN_64(pBar->cbRegion, GUEST_PAGE_SIZE);
+
+    /*
+     * Work out the page ranges to trap, sorted by offset.
+     */
+    struct
+    {
+        uint64_t offStart;
+        uint64_t offEnd;
+    }        aTraps[2];
+    unsigned cTraps = 0;
+    RT_ZERO(aTraps);
+    if (pBar->fInterceptMmio)
+    {
+        aTraps[0].offStart = 0;
+        aTraps[0].offEnd   = cbBarAligned;
+        cTraps = 1;
+    }
+    else if (   pFun->Layout.fMsix
+             && pFun->Layout.iBarMsix == iBar)
+    {
+        uint64_t const offTblStart = pFun->Layout.offMsixTbl & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
+        uint64_t const offPbaStart = pFun->Layout.offMsixPba & ~(uint64_t)GUEST_PAGE_OFFSET_MASK;
+        unsigned const iTbl        = offTblStart <= offPbaStart ? 0 : 1;
+        aTraps[iTbl].offStart     = offTblStart;
+        aTraps[iTbl].offEnd       = RT_ALIGN_64((uint64_t)pFun->Layout.offMsixTbl + pFun->Layout.cbMsixTbl, GUEST_PAGE_SIZE);
+        aTraps[iTbl ^ 1].offStart = offPbaStart;
+        aTraps[iTbl ^ 1].offEnd   = RT_ALIGN_64((uint64_t)pFun->Layout.offMsixPba + pFun->Layout.cbMsixPba, GUEST_PAGE_SIZE);
+        cTraps = 2;
+        if (aTraps[1].offStart <= aTraps[0].offEnd)
+        {
+            /* The same or neighbouring pages, make it one range. */
+            aTraps[0].offEnd = RT_MAX(aTraps[0].offEnd, aTraps[1].offEnd);
+            cTraps = 1;
+        }
+    }
+
+    /*
+     * Split the BAR into segments accordingly.
+     */
+    uint64_t offBar = 0;
+    pBar->cSegs = 0;
+    for (unsigned i = 0; i <= cTraps; i++)
+    {
+        uint64_t const offEndMapped = i < cTraps ? aTraps[i].offStart : cbBarAligned;
+        if (offEndMapped > offBar)
+        {
+            AssertReturn(pBar->cSegs < RT_ELEMENTS(pBar->aSegs), VERR_INTERNAL_ERROR_3);
+            PVFIOPCIBARSEG pSeg = &pBar->aSegs[pBar->cSegs++];
+            pSeg->iPciFun  = (uint8_t)pFun->uPciFun;
+            pSeg->iBar     = iBar;
+            pSeg->fTrapped = false;
+            pSeg->offBar   = offBar;
+            pSeg->cbSeg    = offEndMapped - offBar;
+        }
+        if (i < cTraps)
+        {
+            AssertReturn(pBar->cSegs < RT_ELEMENTS(pBar->aSegs), VERR_INTERNAL_ERROR_3);
+            PVFIOPCIBARSEG pSeg = &pBar->aSegs[pBar->cSegs++];
+            pSeg->iPciFun  = (uint8_t)pFun->uPciFun;
+            pSeg->iBar     = iBar;
+            pSeg->fTrapped = true;
+            pSeg->offBar   = aTraps[i].offStart;
+            pSeg->cbSeg    = aTraps[i].offEnd - aTraps[i].offStart;
+            offBar = aTraps[i].offEnd;
+        }
+    }
+
+    /*
+     * Create the regions.
+     */
+    for (uint8_t iSeg = 0; iSeg < pBar->cSegs; iSeg++)
+    {
+        PVFIOPCIBARSEG pSeg = &pBar->aSegs[iSeg];
+        int            rc;
+        if (pSeg->fTrapped)
+            rc = PDMDevHlpMmioCreate(pDevIns, pSeg->cbSeg, pPciDev, iBar /*iPciRegion*/,
+                                     pciVfioMmioWrite, pciVfioMmioRead, pSeg,
+                                     IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU, "MMIO",
+                                     &pSeg->hnd.hMmio);
+        else
+            rc = PDMDevHlpMmio2CreateFromExisting(pDevIns, pPciDev, iBar + iSeg * 0x10 /* has to be unique for the PCI device */,
+                                                  pSeg->cbSeg, 0 /*fFlags*/, "MMIO",
+                                                  (uint8_t *)pBar->pvMmio + pSeg->offBar, &pSeg->hnd.hMmio2);
+        AssertLogRelRCReturn(rc, rc);
+    }
+
+    /* The mapping is done by us as it depends on the segments. */
+    return pDevIns->pHlpR3->pfnPCIIORegionRegister(pDevIns, pPciDev, iBar, pBar->cbRegion, pBar->enmAddrSpace,
+                                                   PDMPCIDEV_IORGN_F_NO_HANDLE | PDMPCIDEV_IORGN_F_NEW_STYLE,
+                                                   UINT64_MAX, pciVfioMmioMapUnmap);
 }
 
 
@@ -1160,8 +1849,8 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
     if (pThread->enmState == PDMTHREADSTATE_INITIALIZING)
         return VINF_SUCCESS;
 
-    /* The poll structure for the interrupts. */
-    uint32_t        cEntriesAlloc = 2;
+    /* The poll structure for the interrupts, big enough for the wakeup eventfd and every vector we have an eventfd for. */
+    uint32_t const  cEntriesAlloc = pFun->cFdEvts + 1;
     struct pollfd   *paIrqFds = (struct pollfd *)RTMemAllocZ(cEntriesAlloc * sizeof(*paIrqFds));
     if (!paIrqFds)
     {
@@ -1173,53 +1862,41 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
     paIrqFds[0].fd = pFun->iFdWakeup;
     paIrqFds[0].events = POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI | POLLERR;
 
-    uint32_t cIrqs = 0;
+    /*
+     * This is entered each time the VM gets going: when it is powered on and when
+     * it is resumed.  What to poll has to be put together each time, also if the
+     * interrupt mode is what it was when the VM stopped.
+     */
+    uint32_t cIrqs      = 0;
+    bool     fPollSetUp = false;
     while (pThread->enmState == PDMTHREADSTATE_RUNNING)
     {
-        uint8_t uIrqModeNew = ASMAtomicReadU8(&pFun->uIrqModeNew);
-        if (pFun->uIrqModeCur != uIrqModeNew)
+        /* The sequence number has to be read before the mode, see pciVfioIrqPollerSwitchMode(). */
+        uint32_t const uIrqSeqReq  = ASMAtomicReadU32(&pFun->uIrqSeqReq);
+        uint8_t const  uIrqModeNew = ASMAtomicReadU8(&pFun->uIrqModeNew);
+        if (   !fPollSetUp
+            || pFun->uIrqModeCur != uIrqModeNew)
         {
-            switch (uIrqModeNew)
-            {
-                case UINT8_MAX:
-                {
-                    cIrqs = 0;
-                    break;
-                }
-                default:
-                {
-                    cIrqs = pFun->acIrqVectors[uIrqModeNew];
-                    break;
-                }
-            }
-
-            /* Resize the pollfd array if necessary. */
-            uint32_t const cNeeded = cIrqs + 1;
-            if (cNeeded > cEntriesAlloc)
-            {
-                struct pollfd *paIrqFdsNew = (struct pollfd *)RTMemRealloc(paIrqFds, cNeeded * sizeof(*paIrqFds));
-                if (!paIrqFdsNew)
-                {
-                    /** @todo This is quite wrong, we could allocate all possible entries up front and potentially waste memory... */
-                    LogRel(("VFIO#%d.%u: Failed to allocate memory for %u interrupt polling entries",
-                            pThis->iInstance, pFun->uPciFun, cEntriesAlloc));
-                    RTMemFree(paIrqFds);
-                    return VERR_NO_MEMORY;
-                }
-
-                paIrqFds      = paIrqFdsNew;
-                cEntriesAlloc = cNeeded;
-            }
+            if (uIrqModeNew < RT_ELEMENTS(pFun->acIrqVectors))
+                cIrqs = RT_MIN(pFun->acIrqVectors[uIrqModeNew], pFun->cFdEvts);
+            else
+                cIrqs = 0;
 
             for (uint32_t i = 0; i < cIrqs; i++)
             {
-                paIrqFds[i + 1].fd = pFun->afdEvts[i];
-                paIrqFds[i + 1].events = POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI | POLLERR;
+                paIrqFds[i + 1].fd      = pFun->paFdEvts[i];
+                paIrqFds[i + 1].events  = POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI | POLLERR;
+                paIrqFds[i + 1].revents = 0;
             }
 
             ASMAtomicWriteU8(&pFun->uIrqModeCur, uIrqModeNew);
+            fPollSetUp = true;
+        }
 
-            /* Inform the initiator of the mode switch .*/
+        /* Inform the initiator of a mode switch that we are done with it. */
+        if (ASMAtomicReadU32(&pFun->uIrqSeqAck) != uIrqSeqReq)
+        {
+            ASMAtomicWriteU32(&pFun->uIrqSeqAck, uIrqSeqReq);
             RTThreadUserSignal(pThread->Thread);
         }
 
@@ -1248,37 +1925,9 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
 
                     uint16_t const uVec = i - 1;
                     if (pFun->uIrqModeCur == VFIO_PCI_MSIX_IRQ_INDEX)
-                    {
-                        /* Can't use PDMDevHlpPCISetIrqEx here as the PCI stuff is not aware of MSI-X support. */
-                        PMSIXTBLENTRY pVec = &pFun->paMsixTbl[uVec];
-
-                        uint16_t uMmc = PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl);
-
-                        /* Mark as pending if vector is disabled. */
-                        if (   uMmc & RT_BIT(14)
-                            || pVec->u32VecCtrl & RT_BIT_32(0))
-                        {
-                            uint16_t offPba = uVec / 64;
-                            uint8_t  idxBit = uVec & 0x3f;
-                            volatile uint64_t *pbmPba = &pFun->pbmMsixPba[offPba];
-                            ASMAtomicBitSet(pbmPba, idxBit);
-                        }
-                        else
-                        {
-                            /** @todo This isn't pretty as it accesses stuff internal to the PCI subsystem. */
-                            PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
-                            MSIMSG Msi;
-                            Msi.Addr.u64 = ((uint64_t)pVec->u32MsgAddrUpper << 32) | pVec->u32MsgAddr;
-                            Msi.Data.u32 = pVec->u32MsgData;
-
-                            PPDMDEVINS pDevInsBus = pPciHlp->pfnGetBusByNo(pDevIns, pPciDev->Int.s.idxPdmBus);
-                            Assert(pDevInsBus);
-                            PDEVPCIBUS pBus = PDMINS_2_DATA(pDevInsBus, PDEVPCIBUS);
-                            uint16_t const uBusDevFn = PCIBDF_MAKE(pBus->iBus, pPciDev->uDevFn);
-
-                            pPciHlp->pfnIoApicSendMsi(pDevIns, uBusDevFn, &Msi, 0 /*uTagSrc*/);
-                        }
-                    }
+                        pciVfioMsixRaise(pDevIns, pFun, pPciDev, uVec);
+                    else if (pFun->uIrqModeCur == VFIO_PCI_MSI_IRQ_INDEX)
+                        pciVfioMsiRaise(pDevIns, pFun, pPciDev, uVec);
                     else
                         PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, uVec, 1);
 
@@ -1342,18 +1991,53 @@ static DECLCALLBACK(int) pciVfioIrqPollerWakeup(PPDMDEVINS pDevIns, PPDMTHREAD p
 }
 
 
-static int pciVfioIrqPollerSwitchMode(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uVfioIrq, bool fWait)
+/**
+ * Makes the IRQ poller switch to the given mode.
+ *
+ * If the poller is running this waits until it did, so the caller can go on
+ * changing the interrupt setup of the device without the poller looking at the
+ * eventfds with a wrong idea of what they mean.  A poller which is not running
+ * (the VM is being constructed, is suspended or is powering off) does not look
+ * at the eventfds at all and picks up the mode when it gets going.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_TIMEOUT if the poller did not react in time.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function the poller belongs to.
+ * @param   uVfioIrq    The VFIO interrupt index to switch to, UINT8_MAX for none.
+ */
+static int pciVfioIrqPollerSwitchMode(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfioIrq)
 {
-    /* Wakeup the IRQ poller to switch to the new mode. */
-    RTThreadUserReset(pFun->pThrdIrq->Thread);
+    PPDMTHREAD const pThread = pFun->pThrdIrq;
+    if (!pThread)
+    {
+        /* No poller yet, it starts out in the mode set here. */
+        ASMAtomicWriteU8(&pFun->uIrqModeNew, uVfioIrq);
+        return VINF_SUCCESS;
+    }
+
+    /* The mode has to be written before the sequence number, the poller reads them the other way around. */
+    RTThreadUserReset(pThread->Thread);
     ASMAtomicWriteU8(&pFun->uIrqModeNew, uVfioIrq);
-    pciVfioIrqPollerWakeup(pThis->pDevIns, pFun->pThrdIrq);
+    uint32_t const uIrqSeqReq = ASMAtomicIncU32(&pFun->uIrqSeqReq);
+    pciVfioIrqPollerWakeup(pThis->pDevIns, pThread);
+
+    if (pThread->enmState != PDMTHREADSTATE_RUNNING)
+        return VINF_SUCCESS;
 
     /* Wait until it got confirmed. */
-    if (fWait)
-        return RTThreadUserWait(pFun->pThrdIrq->Thread, 5 * RT_MS_1SEC);
+    uint64_t const msStart = RTTimeMilliTS();
+    for (;;)
+    {
+        if (ASMAtomicReadU32(&pFun->uIrqSeqAck) == uIrqSeqReq)
+            return VINF_SUCCESS;
 
-    return VINF_SUCCESS;
+        uint64_t const cMsElapsed = RTTimeMilliTS() - msStart;
+        if (cMsElapsed >= 5 * RT_MS_1SEC)
+            return VERR_TIMEOUT;
+        RTThreadUserWait(pThread->Thread, (RTMSINTERVAL)(5 * RT_MS_1SEC - cMsElapsed));
+        RTThreadUserReset(pThread->Thread);
+    }
 }
 
 
@@ -1366,7 +2050,7 @@ DECLINLINE(int) pciVfioQueryIrqInfo(PVFIOPCI pThis, PCVFIOPCIFUN pFun, uint32_t 
 
     int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_IRQ_INFO, &IrqInfo);
     if (rcLnx == -1)
-        return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                 N_("Getting information for irq %u of opened VFIO device failed with %d"), uIrq, errno);
 
     const int iInstance = pThis->iInstance;
@@ -1384,135 +2068,161 @@ DECLINLINE(int) pciVfioQueryIrqInfo(PVFIOPCI pThis, PCVFIOPCIFUN pFun, uint32_t 
 }
 
 
-static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uVfioIrq, uint16_t cVectors)
+/**
+ * Sets up the given interrupt type with VFIO, tearing down what is currently
+ * set up if it differs.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function to configure.
+ * @param   uVfioIrq    The VFIO interrupt index to set up, UINT8_MAX for none.
+ * @param   cVectors    The number of vectors to enable; none is set up if this is 0.
+ */
+static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfioIrq, uint32_t cVectors)
 {
-    int rc = VINF_SUCCESS;
-    uint8_t uIrqModeCur = ASMAtomicReadU8(&pFun->uIrqModeCur);
+    /* There are no interrupts to come from a function which is out of service. */
+    if (pFun->fGone)
+        return VINF_SUCCESS;
 
-    if (   !cVectors
-        || (   uIrqModeCur != uVfioIrq
-            && uIrqModeCur != UINT8_MAX))
+    if (!cVectors)
+        uVfioIrq = UINT8_MAX;
+    else if (uVfioIrq == UINT8_MAX)
+        cVectors = 0;
+
+    if (   pFun->uIrqMode    == uVfioIrq
+        && pFun->cIrqVectors == cVectors)
+        return VINF_SUCCESS;
+
+    /*
+     * Tear down the current setup.  The poller has to stop looking at the
+     * eventfds before the meaning of them changes.
+     */
+    if (pFun->uIrqMode != UINT8_MAX)
     {
-        /* Clear. */
-        rc = pciVfioIrqPollerSwitchMode(pThis, pFun, UINT8_MAX, true /*fWait*/);
+        int rc = pciVfioIrqPollerSwitchMode(pThis, pFun, UINT8_MAX);
         if (RT_FAILURE(rc))
-            return PDMDevHlpVMSetError(pThis->pDevIns, rc, RT_SRC_POS,
-                                       N_("Switching the IRQ poller mode failed"));
+            return rc;
 
-        /* Disable the interrupt mode. */
         struct vfio_irq_set IrqSet;
         IrqSet.argsz = sizeof(IrqSet);
         IrqSet.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
-        IrqSet.index = uIrqModeCur;
+        IrqSet.index = pFun->uIrqMode;
         IrqSet.start = 0;
         IrqSet.count = 0;
 
         int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &IrqSet);
         if (rcLnx == -1)
-            return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Clearing interrupts on the device failed with %d"), errno);
+            return RTErrConvertFromErrno(errno);
 
-        if (   uIrqModeCur == VFIO_PCI_MSI_IRQ_INDEX
-            || uIrqModeCur == VFIO_PCI_MSIX_IRQ_INDEX)
-        {
-            /*
-             * When disabling MSI/MSI-X interrupts the kernel will always switch to INTx.
-             * In case it is masked in our device turn it off as well, otherwise switch
-             * to INTx mode and fall through below.
-             */
-            uint16_t u16Cmd = PDMPciDevGetCommand(pThis->pDevIns->apPciDevs[pFun->uPciFun]);
-            if (u16Cmd & RT_BIT(10))
-            {
-#if 0
-                /* Disable INTx again. */
-                IrqSet.argsz = sizeof(IrqSet);
-                IrqSet.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
-                IrqSet.index = VFIO_PCI_INTX_IRQ_INDEX;
-                IrqSet.start = 0;
-                IrqSet.count = 0;
-
-                rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &IrqSet);
-                if (rcLnx == -1)
-                    return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                               N_("Clearing INTx interrupts on the device failed with %d"), errno);
-
-                return VINF_SUCCESS;
-#endif
-            }
-            else
-                uVfioIrq = VFIO_PCI_INTX_IRQ_INDEX;
-        }
+        pFun->uIrqMode    = UINT8_MAX;
+        pFun->cIrqVectors = 0;
     }
 
-    Assert(ASMAtomicReadU8(&pFun->uIrqModeCur) == UINT8_MAX);
+    if (uVfioIrq == UINT8_MAX)
+        return VINF_SUCCESS;
 
-    if (cVectors)
-    {
-        if (uVfioIrq == VFIO_PCI_INTX_IRQ_INDEX)
-        {
-            Assert(cVectors == 1);
+    /*
+     * Set up the new one.  The number of vectors is limited by what the device
+     * has and by the number of eventfds created for it.
+     */
+    AssertReturn(uVfioIrq < RT_ELEMENTS(pFun->acIrqVectors), VERR_INVALID_PARAMETER);
+    AssertReturn(   cVectors <= pFun->acIrqVectors[uVfioIrq]
+                 && cVectors <= pFun->cFdEvts,
+                 VERR_OUT_OF_RANGE);
 
-            union
-            {
-                struct vfio_irq_set IrqSet;
-                uint32_t            au32[sizeof(struct vfio_irq_set) / sizeof(uint32_t) + 1];
-            } uBuf;
+    size_t const         cbIrqSet = sizeof(struct vfio_irq_set) + cVectors * sizeof(int32_t);
+    struct vfio_irq_set *pIrqSet  = (struct vfio_irq_set *)RTMemTmpAllocZ(cbIrqSet);
+    if (!pIrqSet)
+        return VERR_NO_TMP_MEMORY;
 
-            uBuf.IrqSet.argsz = sizeof(uBuf);
-            uBuf.IrqSet.flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
-            uBuf.IrqSet.index = uVfioIrq;
-            uBuf.IrqSet.start = 0;
-            uBuf.IrqSet.count = 1;
-            uBuf.au32[sizeof(struct vfio_irq_set) / sizeof(uint32_t)] = pFun->afdEvts[0];
+    pIrqSet->argsz = (uint32_t)cbIrqSet;
+    pIrqSet->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+    pIrqSet->index = uVfioIrq;
+    pIrqSet->start = 0;
+    pIrqSet->count = cVectors;
 
-            int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &uBuf);
-            if (rcLnx == -1)
-                return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                        N_("Assigning one INTX interrupt failed with %d (%u)"), errno, sizeof(uBuf));
-        }
-        else if (   uVfioIrq == VFIO_PCI_MSI_IRQ_INDEX
-                 || uVfioIrq == VFIO_PCI_MSIX_IRQ_INDEX)
-        {
-            union
-            {
-                struct vfio_irq_set IrqSet;
-                uint32_t            au32[sizeof(struct vfio_irq_set) / sizeof(uint32_t) + VBOX_MSI_MAX_ENTRIES];
-            } uBuf;
+    int32_t *paiFds = (int32_t *)(pIrqSet + 1);
+    for (uint32_t i = 0; i < cVectors; i++)
+        paiFds[i] = pFun->paFdEvts[i];
 
-            uBuf.IrqSet.argsz = sizeof(uBuf.IrqSet) + cVectors * sizeof(uint32_t);
-            uBuf.IrqSet.flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
-            uBuf.IrqSet.index = uVfioIrq;
-            uBuf.IrqSet.start = 0;
-            uBuf.IrqSet.count = cVectors;
+    int       rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, pIrqSet);
+    int const rc    = rcLnx != -1 ? VINF_SUCCESS : RTErrConvertFromErrno(errno);
+    RTMemTmpFree(pIrqSet);
+    if (RT_FAILURE(rc))
+        return rc;
 
-            for (uint32_t i = 0; i < cVectors; i++)
-                uBuf.au32[sizeof(struct vfio_irq_set) / sizeof(uint32_t) + i] = pFun->afdEvts[i];
-
-            int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &uBuf);
-            if (rcLnx == -1)
-                return PDMDevHlpVMSetError(pThis->pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                        N_("Assigning MSI/MSI-X interrupts failed with %d (%u)"), errno, sizeof(uBuf));
-        }
-        else
-            AssertReleaseFailed();
-
-        rc = pciVfioIrqPollerSwitchMode(pThis, pFun, uVfioIrq, false /*fWait*/);
-        if (RT_FAILURE(rc))
-            return PDMDevHlpVMSetError(pThis->pDevIns, rc, RT_SRC_POS,
-                                       N_("Switching the IRQ poller mode failed"));
-    }
-
-    return VINF_SUCCESS;
+    pFun->uIrqMode    = uVfioIrq;
+    pFun->cIrqVectors = cVectors;
+    return pciVfioIrqPollerSwitchMode(pThis, pFun, uVfioIrq);
 }
 
 
+/**
+ * Brings the interrupt setup of the device in line with what the guest has
+ * configured.
+ *
+ * MSI-X takes precedence over MSI, which takes precedence over INTx.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function to configure.
+ * @param   u16Cmd      The PCI command register.
+ * @param   u16MsiCtrl  The MSI message control register, ignored if the function has no MSI capability.
+ * @param   u16MsixCtrl The MSI-X message control register, ignored if the function has no MSI-X capability.
+ */
+static int pciVfioIrqUpdate(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint16_t u16Cmd, uint16_t u16MsiCtrl, uint16_t u16MsixCtrl)
+{
+    uint8_t  uVfioIrq = UINT8_MAX;
+    uint32_t cVectors = 0;
+    if (   pFun->offMsixCtrl
+        && (u16MsixCtrl & VBOX_PCI_MSIX_FLAGS_ENABLE))
+    {
+        uVfioIrq = VFIO_PCI_MSIX_IRQ_INDEX;
+        cVectors = pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX];
+    }
+    else if (   pFun->offMsiCtrl
+             && (u16MsiCtrl & VBOX_PCI_MSI_FLAGS_ENABLE))
+    {
+        /*
+         * The guest picks how many of the vectors it wants to use with the
+         * Multiple Message Enable field.  Whatever it writes there, it can't
+         * get more than the device has.
+         */
+        uVfioIrq = VFIO_PCI_MSI_IRQ_INDEX;
+        cVectors = RT_MIN(RT_BIT_32((u16MsiCtrl & VBOX_PCI_MSI_FLAGS_QSIZE) >> 4), pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]);
+    }
+    else if (   pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]
+             && !(u16Cmd & VBOX_PCI_COMMAND_INTX_DISABLE))
+    {
+        uVfioIrq = VFIO_PCI_INTX_IRQ_INDEX;
+        cVectors = 1;
+    }
+
+    int rc = pciVfioIrqReconfigure(pThis, pFun, uVfioIrq, cVectors);
+    if (RT_FAILURE(rc))
+        LogRelMax(32, ("VFIO#%d.%u: Failed to set up interrupt type %u with %u vector(s), expect a broken device (%Rrc)\n",
+                       pThis->iInstance, pFun->uPciFun, uVfioIrq, cVectors, rc));
+    return rc;
+}
+
+
+/**
+ * Sets how reads and writes of a config space byte are handled, replacing what
+ * was set for it before.
+ *
+ * @param   pFun        The function.
+ * @param   off         The config space offset of the byte.
+ * @param   fRd         How to handle reads, VFIO_PCI_CFG_SPACE_ACCESS_XXX.
+ * @param   fWr         How to handle writes, VFIO_PCI_CFG_SPACE_ACCESS_XXX.
+ */
 DECLINLINE(void) pciVfioCfgSpaceSetInterceptU8(PVFIOPCIFUN pFun, uint32_t off, uint8_t fRd, uint8_t fWr)
 {
     AssertReturnVoid(off < sizeof(pFun->abPciCfgIntercept) * 8 / 4);
     uint32_t offByte = off >> 1;
     uint8_t  cShift  = (off & 0x1) ? 4 : 0;
 
-    pFun->abPciCfgIntercept[offByte] |= ((fWr << 2) | fRd) << cShift;
+    pFun->abPciCfgIntercept[offByte] = (uint8_t)(  (pFun->abPciCfgIntercept[offByte] & ~(0xf << cShift))
+                                                 | ((((fWr & 0x3) << 2) | (fRd & 0x3)) << cShift));
 }
 
 
@@ -1574,123 +2284,85 @@ DECLINLINE(uint8_t) pciVfioCfgSpaceGetInterceptWr(PVFIOPCIFUN pFun, uint32_t off
 
 static int pciVfioTrySetupMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint8_t offCap)
 {
-    PPDMDEVINS pDevIns = pThis->pDevIns;
-
     /*
-     * For now we will only support MSI-X if the Table and PBA are on a dedicated BAR and are separated by
-     * a page size alignment.
+     * The MSI-X table and the pending bit array of the device belong to the host
+     * kernel, which programs the table for delivering the interrupts to our
+     * eventfds.  The guest gets a table and a pending bit array of its own at the
+     * place where the device has them, see pciVfioBarSetupMmio() and
+     * pciVfioBarSegAccess().
      */
-    /** @todo Our own MSI-X support is not very efficient as the Table and PBA are standard MMIO regions
-     * causing page faults and emulation when the guest accesses it, even for reads. They could be made
-     * MMIO2 regions with a write protection layer on top, so only write accesses are faulting.
-     * However I don't feel like fixing that just now and deal with saved states compatibility and testing
-     * each and every device emulation supporting MSI-X, so we will do everything on our own here and maybe
-     * port that over later. */
 
     /* First get at the information from the capability. */
     uint16_t u16Mmc = 0;
     int rc = pciVfioCfgSpaceReadU16(pFun, offCap + 2, &u16Mmc);
     if (RT_FAILURE(rc))
-        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                    N_("Failed to read MSI-X message control register with %Rrc"), rc);
 
     uint32_t u32TblCfg = 0;
     rc = pciVfioCfgSpaceReadU32(pFun, offCap + 4, &u32TblCfg);
     if (RT_FAILURE(rc))
-        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                    N_("Failed to read MSI-X table config register with %Rrc"), rc);
 
     uint32_t u32PbaCfg = 0;
     rc = pciVfioCfgSpaceReadU32(pFun, offCap + 8, &u32PbaCfg);
     if (RT_FAILURE(rc))
-        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                    N_("Failed to read MSI-X PBA config register with %Rrc"), rc);
 
-    uint16_t cVectors = (u16Mmc & 0x7ff) + 1;
-    uint8_t  uTblBir  = u32TblCfg & 0x7;
-    uint8_t  uPbaBir  = u32PbaCfg & 0x7;
-    uint32_t offTbl   = u32TblCfg & UINT32_C(0xfffffff8);
-    uint32_t offPba   = u32PbaCfg & UINT32_C(0xfffffff8);
+    uint32_t const cVectors = (u16Mmc & 0x7ff) + 1;
+    uint8_t  const uTblBir  = u32TblCfg & 0x7;
+    uint8_t  const uPbaBir  = u32PbaCfg & 0x7;
+    uint32_t const offTbl   = u32TblCfg & UINT32_C(0xfffffff8);
+    uint32_t const offPba   = u32PbaCfg & UINT32_C(0xfffffff8);
+    uint32_t const cbTbl    = cVectors * sizeof(MSIXTBLENTRY);
+    uint32_t const cbPba    = RT_ALIGN_32(cVectors, 64) / 8;
+    uint64_t const cbBar    = uTblBir < 6 ? pFun->aBars[uTblBir].cbRegion : 0;
 
     if (   uTblBir >= 6                                            /* 6 and 7 are reserved, indicates a broken device. */
         || uTblBir != uPbaBir                                      /* Same region */
         || uTblBir != pFun->iBarMsix                               /* BAR doesn't match what VFIO presented to us. */
-        || offPba <= offTbl                                        /* PBA must not intersect table. */
+        || pFun->aBars[uTblBir].bType != 2                         /* Has to be a memory BAR. */
         || cVectors != pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] /* The indicated table size must match what VFIO reported as number of IRQ vectors. */
+        || (uint64_t)offTbl + cbTbl > cbBar                        /* The table has to be inside the BAR ... */
+        || (uint64_t)offPba + cbPba > cbBar                        /* ... and so does the PBA. */
+        || (   offTbl < (uint64_t)offPba + cbPba                   /* PBA must not intersect table. */
+            && offPba < (uint64_t)offTbl + cbTbl)
        )
     {
         /* Just log and don't set an error. */
-        LogRel(("VFIO#%d.%u: MSI-X not supported for this device as it doesn't meet the requirements: uTblBir=%u uPbaBir=%u offTbl=%#x offPba=%#x cVectors=%u cVfioVectors=%u\n",
-                pThis->iInstance, pFun->uPciFun, uTblBir, uPbaBir, offTbl, offPba, cVectors, pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]));
+        LogRel(("VFIO#%d.%u: MSI-X not supported for this device as it doesn't meet the requirements: uTblBir=%u uPbaBir=%u offTbl=%#x offPba=%#x cVectors=%u cVfioVectors=%u cbBar=%#RX64\n",
+                pThis->iInstance, pFun->uPciFun, uTblBir, uPbaBir, offTbl, offPba, cVectors,
+                pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX], cbBar));
         return VERR_NOT_SUPPORTED;
     }
 
-    uint32_t const cbMsix = RT_ALIGN_32((offPba - offTbl) + RT_MAX(8, cVectors / 8), GUEST_PAGE_SIZE);
-    if (!(offTbl & ~GUEST_PAGE_OFFSET_MASK))
+    pFun->paMsixTbl  = (PMSIXTBLENTRY)RTMemAllocZ(cbTbl);
+    pFun->pbmMsixPba = (volatile uint64_t *)RTMemAllocZ(cbPba);
+    if (!pFun->paMsixTbl || !pFun->pbmMsixPba)
     {
-        /* Dedicated MSI-X BARs get handled differently. */
-        if (offTbl == 0)
-        {
-            /* Clear the BAR containing the MSI-X region so it doesn't get mapped later on. */
-            Assert(pFun->aBars[uTblBir].bType == 2);
-            pFun->aBars[uTblBir].bType = 0;
-
-            rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pPciDev, uTblBir, cbMsix,
-                                                   PCI_ADDRESS_SPACE_MEM_PREFETCH, 0 /*fFlags*/,
-                                                   /*pciVfioMsixMapUnmap*/ NULL, "MSI-X", (void **)&pFun->pbMsix, &pFun->hMsix);
-        }
-        else
-        {
-            /*
-             * MSI-X state is part of an MMIO region but page aligned so just allocate the MMIO2 memory without setting up
-             * the PCI region.
-             */
-            rc = PDMDevHlpMmio2Create(pDevIns, pPciDev, uTblBir + 0x10, cbMsix,
-                                      0 /*fFlags*/, "MSI-X State", (void **)&pFun->pbMsix, &pFun->hMsix);
-        }
-
-        AssertLogRelRCReturn(rc, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                                     N_("Failed to allocate %zu bytes of MSI-X state"), cbMsix));
-
-#if 0
-        rc = PDMDevHlpPGMHandlerPhysicalTypeRegister(pThis->pDevIns, PGMPHYSHANDLERKIND_WRITE,
-                                                     pciVfioMsixWriteHandler, "VFIO MSI-X", &pFun->hMsixWrHndType);
-        AssertRCReturn(rc, rc);
-#endif
+        LogRel(("VFIO#%d.%u: Failed to allocate the MSI-X state for %u vectors, MSI-X not supported for this device\n",
+                pThis->iInstance, pFun->uPciFun, cVectors));
+        RTMemFree(pFun->paMsixTbl);
+        RTMemFree((void *)pFun->pbmMsixPba);
+        pFun->paMsixTbl  = NULL;
+        pFun->pbmMsixPba = NULL;
+        return VERR_NO_MEMORY;
     }
-    else
-    {
-        /*
-         * The MSI-X region is not page aligned so we have to intercept accesses to the whole BAR,
-         * which can be quite inefficient depending on the device when the guest accesses the MMIO
-         * region extensively.
-         */
-        /** @todo Maybe it would be better performance wise to just mask MSI-X support and let the guest
-         *        resort to MSI or INTX style interrupts. */
-        pFun->aBars[uTblBir].fInterceptMmio = true;
-        LogRel(("VFIO#%d.%u: Intercepting accesses to MMIO region %u because MSI-X state is not page aligned\n",
-                pThis->iInstance, pFun->uPciFun, uTblBir));
-
-        pFun->pbMsix = (uint8_t *)PDMDevHlpMMHeapAllocZ(pDevIns, cbMsix);
-        AssertLogRelReturn(pFun->pbMsix, PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                                             N_("Failed to allocate %zu bytes of MSI-X state"), cbMsix));
-    }
-
-    pFun->paMsixTbl  = (PMSIXTBLENTRY)pFun->pbMsix;
-    pFun->pbmMsixPba = (volatile uint64_t *)pFun->pbMsix;
-    pFun->cbMsix     = cbMsix;
 
     /* Each vector is masked by default. */
-    PMSIXTBLENTRY pMsixEntry = (PMSIXTBLENTRY)pFun->paMsixTbl;
-    for (uint16_t i = 0; i < cVectors; i++)
-    {
-        pMsixEntry->u32VecCtrl = RT_BIT(0);
-        pMsixEntry++;
-    }
+    for (uint32_t i = 0; i < cVectors; i++)
+        pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
 
-    /* Configure the capability if everything succeeded. */
+    pFun->offMsixTbl = offTbl;
+    pFun->cbMsixTbl  = cbTbl;
+    pFun->offMsixPba = offPba;
+    pFun->cbMsixPba  = cbPba;
+
+    /* Configure the capability if everything succeeded.  MSI-X starts out disabled for the guest. */
     pFun->offMsixCtrl = offCap + 2;
-    PDMPciDevSetWord( pPciDev, offCap + 2, u16Mmc);           /* Message control */
+    PDMPciDevSetWord( pPciDev, offCap + 2, u16Mmc & ~(VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK)); /* Message control */
     PDMPciDevSetDWord(pPciDev, offCap + 4, offTbl | uTblBir); /* Table config */
     PDMPciDevSetDWord(pPciDev, offCap + 8, offPba | uPbaBir); /* PBA config   */
     pciVfioCfgSpaceSetInterceptU16(  pFun, offCap + 2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
@@ -1703,8 +2375,6 @@ static int pciVfioTrySetupMsix(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
 
 static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
 {
-    PPDMDEVINS pDevIns = pThis->pDevIns;
-
     /* Initialize with 0. */
     PDMPciDevSetCapabilityList(pPciDev, 0);
 
@@ -1715,31 +2385,43 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
     uint8_t offCap = 0;
     int rc = pciVfioCfgSpaceReadU8(pFun, VBOX_PCI_CAPABILITY_LIST, &offCap);
     if (RT_FAILURE(rc))
-        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                    N_("Failed to read capabilities list pointer with %Rrc"), rc);
 
     pciVfioCfgSpaceSetInterceptRoU8(pFun, VBOX_PCI_CAPABILITY_LIST, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);
+    offCap &= 0xfc; /* The bottom two bits are reserved. */
     if (!offCap)
     {
         /* No capabilities, return early. */
         return VINF_SUCCESS;
     }
 
-    /* This ASSUMES that the cpabilities are not going backwards when pointing to the next one. */
+    /*
+     * The capabilities can come in any order.  Keep track of the config space
+     * bytes claimed by the capabilities seen so far, in order to catch lists
+     * which loop and capabilities which overlap.
+     */
+    uint64_t bmClaimed[256 / 64];
+    RT_ZERO(bmClaimed);
     uint8_t offCapNextPrev = VBOX_PCI_CAPABILITY_LIST;
     for (;;)
     {
+        if (offCap < 0x40)
+            return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The capability pointer %#x points into the PCI header"), offCap);
+
         uint8_t bCapId = 0;
         rc = pciVfioCfgSpaceReadU8(pFun, offCap, &bCapId);
         if (RT_FAILURE(rc))
-            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+            return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                        N_("Failed to read capabilitiy ID at offset %#x with %Rrc"), offCap, rc);
 
         uint8_t offCapNext = 0;
         rc = pciVfioCfgSpaceReadU8(pFun, offCap + 1, &offCapNext);
         if (RT_FAILURE(rc))
-            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+            return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                        N_("Failed to read next capability pointer at offset %#x with %Rrc"), offCap, rc);
+        offCapNext &= 0xfc; /* The bottom two bits are reserved. */
 
         uint8_t cbCap = 2;
         bool    fSupported = false;
@@ -1759,51 +2441,72 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
             case VBOX_PCI_CAP_ID_SLOTID: LogRel(("VFIO#%d.%u: Cap[%#x]: Slot Identification -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap)); break;
             case VBOX_PCI_CAP_ID_MSI:
             {
-                LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
-                fSupported = true;
+                /* There is one per function.  Whatever a second one is, the guest doesn't get to see it. */
+                if (pFun->offMsiCtrl)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> unsupported, the function has one already\n",
+                            pThis->iInstance, pFun->uPciFun, offCap));
+                    break;
+                }
 
                 /* Read the message control from the device. */
                 uint16_t u16Mmc = 0;
                 rc = pciVfioCfgSpaceReadU16(pFun, offCap + 2, &u16Mmc);
                 if (RT_FAILURE(rc))
-                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                    return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                                N_("Failed to read MSI message control register with %Rrc"), rc);
 
-                bool f64Bit = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
-                uint8_t cVectors = RT_BIT((u16Mmc & VBOX_PCI_MSI_FLAGS_QMASK) >> 1);
+                uint32_t const cVectors = pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX];
+                if (!cVectors)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> unsupported, VFIO has no vectors for it\n",
+                            pThis->iInstance, pFun->uPciFun, offCap));
+                    break;
+                }
 
-                /* Add capability. */
-                PDMMSIREG MsiReg;
-                RT_ZERO(MsiReg);
-                MsiReg.cMsiVectors     = cVectors;
-                MsiReg.iMsiCapOffset   = offCap;
-                MsiReg.iMsiNextOffset  = 0; /* Gets updated later. */
-                MsiReg.fMsi64bit       = f64Bit;
-                rc = PDMDevHlpPCIRegisterMsiEx(pDevIns, pPciDev, &MsiReg);
-                if (RT_FAILURE(rc))
-                    AssertFailed();
+                LogRel(("VFIO#%d.%u: Cap[%#x]: Message Signaled Interrupts -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
+                fSupported = true;
 
-                pciVfioCfgSpaceSetInterceptU16(pFun, offCap +  2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);    /* Message Control */
-                pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address [Low] */
+                /*
+                 * The guest gets the capability with the layout it has on the device, so it
+                 * never extends into whatever follows in the config space.  The registers are
+                 * all emulated here, see pciVfioCfgEmulatedRegWrite() and pciVfioMsiRaise();
+                 * the MSI support of the PCI bus is not used as it knows one layout only.
+                 */
+                bool const    f64Bit    = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_64BIT);
+                bool const    fMaskable = RT_BOOL(u16Mmc & VBOX_PCI_MSI_FLAGS_MASKBIT);
+                uint8_t const offData   = offCap + (f64Bit ? VBOX_MSI_CAP_MESSAGE_DATA_64 : VBOX_MSI_CAP_MESSAGE_DATA_32);
+                cbCap = (uint8_t)(offData - offCap) + (fMaskable ? 2 + 2 + 4 + 4 : 2);
+                if ((uint32_t)offCap + cbCap > 256)
+                    return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                               N_("The MSI capability at offset %#x doesn't fit into the PCI config space"), offCap);
+
+                /* The message control register describes the device: the layout and as many vectors
+                   as VFIO has for us.  MSI starts out disabled. */
+                uint32_t cVectorsLog2 = (u16Mmc & VBOX_PCI_MSI_FLAGS_QMASK) >> 1;
+                while (cVectorsLog2 > 0 && RT_BIT_32(cVectorsLog2) > cVectors)
+                    cVectorsLog2--;
+                PDMPciDevSetWord(pPciDev, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,
+                                   (u16Mmc & (VBOX_PCI_MSI_FLAGS_64BIT | VBOX_PCI_MSI_FLAGS_MASKBIT))
+                                 | (uint16_t)(cVectorsLog2 << 1));
+                for (uint32_t off = offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO; off < (uint32_t)offCap + cbCap; off++)
+                    PDMPciDevSetByte(pPciDev, off, 0);
+
+                pciVfioCfgSpaceSetInterceptU16(pFun, offCap + VBOX_MSI_CAP_MESSAGE_CONTROL,    VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Message Control */
+                pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Message Address [Low] */
                 if (f64Bit)
+                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Message Address High */
+                pciVfioCfgSpaceSetInterceptU16(pFun, offData, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE);          /* Message Data */
+                if (fMaskable)
                 {
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap +  8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Address High */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
-
-                    /* We always implement MSI with per-vector masking support. */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 20, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
-                }
-                else
-                {
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Message Data */
-
-                    /* We always implement MSI with per-vector masking support. */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 12, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Mask */
-                    pciVfioCfgSpaceSetInterceptU32(pFun, offCap + 16, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT); /* Pending */
+                    pciVfioCfgSpaceSetInterceptRoU16(pFun, offData + 2, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);                                  /* Reserved */
+                    pciVfioCfgSpaceSetInterceptU32(  pFun, offData + 4, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT, VFIO_PCI_CFG_SPACE_ACCESS_EMULATE); /* Mask */
+                    pciVfioCfgSpaceSetInterceptRoU32(pFun, offData + 8, VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT);                                  /* Pending */
                 }
 
-                pFun->offMsiCtrl = offCap + 2;
+                pFun->offMsiCtrl   = offCap + 2;
+                pFun->fMsi64Bit    = f64Bit;
+                pFun->fMsiMaskable = fMaskable;
                 break;
             }
             case VBOX_PCI_CAP_ID_CHSWP: LogRel(("VFIO#%d.%u: Cap[%#x]: CompactPCI Hot Swap -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap)); break;
@@ -1817,10 +2520,10 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 uint8_t cbVendor = 0;
                 rc = pciVfioCfgSpaceReadU8(pFun, offCap + 2, &cbVendor);
                 if (RT_FAILURE(rc))
-                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                    return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                                N_("Failed to read vendor length field at offset %#x with %Rrc"), offCap + 2, rc);
                 if (cbVendor < 2 || cbVendor > 256 - offCap)
-                    return PDMDevHlpVMSetError(pDevIns, VERR_BUFFER_OVERFLOW, RT_SRC_POS,
+                    return pciVfioSetError(pThis, VERR_BUFFER_OVERFLOW, RT_SRC_POS,
                                                N_("Invalid vendor length field %#x"), cbVendor);
 
                 for (uint8_t i = 0; i < cbVendor - 2; i++)
@@ -1845,7 +2548,7 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 uint16_t u16ExpReg = 0;
                 rc = pciVfioCfgSpaceReadU16(pFun, offCap + 2, &u16ExpReg);
                 if (RT_FAILURE(rc))
-                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                    return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                                N_("Failed to read PCI Express Capabilities Register at offset %#x with %Rrc"), offCap + 2, rc);
 
                 uint8_t const bVers = u16ExpReg & 0xf;
@@ -1854,6 +2557,17 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                     cbCap2 = 36;
                 else if (bVers == 2)
                     cbCap2 = 60;
+
+                if (!cbCap2)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: PCI Express capability version %u is unknown -> unsupported\n",
+                            pThis->iInstance, pFun->uPciFun, offCap, bVers));
+                    fSupported = false;
+                    break;
+                }
+                if ((uint32_t)offCap + cbCap2 > 256)
+                    return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                               N_("The PCI Express capability at offset %#x doesn't fit into the PCI config space"), offCap);
 
                 for (uint16_t i = offCap + 2; i < (uint16_t)offCap + cbCap2; i += 2)
                     pciVfioCfgSpaceSetInterceptU16(pFun, i, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
@@ -1864,6 +2578,17 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
             }
             case VBOX_PCI_CAP_ID_MSIX:
             {
+                /* There is one per function.  Whatever a second one is, the guest doesn't get to see it. */
+                if (pFun->offMsixCtrl)
+                {
+                    LogRel(("VFIO#%d.%u: Cap[%#x]: MSI-X -> unsupported, the function has one already\n",
+                            pThis->iInstance, pFun->uPciFun, offCap));
+                    break;
+                }
+                if ((uint32_t)offCap + 12 > 256)
+                    return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                               N_("The MSI-X capability at offset %#x doesn't fit into the PCI config space"), offCap);
+
                 LogRel(("VFIO#%d.%u: Cap[%#x]: MSI-X -> emulate\n", pThis->iInstance, pFun->uPciFun, offCap));
                 rc = pciVfioTrySetupMsix(pThis, pFun, pPciDev, offCap);
                 if (RT_SUCCESS(rc))
@@ -1871,6 +2596,8 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                     fSupported = true;
                     cbCap      = 12;
                 }
+                else if (rc != VERR_NOT_SUPPORTED) /* Not supported means doing without it, anything else is a failure. */
+                    return rc;
                 break;
             }
             case VBOX_PCI_CAP_ID_SATA: LogRel(("VFIO#%d.%u: Cap[%#x]: Serial ATA HBA -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap));        break;
@@ -1879,6 +2606,21 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
                 LogRel(("VFIO#%d.%u: Cap[%#x]: Unknown capability ID %#x encountered -> unsupported\n", pThis->iInstance, pFun->uPciFun, offCap, bCapId));
                 break;
         }
+
+        /*
+         * Whatever the capability is, it has to be inside the config space and must
+         * not touch what a capability seen earlier has claimed.  The latter also
+         * catches a list which loops.
+         */
+        if ((uint32_t)offCap + cbCap > 256)
+            return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The capability at offset %#x with %u bytes doesn't fit into the PCI config space"),
+                                       offCap, cbCap);
+        for (uint32_t off = offCap; off < (uint32_t)offCap + cbCap; off++)
+            if (ASMBitTestAndSet(&bmClaimed[0], (int32_t)off))
+                return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                           N_("The capability at offset %#x overlaps with another one or the capability list loops"),
+                                           offCap);
 
         if (fSupported)
         {
@@ -1892,11 +2634,6 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
         if (!offCapNext)
             break;
 
-        if (   offCapNext < offCap
-            || offCapNext < offCap + cbCap)
-            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
-                                       N_("Next capability pointer points backwards or inside the current capability (next offset %#x )"), offCapNext);
-
         offCap = offCapNext;
     }
 
@@ -1909,27 +2646,39 @@ static int pciVfioCfgSpaceParseCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PP
 
 static int pciVfioCfgSpaceParseExtCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
 {
-    PPDMDEVINS pDevIns = pThis->pDevIns;
     RT_NOREF(pPciDev);
 
     uint16_t offCap = 256;
 
-    /* This ASSUMES that the cpabilities are not going backwards when pointing to the next one. */
+    /*
+     * The capabilities can come in any order.  Keep track of the capability
+     * headers seen so far in order to catch lists which loop.
+     */
+    uint64_t bmVisited[4096 / sizeof(uint32_t) / 64];
+    RT_ZERO(bmVisited);
     for (;;)
     {
+        if (   offCap < 256
+            || offCap > 4096 - sizeof(uint32_t))
+            return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The extended capability pointer %#x is invalid"), offCap);
+        if (ASMBitTestAndSet(&bmVisited[0], (int32_t)(offCap / sizeof(uint32_t))))
+            return pciVfioSetError(pThis, VERR_INVALID_STATE, RT_SRC_POS,
+                                       N_("The extended capability list loops at offset %#x"), offCap);
+
         uint32_t u32CapHdr = 0;
         int rc = pciVfioCfgSpaceReadU32(pFun, offCap, &u32CapHdr);
         if (RT_FAILURE(rc))
-            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+            return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                        N_("Failed to read extended capabilitiy header at offset %#x with %Rrc"), offCap, rc);
 
-        if (!u32CapHdr)
+        if (   !u32CapHdr
+            || u32CapHdr == UINT32_MAX)
             break;
 
         uint16_t const u16CapId   = u32CapHdr & UINT16_C(0xffff);
         uint8_t  const bCapVers   = (u32CapHdr >> 16) & 0xf; RT_NOREF(bCapVers);
-        uint16_t const offCapNext = (u32CapHdr >> 20) & 0xfff;
-        uint16_t       cbCap      = sizeof(uint32_t);
+        uint16_t const offCapNext = (u32CapHdr >> 20) & 0xffc; /* The bottom two bits are reserved. */
         bool fSupported = false;
         switch (u16CapId)
         {
@@ -1974,17 +2723,6 @@ static int pciVfioCfgSpaceParseExtCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun,
 
         if (!offCapNext)
             break;
-
-        /*
-         * Don't allow pointing inside the current capability, pointing backwards is allowed as that was seen on
-         * an Intel ARC Pro B70 GPU and there is nothing in the PCIe specification prohibiting that.
-         */
-        /** @todo Maybe check whether the new capability was visited already to avoid endless loops, which would
-         * indicate a broken device. */
-        if (   offCapNext >= offCap
-            && offCapNext < offCap + cbCap)
-            return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
-                                       N_("Next capability pointer points inside the current capability (next offset %#x, current [%#x:%#x[)"), offCapNext, offCap, cbCap);
 
         offCap = offCapNext;
     }
@@ -2089,8 +2827,18 @@ static int pciVfioCfgSpaceSetup(PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
 }
 
 
+/**
+ * Maps a piece of guest memory for DMA by the device.
+ *
+ * @returns VBox status code.
+ * @param   pThis           The VFIO PCI device instance.
+ * @param   GCPhysStart     The guest physical address of the memory, which is the address the device uses for it.
+ * @param   uPtrMapping     Where the memory is in this process.
+ * @param   cbMapping       Size of the piece.
+ */
 static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtrMapping, size_t cbMapping)
 {
+    int rcLnx;
     if (pThis->fVfioLegacy)
     {
         struct vfio_iommu_type1_dma_map Map;
@@ -2100,12 +2848,7 @@ static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtr
         Map.size       = cbMapping;
         Map.iova       = GCPhysStart;
 
-        int rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_IOMMU_MAP_DMA, &Map);
-        if (rcLnx == -1)
-        {
-            LogRel(("errno=%d\n", errno));
-            return RTErrConvertFromErrno(errno);
-        }
+        rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_IOMMU_MAP_DMA, &Map);
     }
     else
     {
@@ -2118,19 +2861,64 @@ static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtr
         Map.length     = cbMapping;
         Map.iova       = GCPhysStart;
 
-        int rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_IOAS_MAP, &Map);
-        if (rcLnx == -1)
-        {
-            LogRel(("errno=%d\n", errno));
-            return RTErrConvertFromErrno(errno);
-        }
+        rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_IOAS_MAP, &Map);
+    }
+    if (rcLnx == -1)
+    {
+        int const iErrno = errno;
+        LogRel(("VFIO#%d: Mapping %zu bytes of guest memory at %RGp for the device failed with %d\n",
+                pThis->iInstance, cbMapping, GCPhysStart, iErrno));
+        return RTErrConvertFromErrno(iErrno);
     }
 
     return VINF_SUCCESS;
 }
 
 
-static void pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTGCPHYS GCPhysStart, RTGCPHYS cbMap)
+/**
+ * Removes everything which is mapped for DMA by the device.
+ *
+ * @param   pThis           The VFIO PCI device instance.
+ */
+static void pciVfioIommuUnmapAll(PVFIOPCI pThis)
+{
+    int rcLnx;
+    if (pThis->fVfioLegacy)
+    {
+        struct vfio_iommu_type1_dma_unmap Unmap;
+        Unmap.argsz   = sizeof(Unmap);
+        Unmap.flags   = VFIO_DMA_UNMAP_FLAG_ALL;
+        Unmap.iova    = 0;
+        Unmap.size    = 0;
+
+        rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_IOMMU_UNMAP_DMA, &Unmap);
+    }
+    else
+    {
+        struct iommu_ioas_unmap Unmap;
+        Unmap.size    = sizeof(Unmap);
+        Unmap.ioas_id = pThis->IommuFd.idIommuHwpt;
+        Unmap.iova    = 0;
+        Unmap.length  = UINT64_MAX; /* Everything. */
+
+        rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_IOAS_UNMAP, &Unmap);
+    }
+    if (rcLnx == -1)
+        LogRel(("VFIO#%d: Removing the guest memory mappings of the device failed with %d\n", pThis->iInstance, errno));
+    pThis->fGuestRamMapped = false;
+}
+
+
+/**
+ * Maps the guest RAM in a guest physical address range for DMA by the device.
+ *
+ * @returns VBox status code.  A part of the range may be mapped on failure.
+ * @param   pThis           The VFIO PCI device instance.
+ * @param   pDevIns         The device instance.
+ * @param   GCPhysStart     Start of the range.
+ * @param   cbMap           Size of the range.
+ */
+static int pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTGCPHYS GCPhysStart, RTGCPHYS cbMap)
 {
     /** @todo This is a really gross hack because we currently lack
      * a dedicated interface to get knowledge about guest RAM mappings.
@@ -2138,76 +2926,68 @@ static void pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTG
      * Also this will allocate all guest RAM instantly but there is no way
      * around that anyway in order for the IOMMU to work correctly.
      */
+    int       rc          = VINF_SUCCESS;
+    RTGCPHYS  GCPhysRun   = GCPhysStart;
     uintptr_t uPtrMapping = 0;
     size_t    cbMapping   = 0;
-    for (RTGCPHYS GCPhys = GCPhysStart; GCPhys < GCPhysStart + cbMap; GCPhys += _4K)
+    for (RTGCPHYS GCPhys = GCPhysStart; GCPhys < GCPhysStart + cbMap && RT_SUCCESS(rc); GCPhys += GUEST_PAGE_SIZE)
     {
-        void *pv = NULL;
+        void          *pv = NULL;
         PGMPAGEMAPLOCK Lock;
-        int rc = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pv, &Lock);
-        if (RT_SUCCESS(rc))
+        int rc2 = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pv, &Lock);
+        if (RT_SUCCESS(rc2))
         {
-            if (cbMapping)
-            {
-                if (uPtrMapping + cbMapping == (uintptr_t)pv)
-                    cbMapping += _4K;
-                else
-                {
-                    rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-                    if (RT_FAILURE(rc))
-                        LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-
-                    GCPhysStart = GCPhys;
-                    uPtrMapping = (uintptr_t)pv;
-                    cbMapping = _4K;
-                }
-            }
+            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &Lock);
+            if (   cbMapping
+                && uPtrMapping + cbMapping == (uintptr_t)pv)
+                cbMapping += GUEST_PAGE_SIZE;
             else
             {
-                Assert(!uPtrMapping);
-                GCPhysStart = GCPhys;
+                /* The memory continues elsewhere in this process: map what we have and start over. */
+                if (cbMapping)
+                    rc = pciVfioMapRegion(pThis, GCPhysRun, uPtrMapping, cbMapping);
+                GCPhysRun   = GCPhys;
                 uPtrMapping = (uintptr_t)pv;
-                cbMapping = _4K;
+                cbMapping   = GUEST_PAGE_SIZE;
             }
-            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &Lock);
         }
         else if (cbMapping)
         {
-            LogRel(("PDMDevHlpPhysGCPhys2CCPtr(,%RGp) -> %Rrc\n", GCPhys, rc));
-            /* Map what we currently have. */
-            Assert(uPtrMapping);
-            rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-            if (RT_FAILURE(rc))
-                LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-            cbMapping   = 0;
-            uPtrMapping = 0;
-            GCPhysStart = GCPhys;
+            /* Not RAM: map what we have. */
+            rc = pciVfioMapRegion(pThis, GCPhysRun, uPtrMapping, cbMapping);
+            cbMapping = 0;
         }
     }
 
-    if (cbMapping)
-    {
-        /* Map what we currently have. */
-        Assert(uPtrMapping);
-        int rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-        if (RT_FAILURE(rc))
-            LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-        cbMapping   = 0;
-        uPtrMapping = 0;
-    }
+    if (   RT_SUCCESS(rc)
+        && cbMapping)
+        rc = pciVfioMapRegion(pThis, GCPhysRun, uPtrMapping, cbMapping);
+    return rc;
 }
 
 
+/**
+ * Maps all of the guest RAM for DMA by the device.
+ *
+ * Nothing is left mapped if this fails.
+ *
+ * @returns VBox status code.
+ * @param   pThis           The VFIO PCI device instance.
+ * @param   pDevIns         The device instance.
+ */
 static int pciVfioIommuGuestRamMap(PVFIOPCI pThis, PPDMDEVINS pDevIns)
 {
-    if (!pThis->fGuestRamMapped)
-    {
-        pciVfioIommuGuestRamMapRange(pThis, pDevIns,   0 /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeBelow4GB(pDevIns));
-        pciVfioIommuGuestRamMapRange(pThis, pDevIns, _4G /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeAbove4GB(pDevIns));
-        pThis->fGuestRamMapped = true;
-    }
+    if (pThis->fGuestRamMapped)
+        return VINF_SUCCESS;
 
-    return VINF_SUCCESS;
+    int rc = pciVfioIommuGuestRamMapRange(pThis, pDevIns,   0 /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeBelow4GB(pDevIns));
+    if (RT_SUCCESS(rc))
+        rc = pciVfioIommuGuestRamMapRange(pThis, pDevIns, _4G /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeAbove4GB(pDevIns));
+    if (RT_SUCCESS(rc))
+        pThis->fGuestRamMapped = true;
+    else
+        pciVfioIommuUnmapAll(pThis);
+    return rc;
 }
 
 
@@ -2286,6 +3066,17 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     PVFIOPCIFUN pFun = &pThis->aPciFuns[pPciDev->idxSubDev];
 
+    /*
+     * A function which is out of service reads like one which isn't there.  Not
+     * before the guest mappings of its BARs are removed though: the PCI bus gets
+     * what it needs to know for that through here too.
+     */
+    if (pFun->fGoneForGuest)
+    {
+        *pu32Value = cb < sizeof(uint32_t) ? RT_BIT_32(cb * 8) - 1 : UINT32_MAX;
+        return VINF_SUCCESS;
+    }
+
     uint32_t u32 = 0;
     for (uint8_t i = 0; i < cb; i++)
     {
@@ -2302,8 +3093,8 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
             {
                 int rc = pciVfioConfigPassthroughRead(pFun, uAddress + i, 1, &bRead);
                 if (RT_FAILURE(rc))
-                LogRel(("VFIO#%d.%u: Failed to passthrough PCI config read at offset %#x with %Rrc, returning 0\n",
-                        pThis->iInstance, pFun->uPciFun, uAddress + i, rc));
+                    LogRelMax(32, ("VFIO#%d.%u: Failed to passthrough PCI config read at offset %#x with %Rrc, returning 0\n",
+                                   pThis->iInstance, pFun->uPciFun, uAddress + i, rc));
                 break;
             }
             case VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT:
@@ -2332,13 +3123,15 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
                         }
                         break;
                     }
-                    default:
-                        AssertReleaseFailed();
+                    default: /* Nothing else is emulated for reading, reads as zero. */
+                        AssertFailed();
+                        break;
                 }
                 break;
             }
             default:
-                AssertReleaseFailed();
+                AssertFailed();
+                break;
         }
 
         u32 |= (uint32_t)bRead << (i * 8);
@@ -2350,120 +3143,308 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
 
 
 /**
+ * Returns the MSI message control register as the guest sees it.
+ *
+ * @returns The register value, 0 if the function has no MSI capability.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ */
+DECLINLINE(uint16_t) pciVfioGetMsiCtrl(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
+{
+    return pFun->offMsiCtrl ? PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl) : 0;
+}
+
+
+/**
+ * Returns the MSI-X message control register as the guest sees it.
+ *
+ * @returns The register value, 0 if the function has no MSI-X capability.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ */
+DECLINLINE(uint16_t) pciVfioGetMsixCtrl(PCVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
+{
+    return pFun->offMsixCtrl ? PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl) : 0;
+}
+
+
+/**
+ * Finds the emulated config space register a byte belongs to.
+ *
+ * @returns true if the byte belongs to an emulated register, false if not.
+ * @param   pFun        The function.
+ * @param   off         The config space offset of the byte.
+ * @param   poffReg     Where to return the config space offset of the register.
+ * @param   pcbReg      Where to return the size of the register, 2 or 4.
+ */
+static bool pciVfioCfgEmulatedRegLookup(PCVFIOPCIFUN pFun, uint32_t off, uint32_t *poffReg, uint32_t *pcbReg)
+{
+    uint32_t const cbU16 = sizeof(uint16_t);
+    uint32_t const cbU32 = sizeof(uint32_t);
+
+    uint32_t offReg = VBOX_PCI_COMMAND;
+    uint32_t cbReg  = cbU16;
+    if (off - offReg >= cbReg)
+    {
+        offReg = UINT32_MAX;
+        if (pFun->offMsiCtrl)
+        {
+            uint32_t const offCap  = pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL;
+            uint32_t const offData = pciVfioMsiGetDataOff(pFun);
+            if (off - pFun->offMsiCtrl < cbU16)
+            {
+                offReg = pFun->offMsiCtrl;
+                cbReg  = cbU16;
+            }
+            else if (off - (offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO) < cbU32)
+            {
+                offReg = offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO;
+                cbReg  = cbU32;
+            }
+            else if (   pFun->fMsi64Bit
+                     && off - (offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI) < cbU32)
+            {
+                offReg = offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI;
+                cbReg  = cbU32;
+            }
+            else if (off - offData < cbU16)
+            {
+                offReg = offData;
+                cbReg  = cbU16;
+            }
+            else if (   pFun->fMsiMaskable
+                     && off - (offData + 4) < cbU32)
+            {
+                offReg = offData + 4;
+                cbReg  = cbU32;
+            }
+        }
+        if (   offReg == UINT32_MAX
+            && pFun->offMsixCtrl
+            && off - pFun->offMsixCtrl < cbU16)
+        {
+            offReg = pFun->offMsixCtrl;
+            cbReg  = cbU16;
+        }
+        if (offReg == UINT32_MAX)
+            return false;
+    }
+
+    *poffReg = offReg;
+    *pcbReg  = cbReg;
+    return true;
+}
+
+
+/**
+ * Handles the guest writing an emulated config space register.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   offReg      The config space offset of the register as returned by pciVfioCfgEmulatedRegLookup().
+ * @param   uValue      The new value of the whole register; what the guest did not write is the current content.
+ */
+static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t offReg, uint32_t uValue)
+{
+    PPDMDEVINS pDevIns = pThis->pDevIns;
+
+    if (offReg == VBOX_PCI_COMMAND)
+    {
+        /*
+         * The device gets to do DMA only with the guest memory mapped for it, which
+         * is done before the VM starts running, see pciVfioInitComplete().
+         */
+        if (   (uValue & VBOX_PCI_COMMAND_MASTER)
+            && !pThis->fGuestRamMapped)
+        {
+            LogRelMax(8, ("VFIO#%d.%u: Not enabling bus mastering, the guest memory is not mapped for the device\n",
+                          pThis->iInstance, pFun->uPciFun));
+            uValue &= ~(uint32_t)VBOX_PCI_COMMAND_MASTER;
+        }
+
+        /* The INTx disable bit decides whether INTx gets used when neither MSI nor MSI-X is enabled. */
+        pciVfioIrqUpdate(pThis, pFun, (uint16_t)uValue, pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
+
+        /*
+         * The host kernel takes the mappings of the BARs away while the device doesn't
+         * decode its I/O ports or memory.  The guest must not be left with a mapping
+         * which got unusable, so the order matters: the PCI bus removes the guest
+         * mappings of what gets disabled, then the device is written to, and then the
+         * PCI bus does the rest, which includes creating the guest mappings of what
+         * got enabled.
+         */
+        uint16_t const fDecode  = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY;
+        uint16_t const u16Old   = PDMPciDevGetCommand(pPciDev);
+        uint16_t const u16First = (uint16_t)((u16Old & ~fDecode) | (u16Old & uValue & fDecode));
+        VBOXSTRICTRC rcStrict;
+        if (u16First != u16Old)
+        {
+            rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16First);
+            Assert(rcStrict == VINF_SUCCESS);
+        }
+
+        int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, (uint16_t)uValue);
+        if (RT_FAILURE(rc))
+            LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
+
+        rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
+        Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
+    }
+    else if (offReg == pFun->offMsixCtrl)
+    {
+        /* Only the enable and the function mask bit are writable, the rest describes the device. */
+        uint16_t const fMsixCtrlRw = VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK;
+        uint16_t const u16MsixCtrl = (uint16_t)(  (PDMPciDevGetWord(pPciDev, offReg) & ~fMsixCtrlRw)
+                                                | ((uint16_t)uValue & fMsixCtrlRw));
+        pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev), pciVfioGetMsiCtrl(pFun, pPciDev), u16MsixCtrl);
+
+        /* Now write to the device. */
+        int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsixCtrl);
+        if (RT_FAILURE(rc))
+            LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
+        PDMPciDevSetWord(pPciDev, offReg, u16MsixCtrl);
+
+        /* Vectors held back by the function mask can go out now. */
+        for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
+            pciVfioMsixDeliverPending(pDevIns, pFun, pPciDev, i);
+    }
+    else if (offReg == pFun->offMsiCtrl)
+    {
+        /* Only the enable bit and the number of vectors to use are writable, the rest describes the device. */
+        uint16_t const fMsiCtrlRw = VBOX_PCI_MSI_FLAGS_ENABLE | VBOX_PCI_MSI_FLAGS_QSIZE;
+        uint16_t const u16MsiCtrl = (uint16_t)(  (PDMPciDevGetWord(pPciDev, offReg) & ~fMsiCtrlRw)
+                                               | ((uint16_t)uValue & fMsiCtrlRw));
+        pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev), u16MsiCtrl, pciVfioGetMsixCtrl(pFun, pPciDev));
+
+        /* Now write to the device. */
+        int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsiCtrl);
+        if (RT_FAILURE(rc))
+            LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
+        PDMPciDevSetWord(pPciDev, offReg, u16MsiCtrl);
+    }
+    else
+    {
+        uint32_t const offCap  = pFun->offMsiCtrl - VBOX_MSI_CAP_MESSAGE_CONTROL;
+        uint32_t const offData = pciVfioMsiGetDataOff(pFun);
+        if (offReg == offData)
+            PDMPciDevSetWord(pPciDev, offReg, (uint16_t)uValue);
+        else if (offReg == offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_LO)
+            PDMPciDevSetDWord(pPciDev, offReg, uValue & ~UINT32_C(3)); /* The bottom two bits are always zero. */
+        else if (   pFun->fMsi64Bit
+                 && offReg == offCap + VBOX_MSI_CAP_MESSAGE_ADDRESS_HI)
+            PDMPciDevSetDWord(pPciDev, offReg, uValue);
+        else
+        {
+            /* The mask bits: one for each vector of the device.  Vectors which got unmasked are sent what they have pending. */
+            Assert(pFun->fMsiMaskable && offReg == offData + 4);
+            uint32_t const cVectors = pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX];
+            PDMPciDevSetDWord(pPciDev, offReg, uValue & (uint32_t)(RT_BIT_64(cVectors) - 1));
+            for (uint32_t i = 0; i < cVectors; i++)
+                pciVfioMsiDeliverPending(pDevIns, pFun, pPciDev, i);
+        }
+    }
+}
+
+
+/**
  * @callback_method_impl{FNPCICONFIGWRITE}
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigWrite(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
                                                      uint32_t uAddress, unsigned cb, uint32_t u32Value)
 {
-    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
-    PVFIOPCIFUN pFun = &pThis->aPciFuns[pPciDev->idxSubDev];
+    PVFIOPCI    pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PVFIOPCIFUN pFun  = &pThis->aPciFuns[pPciDev->idxSubDev];
+    AssertReturn(cb <= sizeof(u32Value), VINF_SUCCESS);
 
-    /** @todo Only handles accesses with the same intercept config for now. */
-    uint8_t fWr = pciVfioCfgSpaceGetInterceptWr(pFun, uAddress);
-    for (uint8_t i = 1; i < cb; i++)
+    /* Nothing can be written to a function which is out of service. */
+    if (pFun->fGone)
+        return VINF_SUCCESS;
+
+    /*
+     * The bytes of an access can be subject to different handling.  Take the access
+     * apart into runs of bytes which are handled the same way and, in the case of
+     * emulated registers, belong to the same register.
+     */
+    uint32_t offAccess = 0;
+    while (offAccess < cb)
     {
-        uint8_t fWrU8 = pciVfioCfgSpaceGetInterceptWr(pFun, uAddress + i);
-        if (fWr != fWrU8)
+        uint32_t const offCfg = uAddress + offAccess;
+        uint8_t        fWr    = pciVfioCfgSpaceGetInterceptWr(pFun, offCfg);
+        uint32_t       offReg = 0;
+        uint32_t       cbReg  = 0;
+        if (   fWr == VFIO_PCI_CFG_SPACE_ACCESS_EMULATE
+            && !pciVfioCfgEmulatedRegLookup(pFun, offCfg, &offReg, &cbReg))
         {
-            LogRel(("VFIO#%d.%u: Complicated PCI config space write at offset %#x (+ %u) intercept %u vs %u\n",
-                    pThis->iInstance, pFun->uPciFun, uAddress, i, fWr, fWrU8));
-            return VINF_SUCCESS;
+            AssertFailed();
+            fWr = VFIO_PCI_CFG_SPACE_ACCESS_INVALID;
         }
-    }
 
-    int rc = VINF_SUCCESS;
-    switch (fWr)
-    {
-        case VFIO_PCI_CFG_SPACE_ACCESS_INVALID:
+        uint32_t cbRun = 1;
+        while (   offAccess + cbRun < cb
+               && pciVfioCfgSpaceGetInterceptWr(pFun, offCfg + cbRun) == fWr
+               && (   fWr != VFIO_PCI_CFG_SPACE_ACCESS_EMULATE
+                   || offCfg + cbRun < offReg + cbReg))
+            cbRun++;
+        uint32_t const fRunMask = cbRun < sizeof(uint32_t) ? RT_BIT_32(cbRun * 8) - 1 : UINT32_MAX;
+        uint32_t const uRun     = (u32Value >> (offAccess * 8)) & fRunMask;
+
+        switch (fWr)
         {
-            LogRel(("VFIO#%d.%u: Invalid PCI config write at offset %#x, ignoring\n",
-                    pThis->iInstance, pFun->uPciFun, uAddress));
-            break;
-        }
-        case VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH:
-        {
-            rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
-            break;
-        }
-        case VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT:
-            return VINF_PDM_PCI_DO_DEFAULT;
-        case VFIO_PCI_CFG_SPACE_ACCESS_EMULATE:
-        {
-            /* Map all the guest memory into the IOMMU as soon as the BUSMASTER bit is enabled. */
-            if (uAddress == VBOX_PCI_COMMAND)
+            case VFIO_PCI_CFG_SPACE_ACCESS_INVALID:
+                Log(("VFIO#%d.%u: Invalid PCI config write at offset %#x LB %u, ignoring\n",
+                     pThis->iInstance, pFun->uPciFun, offCfg, cbRun));
+                break;
+
+            case VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH:
+            case VFIO_PCI_CFG_SPACE_ACCESS_DO_DEFAULT:
             {
-                if (u32Value & RT_BIT(2))
+                /* Hand it on in naturally aligned pieces of one, two or four bytes. */
+                uint32_t offRun = 0;
+                while (offRun < cbRun)
                 {
-                    rc = pciVfioIommuGuestRamMap(pThis, pDevIns);
-                    if (RT_FAILURE(rc))
-                        LogRel(("VFIO#%d.%u: Failed to map guest RAM into IOMMU for device, expect broken device (%Rrc)\n",
-                                pThis->iInstance, pFun->uPciFun, rc));
+                    uint32_t const offPiece = offCfg + offRun;
+                    uint32_t const cbLeft   = cbRun - offRun;
+                    uint32_t const cbPiece  = (offPiece & 1) || cbLeft == 1       ? 1
+                                            : (offPiece & 2) || cbLeft < 4        ? 2
+                                            :                                       4;
+                    uint32_t const uPiece   = (uRun >> (offRun * 8)) & (cbPiece < sizeof(uint32_t) ? RT_BIT_32(cbPiece * 8) - 1 : UINT32_MAX);
+                    if (fWr == VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH)
+                    {
+                        int rc = pciVfioConfigPassthroughWrite(pFun, offPiece, cbPiece, uPiece);
+                        if (RT_FAILURE(rc))
+                            LogRelMax(32, ("VFIO#%d.%u: Failed to passthrough PCI config write at offset %#x LB %u (%Rrc)\n",
+                                           pThis->iInstance, pFun->uPciFun, offPiece, cbPiece, rc));
+                    }
+                    else
+                    {
+                        VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, offPiece, cbPiece, uPiece);
+                        Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
+                    }
+                    offRun += cbPiece;
                 }
-
-                /* Check whether the INTx config changes and reconfigure the interrupt mode if INTx is supported by the device. */
-                bool const fIntxEnabled = !RT_BOOL(u32Value & RT_BIT(10));
-                if (   (fIntxEnabled != (pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX))
-                    && pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX])
-                {
-                    rc = pciVfioIrqReconfigure(pThis, pFun, VFIO_PCI_INTX_IRQ_INDEX, fIntxEnabled ? 1 : 0);
-                    if (RT_FAILURE(rc))
-                        LogRel(("VFIO#%d.%u: Failed to reconfigure the INTx interrupt config of the device, expect a broken device (%Rrc)\n",
-                                pThis->iInstance, pFun->uPciFun, rc));
-                }
-
-                /* Now write to the device. */
-                rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
-                if (RT_FAILURE(rc))
-                    LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
-                rc = VINF_PDM_PCI_DO_DEFAULT; /* Need to update BAR mappings. */
+                break;
             }
-            else if (   pFun->offMsiCtrl == uAddress
-                     && cb == sizeof(uint16_t))
+
+            case VFIO_PCI_CFG_SPACE_ACCESS_EMULATE:
             {
-                bool const fMsiEnabled = RT_BOOL(u32Value & RT_BIT(0));
-                uint8_t const cVectors = fMsiEnabled ? RT_BIT((u32Value >> 4) & 0x7) : 0;
-                if (fMsiEnabled != (pFun->uIrqModeCur == VFIO_PCI_MSI_IRQ_INDEX))
-                {
-                    rc = pciVfioIrqReconfigure(pThis, pFun, VFIO_PCI_MSI_IRQ_INDEX, cVectors);
-                    if (RT_FAILURE(rc))
-                        LogRel(("VFIO#%d.%u: Failed to reconfigure the MSI interrupt config of the device, expect a broken device (%Rrc)\n",
-                                pThis->iInstance, pFun->uPciFun, rc));
-                }
-
-                /* Now write to the device. */
-                rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
-                if (RT_FAILURE(rc))
-                    LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
-                rc = VINF_PDM_PCI_DO_DEFAULT; /* Need to update our internal MSI state. */
+                /* Merge what is written into the current content of the register. */
+                uint32_t const cShift = (offCfg - offReg) * 8;
+                uint32_t       uReg   = cbReg == sizeof(uint16_t) ? PDMPciDevGetWord(pPciDev, offReg) : PDMPciDevGetDWord(pPciDev, offReg);
+                uReg = (uReg & ~(fRunMask << cShift)) | (uRun << cShift);
+                pciVfioCfgEmulatedRegWrite(pThis, pFun, pPciDev, offReg, uReg);
+                break;
             }
-            else if (   pFun->offMsixCtrl == uAddress
-                     && cb == sizeof(uint16_t))
-            {
-                bool const fMsixEnabled = RT_BOOL(u32Value & RT_BIT(15));
-                if (fMsixEnabled != (pFun->uIrqModeCur == VFIO_PCI_MSIX_IRQ_INDEX))
-                {
-                    rc = pciVfioIrqReconfigure(pThis, pFun, VFIO_PCI_MSIX_IRQ_INDEX, fMsixEnabled ? pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] : 0);
-                    if (RT_FAILURE(rc))
-                        LogRel(("VFIO#%d.%u: Failed to reconfigure the MSI-X interrupt config of the device, expect a broken device (%Rrc)\n",
-                                pThis->iInstance, pFun->uPciFun, rc));
-                }
 
-                /* Now write to the device. */
-                rc = pciVfioConfigPassthroughWrite(pFun, uAddress, cb, u32Value);
-                if (RT_FAILURE(rc))
-                    LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)", pThis->iInstance, pFun->uPciFun, rc));
-                PDMPciDevSetWord(pPciDev, uAddress, (uint16_t)u32Value);
-                rc = VINF_SUCCESS;
-            }
-            else
+            default:
                 AssertFailed();
-            break;
+                break;
         }
-        default:
-            AssertReleaseFailed();
+
+        offAccess += cbRun;
     }
 
-    return rc;
+    return VINF_SUCCESS;
 }
 
 
@@ -2479,8 +3460,11 @@ static DECLCALLBACK(int) pciVfioQuirkIntelBattlemageApply(PVFIOPCI pThis, PVFIOP
 {
     RT_NOREF(pThis, pQuirk);
 
-    for (uint32_t i = 0x50; i < 0x50 + 16; i += 4)
-        pciVfioCfgSpaceSetInterceptRoU32(pFun, i, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
+    /* Only bytes which are not handled otherwise, like being part of a capability. */
+    for (uint32_t off = 0x50; off < 0x50 + 16; off++)
+        if (   pciVfioCfgSpaceGetInterceptRd(pFun, off) == VFIO_PCI_CFG_SPACE_ACCESS_INVALID
+            && pciVfioCfgSpaceGetInterceptWr(pFun, off) == VFIO_PCI_CFG_SPACE_ACCESS_INVALID)
+            pciVfioCfgSpaceSetInterceptRoU8(pFun, off, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
 
     return VINF_SUCCESS;
 }
@@ -2530,6 +3514,40 @@ static int pciVfioQuirkApply(PVFIOPCI pThis, PVFIOPCIFUN pFun)
 }
 
 
+/**
+ * Checks that a string is the address of a PCI function the way the host
+ * kernel writes it: domain:bus:device.function, like 0000:0a:00.1.
+ *
+ * The address becomes a part of sysfs paths and of device names handed to the
+ * kernel, so nothing but this format is let through.
+ *
+ * @returns true if the string is a PCI function address, false if not.
+ * @param   pszAddress  The string to check.
+ */
+static bool pciVfioIsHostAddressValid(const char *pszAddress)
+{
+    static const char s_szFormat[] = "xxxx:xx:xx.f"; /* x: hex digit, f: function number */
+    size_t off = 0;
+    for (; off < sizeof(s_szFormat) - 1; off++)
+    {
+        char const ch = pszAddress[off];
+        if (s_szFormat[off] == 'x')
+        {
+            if (!RT_C_IS_XDIGIT(ch))
+                return false;
+        }
+        else if (s_szFormat[off] == 'f')
+        {
+            if (ch < '0' || ch > '7')
+                return false;
+        }
+        else if (ch != s_szFormat[off])
+            return false;
+    }
+    return pszAddress[off] == '\0';
+}
+
+
 static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHLPR3 pHlp, PCFGMNODE pCfg)
 {
     /* Query configuration, configuration using the IOMMUFD takes precedence over the legacy VFIO group style. */
@@ -2539,7 +3557,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
         return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                    N_("Configuration error: Querying \"IommuPath\" failed"));
 
-    pThis->IommuFd.iFdIommu = open(szPath, O_RDWR);
+    pThis->IommuFd.iFdIommu = open(szPath, O_RDWR | O_CLOEXEC);
     if (pThis->IommuFd.iFdIommu == -1)
     {
         pThis->fVfioLegacy = true;
@@ -2551,7 +3569,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"VfioPath\" failed, no access method configured"));
 
-        pThis->VfioGroup.iFdVfioContainer = open(szPath, O_RDWR);
+        pThis->VfioGroup.iFdVfioContainer = open(szPath, O_RDWR | O_CLOEXEC);
         if (pThis->VfioGroup.iFdVfioContainer == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Opening VFIO container path \"%s\" failed with %d"), szPath, errno);
@@ -2561,13 +3579,13 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Querying VFIO API version failed"));
         if (rcLnx != VFIO_API_VERSION)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Returned VFIO API version %d doesn't match expected version %d\n"),
+            return PDMDevHlpVMSetError(pDevIns, VERR_VERSION_MISMATCH, RT_SRC_POS,
+                                       N_("Returned VFIO API version %d doesn't match expected version %d"),
                                        rcLnx, VFIO_API_VERSION);
 
         rcLnx = ioctl(pThis->VfioGroup.iFdVfioContainer, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU);
-        if (rcLnx == 0)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+        if (rcLnx <= 0)
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("VFIO_TYPE1_IOMMU extension not supported"));
 
         /* Open the group. */
@@ -2585,6 +3603,9 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Configuration error: Querying \"HostAddress\" failed, no access method configured"));
+            if (!pciVfioIsHostAddressValid(szHostAddress))
+                return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                           N_("Configuration error: \"HostAddress\" is not a PCI address of the form 0000:00:00.0"));
 
             char szIommuGroup[8];
             szIommuGroup[0] = '\0';
@@ -2594,14 +3615,20 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Configuration error: Resolving the IOMMU group of the PCI device failed"));
 
+            /* The group is a number, anything else isn't a group this can work with. */
+            for (size_t off = 0; off < cchIommuGroup || off == 0; off++)
+                if (!RT_C_IS_DIGIT(szIommuGroup[off]))
+                    return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                               N_("The IOMMU group of the PCI device is not usable for PCI passthrough"));
+
             rc = RTPathJoin(szPath, sizeof(szPath), "/dev/vfio", szIommuGroup);
-            AssertRC(rc);
+            AssertRCReturn(rc, rc);
         }
         else  if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"VfioGroupPath\" failed"));
 
-        pThis->VfioGroup.iFdVfioGroup = open(szPath, O_RDWR);
+        pThis->VfioGroup.iFdVfioGroup = open(szPath, O_RDWR | O_CLOEXEC);
         if (pThis->VfioGroup.iFdVfioGroup == -1)
             return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                        N_("Opening VFIO group path \"%s\" failed with %d"), szPath, errno);
@@ -2616,7 +3643,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                                        N_("Querying VFIO status failed"));
 
         if (!(GroupStatus.flags & VFIO_GROUP_FLAGS_VIABLE))
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("The VFIO group is not usable for PCI passthrough (all devices in the group bound to VFIO?)"));
 
         rcLnx = ioctl(pThis->VfioGroup.iFdVfioGroup, VFIO_GROUP_SET_CONTAINER, &pThis->VfioGroup.iFdVfioContainer);
@@ -2641,14 +3668,28 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                                        N_("Allocating I/O address space for VFIO device failed with %d"), errno);
 
         pThis->IommuFd.idIommuHwpt = IoasAlloc.out_ioas_id;
+        pThis->fIoasAllocated      = true;
     }
 
     return VINF_SUCCESS;
 }
 
 
-static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPCIFUN pFun, PCPDMDEVHLPR3 pHlp, PCFGMNODE pCfg)
+/**
+ * Opens the device of a function the way it is configured and brings it
+ * together with the I/O address space of the VM.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pCfg        The configuration node of the function.
+ * @param   piFd        Where to return the file descriptor of the device, -1 on failure.
+ */
+static int pciVfioFunOpen(PVFIOPCI pThis, PVFIOPCIFUN pFun, PCFGMNODE pCfg, int *piFd)
 {
+    PCPDMDEVHLPR3 const pHlp = pThis->pDevIns->pHlpR3;
+    *piFd = -1;
+
     bool fHostAddress = false;
     char szPath[RTPATH_MAX];
     int rc = pHlp->pfnCFGMQueryString(pCfg, "VfioPath", &szPath[0], sizeof(szPath));
@@ -2656,89 +3697,581 @@ static int pciVfioFunConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PVFIOPC
     {
         rc = pHlp->pfnCFGMQueryString(pCfg, "HostAddress", &szPath[0], sizeof(szPath));
         if (RT_FAILURE(rc))
-            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                       N_("Configuration error: Querying \"HostAddress\" failed, no access method configured"));
+            return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                   N_("Configuration error: Querying \"HostAddress\" failed, no access method configured"));
+        if (!pciVfioIsHostAddressValid(szPath))
+            return pciVfioSetError(pThis, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                   N_("Configuration error: \"HostAddress\" is not a PCI address of the form 0000:00:00.0"));
         fHostAddress = true;
     }
     else if (RT_FAILURE(rc))
-        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                   N_("Configuration error: Querying \"VfioPath\" failed"));
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                               N_("Configuration error: Querying \"VfioPath\" failed"));
 
+    int iFd;
     if (pThis->fVfioLegacy)
     {
-        pFun->iFdVfio = ioctl(pThis->VfioGroup.iFdVfioGroup, VFIO_GROUP_GET_DEVICE_FD, &szPath[0]);
-        if (pFun->iFdVfio == -1)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Failed to get device for VFIO device \"%s\" -> %d"), szPath, errno);
+        iFd = ioctl(pThis->VfioGroup.iFdVfioGroup, VFIO_GROUP_GET_DEVICE_FD, &szPath[0]);
+        if (iFd == -1)
+            return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                   N_("Failed to get device for VFIO device \"%s\" -> %d"), szPath, errno);
+
+        /* Not for processes started by this one. */
+        int const fFdFlags = fcntl(iFd, F_GETFD);
+        if (   fFdFlags == -1
+            || fcntl(iFd, F_SETFD, fFdFlags | FD_CLOEXEC) == -1)
+        {
+            rc = pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                 N_("Failed to set up the file descriptor of VFIO device \"%s\" -> %d"), szPath, errno);
+            close(iFd);
+            return rc;
+        }
     }
     else
     {
         if (fHostAddress)
         {
-            /* Try determining the VFIO device from sysfs. */
+            /* Determine the VFIO device from sysfs. */
             char szSysfsPath[128];
             rc = RTPathJoin(szSysfsPath, sizeof(szSysfsPath), "/sys/bus/pci/devices", szPath);
-            AssertRC(rc);
+            AssertRCReturn(rc, rc);
             rc = RTPathAppend(szSysfsPath, sizeof(szSysfsPath), "vfio-dev");
-            AssertRC(rc);
+            AssertRCReturn(rc, rc);
 
             RTDIR hDir = NIL_RTDIR;
             rc = RTDirOpen(&hDir, szSysfsPath);
-            if (RT_SUCCESS(rc))
+            if (RT_FAILURE(rc))
+                return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                       N_("Configuration error: The PCI device %s is not bound to a VFIO driver"), szPath);
+            for (;;)
             {
-                for (;;)
-                {
-                    RTDIRENTRY Entry; /* The default name size is more than enough for the format xxxx:xx:xx.x */
-                    rc = RTDirRead(hDir, &Entry, NULL /*pcbDirEntry*/);
-                    if (RT_FAILURE(rc))
-                        break;
-
-                    if (RTDirEntryIsStdDotLink(&Entry))
-                        continue;
-
-                    if (!strncmp(Entry.szName, RT_STR_TUPLE("vfio")))
-                    {
-                        rc = RTPathJoin(szPath, sizeof(szPath), "/dev/vfio/devices", Entry.szName);
-                        AssertRC(rc);
-                        break;
-                    }
-                }
-
-                int rc2 = RTDirClose(hDir);
-                AssertRC(rc2); RT_NOREF(rc2);
-
+                RTDIRENTRY Entry; /* The default name size is more than enough for the format vfioN */
+                rc = RTDirRead(hDir, &Entry, NULL /*pcbDirEntry*/);
                 if (RT_FAILURE(rc))
-                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
-                                               N_("Configuration error: Resolving the VFIO device failed"));
+                    break;
+
+                if (RTDirEntryIsStdDotLink(&Entry))
+                    continue;
+
+                if (!strncmp(Entry.szName, RT_STR_TUPLE("vfio")))
+                {
+                    rc = RTPathJoin(szPath, sizeof(szPath), "/dev/vfio/devices", Entry.szName);
+                    break;
+                }
             }
+
+            int rc2 = RTDirClose(hDir);
+            AssertRC(rc2); RT_NOREF(rc2);
+
+            if (RT_FAILURE(rc))
+                return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                       N_("Configuration error: Resolving the VFIO device failed"));
         }
 
-        pFun->iFdVfio = open(szPath, O_RDWR);
-        if (pFun->iFdVfio == -1)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Opening VFIO device \"%s\" failed with %d"), szPath, errno);
+        iFd = open(szPath, O_RDWR | O_CLOEXEC);
+        if (iFd == -1)
+            return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                   N_("Opening VFIO device \"%s\" failed with %d"), szPath, errno);
 
         /* Bind the IOMMU to the device. */
         struct vfio_device_bind_iommufd VfioBind; RT_ZERO(VfioBind);
         VfioBind.argsz   = sizeof(VfioBind);
         VfioBind.flags   = 0;
         VfioBind.iommufd = pThis->IommuFd.iFdIommu;
-        int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_BIND_IOMMUFD, &VfioBind);
+        int rcLnx = ioctl(iFd, VFIO_DEVICE_BIND_IOMMUFD, &VfioBind);
         if (rcLnx == -1)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Binding IOMMU device to opened VFIO device failed with %d"), errno);
+        {
+            rc = pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                 N_("Binding IOMMU device to opened VFIO device failed with %d"), errno);
+            close(iFd);
+            return rc;
+        }
 
         /* And bind it to the device. */
         struct vfio_device_attach_iommufd_pt VfioAttachIommu;
         VfioAttachIommu.argsz = sizeof(VfioAttachIommu);
         VfioAttachIommu.flags = 0;
         VfioAttachIommu.pt_id = pThis->IommuFd.idIommuHwpt;
-        rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_ATTACH_IOMMUFD_PT, &VfioAttachIommu);
+        rcLnx = ioctl(iFd, VFIO_DEVICE_ATTACH_IOMMUFD_PT, &VfioAttachIommu);
         if (rcLnx == -1)
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                       N_("Attaching IO address space to opened VFIO device failed with %d"), errno);
+        {
+            rc = pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                 N_("Attaching IO address space to opened VFIO device failed with %d"), errno);
+            close(iFd);
+            return rc;
+        }
+        pFun->fIoasAttached = true;
     }
 
+    *piFd = iFd;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Hands back to the host what the memory keeping the place of the device memory
+ * of a function has taken up.
+ *
+ * @param   pFun        The function, out of service.
+ */
+static void pciVfioFunPlaceholdersDrop(PCVFIOPCIFUN pFun)
+{
+    if (pFun->fDevMemLeft)
+        return;
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
+        if (pFun->aBars[iBar].pvMmio)
+            madvise((void *)pFun->aBars[iBar].pvMmio, pFun->aBars[iBar].cbRegion, MADV_DONTNEED);
+}
+
+
+/**
+ * Does on an EMT what is left to do for a function which went out of service:
+ * the guest loses its mappings of the BARs and finds nothing where the function
+ * was from then on.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ * @param   iPciFun     The function.
+ */
+static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciFun)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    AssertReturn(iPciFun < RT_ELEMENTS(pThis->aPciFuns), VERR_INVALID_PARAMETER);
+    PVFIOPCIFUN pFun    = &pThis->aPciFuns[iPciFun];
+    PPDMPCIDEV  pPciDev = pDevIns->apPciDevs[iPciFun];
+
+    /*
+     * One EMT at a time, and not while another one puts a device into the slot or
+     * prepares the slot for saving or loading the state of the VM.
+     */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+
+    /* Nothing to do if a device was put in again before this got its turn. */
+    if (pFun->fGone)
+    {
+        /* The PCI bus removes the mappings when the decoding gets disabled.  The guest doesn't get to enable it again. */
+        uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
+        uint16_t const u16Cmd     = PDMPciDevGetCommand(pPciDev);
+        if (u16Cmd & fCmdActive)
+        {
+            VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16Cmd & ~fCmdActive);
+            Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
+        }
+
+        /* From here on the guest finds nothing where the function was. */
+        ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
+
+        /* Whatever the guest managed to write into the memory which took the place of the BARs is of no use to anybody. */
+        pciVfioFunPlaceholdersDrop(pFun);
+    }
+
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return VINF_SUCCESS;
+}
+
+
+static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun);
+
+
+/**
+ * Takes a function out of service and lets go of the device, because the host
+ * wants it back or because it reported an error it can't recover from.
+ *
+ * This can be called on any thread and in any VM state.  When it returns
+ * nothing of the device is reachable any more: accesses of the guest are
+ * answered like those to a device which isn't there, and the BARs mapped into
+ * the guest are backed by ordinary memory, at the place where the device
+ * memory used to be mapped in this process so everybody referring to it stays
+ * valid.  The file descriptor of the device is replaced by one which refuses
+ * everything, which leaves its number valid for whoever is using it right now.
+ *
+ * A device which is just being put into the hot-plug capable slot gets there
+ * first, and whoever is checking that nothing of a device is left in the VM
+ * gets done with it, see pciVfioSlotIsEmptyForState().
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pszWhy      The reason, for the log.
+ */
+static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszWhy)
+{
+    /* Being out of service and the device being let go of are one thing for whoever
+       holds the critical section of the slot. */
+    int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRC(rcLock);
+    bool const fWasGone = ASMAtomicXchgBool(&pFun->fGone, true);
+    if (!fWasGone)
+    {
+        LogRel(("VFIO#%d.%u: The function is taken out of service: %s\n", pThis->iInstance, pFun->uPciFun, pszWhy));
+        pciVfioFunLetGo(pThis, pFun);
+    }
+    if (RT_SUCCESS(rcLock))
+        RTCritSectLeave(&pThis->CritSectSlot);
+    if (fWasGone)
+        return;
+
+    /* The rest is for an EMT to do. */
+    int rc = PDMDevHlpVMReqCallNoWait(pThis->pDevIns, VMCPUID_ANY, (PFNRT)pciVfioFunGoneOnEmt, 2,
+                                      pThis->pDevIns, (uintptr_t)pFun->uPciFun);
+    if (RT_FAILURE(rc))
+        LogRel(("VFIO#%d.%u: Failed to schedule the removal of the guest mappings (%Rrc)\n",
+                pThis->iInstance, pFun->uPciFun, rc));
+}
+
+
+/**
+ * Lets go of the device of a function: ordinary memory takes the place of the
+ * device memory mapped into this process, and the stand-in takes the place of
+ * the device file.  See pciVfioFunSetGone() for the why and how.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, out of service.
+ */
+static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+{
+    /* The device memory mapped into this process and through that into the guest. */
+    bool fDevMemLeft = false;
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
+    {
+        PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        if (pBar->pvMmio)
+        {
+            void *pv = mmap((void *)pBar->pvMmio, pBar->cbRegion, PROT_READ | PROT_WRITE,
+                            MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /*fd*/, 0 /*offset*/);
+            if (pv == MAP_FAILED)
+            {
+                LogRel(("VFIO#%d.%u: Failed to replace the mapping of BAR%u (%d), the device stays in use by it\n",
+                        pThis->iInstance, pFun->uPciFun, iBar, errno));
+                fDevMemLeft = true;
+            }
+        }
+    }
+    ASMAtomicWriteBool(&pFun->fDevMemLeft, fDevMemLeft);
+
+    /* The device itself.  This also takes it out of the I/O address space and ends its interrupts. */
+    if (dup3(pFun->iFdInert, pFun->iFdVfio, O_CLOEXEC) == -1)
+        LogRel(("VFIO#%d.%u: Failed to let go of the device (%d)\n", pThis->iInstance, pFun->uPciFun, errno));
+    pFun->fIoasAttached = false;
+}
+
+
+/**
+ * Checks whether nothing of the device is in service.
+ *
+ * @returns true if all functions are out of service, false if one is in service at least.
+ * @param   pThis       The VFIO PCI device instance.
+ */
+static bool pciVfioIsOutOfService(PVFIOPCI pThis)
+{
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !pThis->aPciFuns[iPciFun].fGone)
+            return false;
+    return true;
+}
+
+
+/**
+ * Checks whether nothing of the device is left in the VM, which is what saving
+ * the state of the VM and loading one need: the memory which can be mapped into
+ * the guest is read when the state is saved and written to when it is loaded,
+ * and that must not be the memory of a device.
+ *
+ * @returns true if nothing of the device is left, false if something is.
+ * @param   pThis       The VFIO PCI device instance.
+ */
+static bool pciVfioSlotIsEmptyForState(PVFIOPCI pThis)
+{
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && (   !pThis->aPciFuns[iPciFun].fGone
+                || pThis->aPciFuns[iPciFun].fDevMemLeft))
+            return false;
+    return true;
+}
+
+
+/**
+ * Checks whether a function still answers, which it doesn't after it was unplugged.
+ *
+ * @returns true if the function answers, false if not.
+ * @param   pFun        The function.
+ */
+static bool pciVfioFunAnswers(PCVFIOPCIFUN pFun)
+{
+    uint16_t idVendor = UINT16_MAX;
+    int rc = pciVfioCfgSpaceReadU16(pFun, VBOX_PCI_VENDOR_ID, &idVendor);
+    return RT_SUCCESS(rc) && idVendor != UINT16_MAX;
+}
+
+
+/**
+ * Asks the guest to let go of the device in the hot-plug capable slot by pressing
+ * the attention button of the slot, unless that was done a moment ago.
+ *
+ * @param   pThis       The VFIO PCI device instance, in a hot-plug capable slot.
+ */
+static void pciVfioSlotAskGuest(PVFIOPCI pThis)
+{
+    uint64_t const msNow  = RT_MAX(RTTimeMilliTS(), 1);
+    uint64_t const msLast = ASMAtomicReadU64(&pThis->msAttnPressed);
+    if (   (   !msLast
+            || msNow - msLast >= VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS)
+        && ASMAtomicCmpXchgU64(&pThis->msAttnPressed, msNow, msLast))
+        devpciR3HotPlugSlotPressAttentionButton(pThis->pDevInsPort);
+}
+
+
+/**
+ * Takes all functions of the device out of service and the device out of the
+ * hot-plug capable slot it is in, see pciVfioFunSetGone().  The guest is told that
+ * the slot is empty.
+ *
+ * @param   pThis       The VFIO PCI device instance, in a hot-plug capable slot.
+ * @param   pszWhy      The reason, for the log.
+ */
+static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy)
+{
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+            pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy);
+    devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, false /*fPresent*/);
+}
+
+
+/**
+ * The thread watching out for the host wanting a function back or reporting an
+ * error on it.
+ *
+ * This is not a PDM thread as it has to do its job whatever state the VM is in:
+ * the host waits for the device to be let go of.
+ *
+ * @returns VBox status code.
+ * @param   hThreadSelf The thread handle.
+ * @param   pvUser      The VFIO PCI device instance.
+ */
+static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    PVFIOPCI pThis = (PVFIOPCI)pvUser;
+    RT_NOREF(hThreadSelf);
+
+    /* When the time the guest got for letting go of the device is up, 0 if it wasn't asked. */
+    uint64_t msLetGoDeadline = 0;
+
+    while (!ASMAtomicReadBool(&pThis->fWatcherStop))
+    {
+        /* The wakeup eventfd and what there is to watch of the functions which are still in service. */
+        struct pollfd aFds[1 + RT_ELEMENTS(pThis->aPciFuns) * 2];
+        uint8_t       aiPciFuns[RT_ELEMENTS(aFds)];
+        bool          afRequest[RT_ELEMENTS(aFds)];
+        nfds_t        cFds = 0;
+        aFds[cFds].fd      = pThis->iFdWatcherWakeup;
+        aFds[cFds].events  = POLLIN;
+        aFds[cFds].revents = 0;
+        aiPciFuns[cFds]    = 0;
+        afRequest[cFds]    = false;
+        cFds++;
+        for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        {
+            PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+            if (pFun->fGone)
+                continue;
+            if (pFun->iFdEvtReq != -1)
+            {
+                aFds[cFds].fd      = pFun->iFdEvtReq;
+                aFds[cFds].events  = POLLIN;
+                aFds[cFds].revents = 0;
+                aiPciFuns[cFds]    = iPciFun;
+                afRequest[cFds]    = true;
+                cFds++;
+            }
+            if (pFun->iFdEvtErr != -1)
+            {
+                aFds[cFds].fd      = pFun->iFdEvtErr;
+                aFds[cFds].events  = POLLIN;
+                aFds[cFds].revents = 0;
+                aiPciFuns[cFds]    = iPciFun;
+                afRequest[cFds]    = false;
+                cFds++;
+            }
+        }
+
+        /* While the guest is given time, the link to the slot is looked at now and then. */
+        int rcLnx = poll(&aFds[0], cFds, msLetGoDeadline ? 50 : -1 /*timeout*/);
+        if (rcLnx == -1)
+        {
+            if (errno == EINTR)
+                continue;
+            LogRel(("VFIO#%d: Watching for the host wanting the device back failed with %d\n", pThis->iInstance, errno));
+            break;
+        }
+
+        /* Woken up: there is something new to watch or it is time to stop. */
+        if (aFds[0].revents & POLLIN)
+        {
+            uint64_t      u64Ign = 0;
+            ssize_t const cbRead = read(aFds[0].fd, &u64Ign, sizeof(u64Ign));
+            RT_NOREF(cbRead);
+        }
+
+        for (nfds_t i = 1; i < cFds; i++)
+            if (aFds[i].revents & POLLIN)
+            {
+                uint64_t      u64Ign = 0;
+                ssize_t const cbRead = read(aFds[i].fd, &u64Ign, sizeof(u64Ign));
+                RT_NOREF(cbRead);
+                PVFIOPCIFUN const pFun = &pThis->aPciFuns[aiPciFuns[i]];
+                if (!pThis->pDevInsPort)
+                    /* Nobody to ask and nobody to tell. */
+                    pciVfioFunSetGone(pThis, pFun,
+                                      afRequest[i] ? "the host wants the device back" : "the host reported an error of the device");
+                else if (!afRequest[i])
+                    pciVfioSlotEmpty(pThis, "the host reported an error of the device");
+                else if (   !pciVfioFunAnswers(pFun)
+                         || !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort))
+                    /* Unplugged, or nothing the guest would have to let go of. */
+                    pciVfioSlotEmpty(pThis, "the host wants the device back");
+                else
+                {
+                    /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
+                    pciVfioSlotAskGuest(pThis);
+                    if (!msLetGoDeadline)
+                        msLetGoDeadline = RT_MAX(RTTimeMilliTS() + pThis->cMsGuestRelease, 1);
+                }
+            }
+
+        /* The guest has let go of the device when the link to the slot is down. */
+        if (   msLetGoDeadline
+            && (   !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort)
+                || RTTimeMilliTS() >= msLetGoDeadline))
+        {
+            pciVfioSlotEmpty(pThis, "the host wants the device back");
+            msLetGoDeadline = 0;
+        }
+    }
+
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Sets up an eventfd for one of the notifications of the host about a function:
+ * the request to give the device back or an error of the device.
+ *
+ * These are optional, the function is used without if the host doesn't offer one.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   uIrqIndex   VFIO_PCI_REQ_IRQ_INDEX or VFIO_PCI_ERR_IRQ_INDEX.
+ * @param   piFdEvt     The eventfd, -1 if there is none yet.  One which is there is used
+ *                      again, as the watcher thread may be looking at it.  Stays -1 if
+ *                      the host doesn't offer the notification.
+ */
+static int pciVfioNotifierSetup(PVFIOPCI pThis, PCVFIOPCIFUN pFun, uint32_t uIrqIndex, int *piFdEvt)
+{
+    struct vfio_irq_info IrqInfo;
+    RT_ZERO(IrqInfo);
+    IrqInfo.argsz = sizeof(IrqInfo);
+    IrqInfo.index = uIrqIndex;
+    int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_IRQ_INFO, &IrqInfo);
+    if (   rcLnx == -1
+        || IrqInfo.count < 1
+        || !(IrqInfo.flags & VFIO_IRQ_INFO_EVENTFD))
+    {
+        LogRel(("VFIO#%d.%u: The host doesn't offer notification %u for the function\n",
+                pThis->iInstance, pFun->uPciFun, uIrqIndex));
+        return VINF_SUCCESS;
+    }
+
+    int iFdEvt = *piFdEvt;
+    int rc     = VINF_SUCCESS;
+    if (iFdEvt == -1)
+    {
+        rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC | LNX_EFD_NONBLOCK, &iFdEvt);
+        if (RT_FAILURE(rc))
+            return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                   N_("Failed to create the event file descriptor for notification %u"), uIrqIndex);
+    }
+    else
+    {
+        /* Whatever the device which was there before has left in it. */
+        uint64_t      u64Ign = 0;
+        ssize_t const cbRead = read(iFdEvt, &u64Ign, sizeof(u64Ign));
+        RT_NOREF(cbRead);
+    }
+
+    struct
+    {
+        struct vfio_irq_set IrqSet;
+        int32_t             iFdEvt;
+    } Req;
+    AssertCompile(sizeof(Req) == sizeof(struct vfio_irq_set) + sizeof(int32_t));
+    Req.IrqSet.argsz = sizeof(Req);
+    Req.IrqSet.flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+    Req.IrqSet.index = uIrqIndex;
+    Req.IrqSet.start = 0;
+    Req.IrqSet.count = 1;
+    Req.iFdEvt       = iFdEvt;
+    rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &Req);
+    if (rcLnx == -1)
+    {
+        rc = RTErrConvertFromErrno(errno);
+        if (*piFdEvt == -1)
+            close(iFdEvt);
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                   N_("Failed to set up notification %u of the VFIO device (%Rrc)"), uIrqIndex, rc);
+    }
+
+    *piFdEvt = iFdEvt;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Resets all functions of the device by resetting the bus they are on.
+ *
+ * The host kernel only does this if everything affected by it is ours.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ */
+static int pciVfioBusReset(PVFIOPCI pThis)
+{
+    /* Any function will do for asking. */
+    PCVFIOPCIFUN pFun = NULL;
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns) && !pFun; iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !pThis->aPciFuns[iPciFun].fGone)
+            pFun = &pThis->aPciFuns[iPciFun];
+    if (!pFun) /* All of them went out of service meanwhile. */
+        return VERR_INVALID_STATE;
+
+    struct
+    {
+        struct vfio_pci_hot_reset   Hdr;
+        int32_t                     iFdGroup;
+    } Req;
+    AssertCompile(sizeof(Req) == sizeof(struct vfio_pci_hot_reset) + sizeof(int32_t));
+    RT_ZERO(Req);
+    if (pThis->fVfioLegacy)
+    {
+        /* The group is the proof of owning what is affected. */
+        Req.Hdr.argsz = sizeof(Req);
+        Req.Hdr.count = 1;
+        Req.iFdGroup  = pThis->VfioGroup.iFdVfioGroup;
+    }
+    else
+    {
+        /* The kernel goes by the IOMMUFD context the functions are bound to. */
+        Req.Hdr.argsz = sizeof(Req.Hdr);
+        Req.Hdr.count = 0;
+    }
+
+    int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_PCI_HOT_RESET, &Req);
+    if (rcLnx == -1)
+        return RTErrConvertFromErrno(errno);
     return VINF_SUCCESS;
 }
 
@@ -2750,16 +4283,527 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
 {
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
 
+    /*
+     * Make the functions keep quiet first: no bus mastering, no decoding and no
+     * interrupts.  This is what they are left with should the reset not work.
+     */
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+        if (   pFun->iFdVfio == -1
+            || pFun->fGone)
+            continue;
+        PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
 
-        if (pFun->iFdVfio != -1)
+        /*
+         * The device comes out of the reset with MSI and MSI-X disabled and all MSI-X
+         * vectors masked, this is the state the guest gets to see.
+         */
+        if (pFun->offMsixCtrl)
         {
-            int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_RESET, NULL);
-            AssertLogRelMsg(!rcLnx, ("VFIO#%d.%u: Failed to reset device %d\n", pThis->iInstance, pFun->uPciFun, errno));
+            PDMPciDevSetWord(pPciDev, pFun->offMsixCtrl,
+                               PDMPciDevGetWord(pPciDev, pFun->offMsixCtrl)
+                             & ~(VBOX_PCI_MSIX_FLAGS_ENABLE | VBOX_PCI_MSIX_FLAGS_FUNCMASK));
+            for (uint32_t i = 0; i < pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]; i++)
+                pFun->paMsixTbl[i].u32VecCtrl = RT_BIT_32(0);
+            RT_BZERO((void *)pFun->pbmMsixPba, pFun->cbMsixPba);
+        }
+        if (pFun->offMsiCtrl)
+        {
+            PDMPciDevSetWord(pPciDev, pFun->offMsiCtrl,
+                               PDMPciDevGetWord(pPciDev, pFun->offMsiCtrl)
+                             & ~(VBOX_PCI_MSI_FLAGS_ENABLE | VBOX_PCI_MSI_FLAGS_QSIZE));
+            if (pFun->fMsiMaskable)
+            {
+                PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 4, 0); /* Mask */
+                PDMPciDevSetDWord(pPciDev, pciVfioMsiGetDataOff(pFun) + 8, 0); /* Pending */
+            }
+        }
+
+        /* The command register: the guest loses its mappings of the BARs, then the device stops decoding. */
+        pciVfioCfgEmulatedRegWrite(pThis, pFun, pPciDev, VBOX_PCI_COMMAND, 0);
+
+        /* No interrupts while the device is being reset. */
+        pciVfioIrqReconfigure(pThis, pFun, UINT8_MAX /*uVfioIrq*/, 0 /*cVectors*/);
+    }
+
+    /*
+     * Reset the functions.  Where a function can't be reset on its own, which is
+     * common for devices with several functions, the bus they are on gets reset.
+     */
+    bool fBusReset = false;
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+        if (   pFun->iFdVfio != -1
+            && !pFun->fGone
+            && ioctl(pFun->iFdVfio, VFIO_DEVICE_RESET, NULL) == -1)
+        {
+            LogRelMax(16, ("VFIO#%d.%u: The function can't be reset on its own (%d)\n", pThis->iInstance, pFun->uPciFun, errno));
+            fBusReset = true;
         }
     }
+    if (fBusReset)
+    {
+        int rc = pciVfioBusReset(pThis);
+        if (RT_FAILURE(rc))
+            LogRelMax(16, ("VFIO#%d: The device could not be reset (%Rrc).  It keeps its state apart from being disabled "
+                           "until the guest sets it up again\n", pThis->iInstance, rc));
+    }
+
+    /*
+     * Whatever the reset has done to the command register of a function, the guest
+     * sees a cleared one and that is what the device is to have.  Interrupts start
+     * out as INTx.
+     */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+        if (   pFun->iFdVfio == -1
+            || pFun->fGone)
+            continue;
+        PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
+
+        int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, 0);
+        if (RT_FAILURE(rc))
+            LogRelMax(16, ("VFIO#%d.%u: Failed to clear the command register of the device after the reset (%Rrc)\n",
+                           pThis->iInstance, pFun->uPciFun, rc));
+
+        pciVfioIrqUpdate(pThis, pFun, PDMPciDevGetCommand(pPciDev),
+                         pciVfioGetMsiCtrl(pFun, pPciDev), pciVfioGetMsixCtrl(pFun, pPciDev));
+    }
+}
+
+
+/**
+ * @callback_method_impl{FNDEVPCIHPSLOTLINK,
+ *      The link between the root port and the hot-plug capable slot the device is
+ *      in changed its state.}
+ */
+static DECLCALLBACK(void) pciVfioSlotLinkChanged(PPDMDEVINS pDevIns, bool fLinkUp)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+
+    if (!fLinkUp)
+    {
+        /*
+         * The guest switched the slot off or disabled the link, or the device was
+         * taken out of the slot.  The guest doesn't get at the device until the link
+         * is up again, and it expects a device which was reset then.  So what is in
+         * service of the device, which is nothing if it was taken out, is disabled
+         * and reset now.
+         */
+        pciVfioReset(pDevIns);
+        ASMAtomicWriteU64(&pThis->msAttnPressed, 0);
+    }
+    LogRelMax(256, ("VFIO#%d: The link to the device is %s\n", pThis->iInstance, fLinkUp ? "up" : "down"));
+}
+
+
+/**
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnDetach}
+ */
+static DECLCALLBACK(int) pciVfioPortDetach(PPDMIPCIPASSTHROUGHPORT pInterface, RTMSINTERVAL cMsWait, bool fForce)
+{
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
+    if (!pThis->pDevInsPort)
+        return VERR_NOT_SUPPORTED;
+
+    uint64_t const msStart = RTTimeMilliTS();
+    while (   devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort)
+           && !pciVfioIsOutOfService(pThis))
+    {
+        pciVfioSlotAskGuest(pThis);
+        if (RTTimeMilliTS() - msStart >= cMsWait)
+        {
+            if (!fForce)
+                return VERR_TIMEOUT;
+            break;
+        }
+        RTThreadSleep(10);
+    }
+
+    pciVfioSlotEmpty(pThis, "it was detached");
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Checks that the device behind a function is like the one the VM was built
+ * for, and takes note of where its regions are in the device file.
+ *
+ * @returns VBox status code, VERR_MISMATCH if the device is another kind of device.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the device file in place.
+ */
+static int pciVfioFunCheckLayout(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+{
+    struct vfio_device_info DevInfo;
+    RT_ZERO(DevInfo);
+    DevInfo.argsz = sizeof(DevInfo);
+    if (ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_INFO, &DevInfo) == -1)
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                               N_("Getting device information of opened VFIO device failed with %d"), errno);
+    if (!(DevInfo.flags & VFIO_DEVICE_FLAGS_PCI))
+        return pciVfioSetError(pThis, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                               N_("VFIO device is not a PCI/PCI Express device. This configuration is not supported"));
+
+    /* The config space. */
+    const char             *pszWhat = NULL;
+    struct vfio_region_info RegionInfo;
+    int rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_CONFIG_REGION_INDEX, &RegionInfo);
+    if (RT_FAILURE(rc))
+        return rc;
+    if (      (RegionInfo.flags & (VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE))
+           != (VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE)
+        || RegionInfo.size != pFun->Layout.cbPciCfg)
+        pszWhat = "config spaces";
+    pFun->offPciCfg = RegionInfo.offset;
+
+    /* The BARs: kind, size, address space and whether they can be mapped, see pciVfioSetupBar(). */
+    uint8_t iBarMsix = UINT8_MAX;
+    AssertCompile(VFIO_PCI_BAR0_REGION_INDEX == 0 && VFIO_PCI_BAR5_REGION_INDEX == 5);
+    for (uint32_t iBar = 0; iBar <= VFIO_PCI_BAR5_REGION_INDEX && !pszWhat; iBar++)
+    {
+        PVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        rc = pciVfioQueryRegionInfo(pThis, pFun, iBar, &RegionInfo);
+        if (RT_FAILURE(rc))
+            return rc;
+        if (   !RegionInfo.flags
+            || !RegionInfo.size)
+        {
+            if (pBar->bType != 0)
+                pszWhat = "BARs";
+            continue;
+        }
+
+        uint32_t u32PciBar = 0;
+        rc = pciVfioCfgSpaceReadU32(pFun, VBOX_PCI_BASE_ADDRESS_0 + iBar * sizeof(uint32_t), &u32PciBar);
+        if (RT_FAILURE(rc))
+            return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Failed to read BAR%u of the device with %Rrc"), iBar, rc);
+        if (u32PciBar & RT_BIT_32(0))
+        {
+            if (   pBar->bType != 1
+                || pBar->cbRegion != RegionInfo.size)
+                pszWhat = "BARs";
+        }
+        else
+        {
+            uint32_t const fVfioMappable = VFIO_REGION_INFO_FLAG_MMAP | VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
+            bool const     fMappable     =    (RegionInfo.flags & fVfioMappable) == fVfioMappable
+                                           && !(RegionInfo.size & GUEST_PAGE_OFFSET_MASK);
+            uint32_t       enmAddrSpace  = PCI_ADDRESS_SPACE_MEM;
+            if ((u32PciBar & (RT_BIT_32(2) | RT_BIT_32(1))) == PCI_ADDRESS_SPACE_BAR64)
+                enmAddrSpace |= PCI_ADDRESS_SPACE_BAR64;
+            if (u32PciBar & PCI_ADDRESS_SPACE_MEM_PREFETCH)
+                enmAddrSpace |= PCI_ADDRESS_SPACE_MEM_PREFETCH;
+            if (RegionInfo.flags & VFIO_REGION_INFO_FLAG_CAPS)
+            {
+                bool fMsix = false;
+                rc = pciVfioBarContainsMsix(pThis, pFun, iBar, RegionInfo.argsz, &fMsix);
+                if (RT_FAILURE(rc))
+                    return rc;
+                if (fMsix)
+                    iBarMsix = (uint8_t)iBar;
+            }
+            if (   pBar->bType != 2
+                || pBar->cbRegion != RegionInfo.size
+                || (uint32_t)pBar->enmAddrSpace != enmAddrSpace
+                || fMappable != (pBar->pvMmio != NULL))
+                pszWhat = "BARs";
+        }
+        pBar->offVfio = RegionInfo.offset;
+    }
+    if (   !pszWhat
+        && iBarMsix != pFun->Layout.iBarMsix)
+        pszWhat = "MSI-X tables";
+
+    /* The ROM, see pciVfioSetupRom(). */
+    if (!pszWhat)
+    {
+        rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_ROM_REGION_INDEX, &RegionInfo);
+        if (RT_FAILURE(rc))
+            return rc;
+        if ((RegionInfo.flags == 0 && RegionInfo.size == 0 ? 0 : RegionInfo.size) != pFun->Layout.cbRom)
+            pszWhat = "ROMs";
+        pFun->offRom = RegionInfo.offset;
+    }
+
+    /* The legacy VGA ranges if the VM has them for the function, see pciVfioSetupVga(). */
+    if (   !pszWhat
+        && pFun->fVga)
+    {
+        rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_VGA_REGION_INDEX, &RegionInfo);
+        if (RT_FAILURE(rc))
+            return rc;
+        if (   !RegionInfo.flags
+            || !RegionInfo.size)
+            pszWhat = "legacy VGA ranges";
+        pFun->offVga = RegionInfo.offset;
+    }
+
+    /* The interrupts. */
+    AssertCompile(VFIO_PCI_INTX_IRQ_INDEX == 0 && VFIO_PCI_MSIX_IRQ_INDEX == 2);
+    for (uint32_t uIrq = VFIO_PCI_INTX_IRQ_INDEX; uIrq <= VFIO_PCI_MSIX_IRQ_INDEX && !pszWhat; uIrq++)
+    {
+        uint32_t cVectors = 0;
+        rc = pciVfioQueryIrqInfo(pThis, pFun, uIrq, &cVectors);
+        if (RT_FAILURE(rc))
+            return rc;
+        if (cVectors != pFun->Layout.acIrqVectors[uIrq])
+            pszWhat = "interrupts";
+    }
+
+    if (pszWhat)
+        return pciVfioSetError(pThis, VERR_MISMATCH, RT_SRC_POS,
+                               N_("The PCI device is not like the one the VM was started with: the %s differ"), pszWhat);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Puts the device of a function into the place of the stand-in and sets up for
+ * it what the constructor has set up for the device the VM was started with.
+ *
+ * The function stays out of service, so the guest and the threads of the device
+ * don't get in the way.  On failure the caller lets go of the device again, see
+ * pciVfioFunLetGo().
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, out of service.
+ * @param   pPciDev     The PCI device of the function.
+ */
+static int pciVfioFunAttach(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+    PCFGMNODE const  pCfgFun = pDevIns->pHlpR3->pfnCFGMGetChildF(pDevIns->pCfg, "Fun%u", pFun->uPciFun);
+    AssertReturn(pCfgFun, VERR_INTERNAL_ERROR_3);
+
+    /*
+     * The device file takes the place of the stand-in, under the number everybody knows.
+     */
+    int iFdNew = -1;
+    int rc = pciVfioFunOpen(pThis, pFun, pCfgFun, &iFdNew);
+    if (RT_FAILURE(rc))
+        return rc;
+    if (dup3(iFdNew, pFun->iFdVfio, O_CLOEXEC) == -1)
+    {
+        rc = pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                             N_("Failed to put the VFIO device into the place of its stand-in (%d)"), errno);
+        close(iFdNew);
+        pFun->fIoasAttached = false;
+        return rc;
+    }
+    close(iFdNew);
+
+    /*
+     * It has to be like the device the VM was built for.
+     */
+    rc = pciVfioFunCheckLayout(pThis, pFun);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /*
+     * Nothing is left of the interrupt setup of the device which was there before
+     * but what this end thinks of it.
+     */
+    rc = pciVfioIrqPollerSwitchMode(pThis, pFun, UINT8_MAX);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("The interrupt thread of the function didn't react (%Rrc)"), rc);
+    pFun->uIrqMode    = UINT8_MAX;
+    pFun->cIrqVectors = 0;
+
+    /*
+     * What the guest gets to see of the config space is put together anew, the
+     * registers the PCI bus takes care of excepted.
+     */
+    RT_ZERO(pFun->abPciCfgIntercept);
+    pFun->offMsiCtrl   = 0;
+    pFun->fMsi64Bit    = false;
+    pFun->fMsiMaskable = false;
+    pFun->offMsixCtrl  = 0;
+    pFun->offMsixTbl   = 0;
+    pFun->cbMsixTbl    = 0;
+    pFun->offMsixPba   = 0;
+    pFun->cbMsixPba    = 0;
+    RTMemFree(pFun->paMsixTbl);
+    pFun->paMsixTbl = NULL;
+    RTMemFree((void *)pFun->pbmMsixPba);
+    pFun->pbmMsixPba = NULL;
+    memset(&pPciDev->abConfig[0x40], 0, sizeof(pPciDev->abConfig) - 0x40);
+
+    rc = pciVfioCfgSpaceSetup(pFun, pPciDev);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Failed to read the PCI header of the device (%Rrc)"), rc);
+    rc = pciVfioCfgSpaceParseCapabilities(pThis, pFun, pPciDev);
+    if (   RT_SUCCESS(rc)
+        && pFun->cbPciCfg == 4096)
+        rc = pciVfioCfgSpaceParseExtCapabilities(pThis, pFun, pPciDev);
+    if (RT_FAILURE(rc))
+        return rc;
+    if (   (pFun->offMsixCtrl != 0) != pFun->Layout.fMsix
+        || pFun->offMsixTbl != pFun->Layout.offMsixTbl
+        || pFun->cbMsixTbl  != pFun->Layout.cbMsixTbl
+        || pFun->offMsixPba != pFun->Layout.offMsixPba
+        || pFun->cbMsixPba  != pFun->Layout.cbMsixPba)
+        return pciVfioSetError(pThis, VERR_MISMATCH, RT_SRC_POS,
+                               N_("The PCI device is not like the one the VM was started with: the %s differ"), "MSI-X tables");
+    rc = pciVfioQuirkApply(pThis, pFun);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Applying quirk for device failed"));
+
+    /*
+     * The device memory goes where the guest has its mappings, which is where
+     * ordinary memory has kept the place.
+     */
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
+    {
+        PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        if (pBar->pvMmio)
+        {
+            void *pv = mmap((void *)pBar->pvMmio, pBar->cbRegion, PROT_READ | PROT_WRITE, MAP_FIXED | MAP_FILE | MAP_SHARED,
+                            pFun->iFdVfio, pBar->offVfio);
+            if (pv == MAP_FAILED)
+                return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                       N_("Mapping BAR%u at offset %#RX64 with size %RX64 failed with %d"),
+                                       iBar, pBar->offVfio, pBar->cbRegion, errno);
+        }
+    }
+
+    /* The ROM is a copy. */
+    if (pFun->cbRom)
+    {
+        ssize_t const cbRead = pread(pFun->iFdVfio, pFun->pvRom, pFun->cbRom, pFun->offRom);
+        if (cbRead != (ssize_t)pFun->cbRom)
+            return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                   N_("Failed to read %zu bytes of ROM from the device"), pFun->cbRom);
+    }
+
+    /*
+     * The notifications of the host about the device.
+     */
+    rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_REQ_IRQ_INDEX, &pFun->iFdEvtReq);
+    if (RT_SUCCESS(rc))
+        rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_ERR_IRQ_INDEX, &pFun->iFdEvtErr);
+    return rc;
+}
+
+
+/**
+ * Puts a device into the empty hot-plug capable slot.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ *
+ * @thread  EMT, owning the critical section of the slot.
+ */
+static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    Assert(RTCritSectIsOwner(&pThis->CritSectSlot));
+
+    /*
+     * The slot has to be empty, with nothing left to do for the device which was
+     * in it.
+     */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !pThis->aPciFuns[iPciFun].fGone)
+            return VERR_ALREADY_EXISTS;
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !pThis->aPciFuns[iPciFun].fGoneForGuest)
+            pciVfioFunGoneOnEmt(pDevIns, iPciFun);
+
+    /*
+     * All functions or none.
+     */
+    int rc = VINF_SUCCESS;
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns) && RT_SUCCESS(rc); iPciFun++)
+        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+            rc = pciVfioFunAttach(pThis, &pThis->aPciFuns[iPciFun], pDevIns->apPciDevs[iPciFun]);
+    if (RT_FAILURE(rc))
+    {
+        for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+            if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+                pciVfioFunLetGo(pThis, &pThis->aPciFuns[iPciFun]);
+        LogRel(("VFIO#%d: No device was put into the slot (%Rrc)\n", pThis->iInstance, rc));
+        return rc;
+    }
+
+    /*
+     * Back in service.  The device starts out disabled and reset, like it does
+     * after a reset of the VM.  The guest gets at it once it has the link up.
+     */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+        {
+            ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fDevMemLeft, false);
+            ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fGoneForGuest, false);
+            ASMAtomicWriteBool(&pThis->aPciFuns[iPciFun].fGone, false);
+        }
+    pciVfioReset(pDevIns);
+    ASMAtomicWriteU64(&pThis->msAttnPressed, 0);
+
+    /* The watcher thread has functions to watch again. */
+    uint64_t const uOne      = 1;
+    ssize_t const  cbWritten = write(pThis->iFdWatcherWakeup, &uOne, sizeof(uOne));
+    RT_NOREF(cbWritten);
+
+    LogRel(("VFIO#%d: A device was put into the slot\n", pThis->iInstance));
+    devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, true /*fPresent*/);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Puts a device into the empty hot-plug capable slot, on an EMT so nothing of
+ * the VM gets in the way.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ */
+static DECLCALLBACK(int) pciVfioSlotAttachOnEmt(PPDMDEVINS pDevIns)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+
+    /*
+     * The slot has to stay empty while the state of the VM is being saved or
+     * loaded, see pciVfioSavePrep() and pciVfioLoadPrep().  The state of the VM
+     * tells: it is changed before the callbacks of the saved state get called,
+     * and these wait for what is going on here.
+     */
+    VMSTATE const enmVMState = PDMDevHlpVMState(pDevIns);
+    if (   enmVMState == VMSTATE_RUNNING
+        || enmVMState == VMSTATE_SUSPENDED)
+        rc = pciVfioSlotAttachWorker(pDevIns);
+    else
+    {
+        LogRel(("VFIO#%d: No device is put into the slot unless the VM is running or suspended (VM state %d)\n",
+                pThis->iInstance, enmVMState));
+        rc = VERR_VM_INVALID_VM_STATE;
+    }
+
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnAttach}
+ */
+static DECLCALLBACK(int) pciVfioPortAttach(PPDMIPCIPASSTHROUGHPORT pInterface)
+{
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
+    if (!pThis->pDevInsPort)
+        return VERR_NOT_SUPPORTED;
+
+    /* On an EMT, so nothing of the VM gets in the way.  See pciVfioFunCheckLayout() for what the device has to be like. */
+    return PDMDevHlpVMReqPriorityCallWait(pThis->pDevIns, VMCPUID_ANY, (PFNRT)pciVfioSlotAttachOnEmt, 1, pThis->pDevIns);
 }
 
 
@@ -2770,51 +4814,983 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
 {
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
 
+    /* Nobody is to take functions out of service from here on. */
+    if (pThis->hThrdWatcher != NIL_RTTHREAD)
+    {
+        ASMAtomicWriteBool(&pThis->fWatcherStop, true);
+        uint64_t const uOne      = 1;
+        ssize_t const  cbWritten = write(pThis->iFdWatcherWakeup, &uOne, sizeof(uOne));
+        RT_NOREF(cbWritten);
+        int rc = RTThreadWait(pThis->hThrdWatcher, RT_MS_30SEC, NULL);
+        AssertLogRelRC(rc);
+        pThis->hThrdWatcher = NIL_RTTHREAD;
+    }
+    if (pThis->iFdWatcherWakeup != -1)
+        close(pThis->iFdWatcherWakeup);
+    pThis->iFdWatcherWakeup = -1;
+
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
 
-        /* Detach address space. */
         if (pFun->iFdVfio != -1)
         {
-            struct vfio_device_detach_iommufd_pt VfioDetach;
-            VfioDetach.argsz   = sizeof(VfioDetach);
-            VfioDetach.flags   = 0;
-            int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_DETACH_IOMMUFD_PT, &VfioDetach);
-            AssertLogRelMsg(!rcLnx, ("VFIO#%d.%u: Failed to detach IOMMU page table with %d\n", pThis->iInstance, pFun->uPciFun, errno));
+            /* Detach the address space if the function got attached to one. */
+            if (pFun->fIoasAttached)
+            {
+                struct vfio_device_detach_iommufd_pt VfioDetach;
+                VfioDetach.argsz   = sizeof(VfioDetach);
+                VfioDetach.flags   = 0;
+                int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_DETACH_IOMMUFD_PT, &VfioDetach);
+                if (rcLnx == -1)
+                    LogRel(("VFIO#%d.%u: Failed to detach IOMMU page table with %d\n", pThis->iInstance, pFun->uPciFun, errno));
+                pFun->fIoasAttached = false;
+            }
 
             close(pFun->iFdVfio);
+            pFun->iFdVfio = -1;
         }
 
-        for (uint32_t i = 0; i < RT_ELEMENTS(pFun->afdEvts); i++)
-            if (pFun->afdEvts[i] != 0)
-                close(pFun->afdEvts[i]);
+        for (uint32_t i = 0; i < pFun->cFdEvts; i++)
+            if (pFun->paFdEvts[i] != -1)
+                close(pFun->paFdEvts[i]);
+        RTMemFree(pFun->paFdEvts);
+        pFun->paFdEvts = NULL;
+        pFun->cFdEvts  = 0;
+
+        RTMemFree(pFun->paMsixTbl);
+        pFun->paMsixTbl = NULL;
+        RTMemFree((void *)pFun->pbmMsixPba);
+        pFun->pbmMsixPba = NULL;
 
         if (pFun->iFdWakeup != -1)
             close(pFun->iFdWakeup);
+        if (pFun->iFdEvtReq != -1)
+            close(pFun->iFdEvtReq);
+        pFun->iFdEvtReq = -1;
+        if (pFun->iFdEvtErr != -1)
+            close(pFun->iFdEvtErr);
+        pFun->iFdEvtErr = -1;
+        if (pFun->iFdInert != -1)
+            close(pFun->iFdInert);
+        pFun->iFdInert = -1;
     }
+
+    /* No device is left which could use the guest memory. */
+    if (pThis->fGuestRamMapped)
+        pciVfioIommuUnmapAll(pThis);
 
     if (pThis->fVfioLegacy)
     {
         if (pThis->VfioGroup.iFdVfioContainer != -1)
             close(pThis->VfioGroup.iFdVfioContainer);
+        pThis->VfioGroup.iFdVfioContainer = -1;
         if (pThis->VfioGroup.iFdVfioGroup != -1)
             close(pThis->VfioGroup.iFdVfioGroup);
+        pThis->VfioGroup.iFdVfioGroup = -1;
     }
     else
     {
         if (pThis->IommuFd.iFdIommu != -1)
         {
-            struct iommu_destroy HwptDestroy;
-            HwptDestroy.size = sizeof(HwptDestroy);
-            HwptDestroy.id   = pThis->IommuFd.idIommuHwpt;
-            int rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_DESTROY, &HwptDestroy);
-            AssertLogRelMsg(!rcLnx, ("VFIO#%d: Failed to destroy I/O address space with %d\n", pThis->iInstance, errno));
+            if (pThis->fIoasAllocated)
+            {
+                struct iommu_destroy HwptDestroy;
+                HwptDestroy.size = sizeof(HwptDestroy);
+                HwptDestroy.id   = pThis->IommuFd.idIommuHwpt;
+                int rcLnx = ioctl(pThis->IommuFd.iFdIommu, IOMMU_DESTROY, &HwptDestroy);
+                if (rcLnx == -1)
+                    LogRel(("VFIO#%d: Failed to destroy I/O address space with %d\n", pThis->iInstance, errno));
+                pThis->fIoasAllocated = false;
+            }
 
             close(pThis->IommuFd.iFdIommu);
+            pThis->IommuFd.iFdIommu = -1;
         }
     }
 
+    if (RTCritSectIsInitialized(&pThis->CritSectSlot))
+        RTCritSectDelete(&pThis->CritSectSlot);
+
+    return VINF_SUCCESS;
+}
+
+
+static int pciVfioFunQueryLayout(PVFIOPCI pThis, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout);
+
+
+/**
+ * Refuses to have the state of the VM saved or teleported.
+ *
+ * @returns VERR_NOT_SUPPORTED.
+ * @param   pDevIns     The device instance.
+ */
+static int pciVfioRefuseSavingState(PPDMDEVINS pDevIns)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    LogRel(("VFIO#%d: The state of the VM can't be saved with a PCI device of the host passed through to it\n",
+            pThis->iInstance));
+    int rc;
+    if (pThis->pDevInsPort)
+        rc = PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "PciVfioNoSavedState",
+                                        N_("The state of the VM can't be saved or teleported while a PCI device of the "
+                                           "host is passed through to it. Take the device out of the VM first, or "
+                                           "power the VM off instead"));
+    else
+        rc = PDMDevHlpVMSetRuntimeError(pDevIns, 0 /*fFlags*/, "PciVfioNoSavedState",
+                                        N_("The state of the VM can't be saved or teleported while a PCI device of the "
+                                           "host is passed through to it. Power the VM off instead, or remove the device "
+                                           "from the VM first"));
+    AssertRC(rc); RT_NOREF(rc);
+    return VERR_NOT_SUPPORTED;
+}
+
+
+/**
+ * Completes on an EMT what is left to do for the functions after the device was
+ * taken out of the hot-plug capable slot, for saving the state of the VM or
+ * loading one: the guest loses its mappings of the BARs, see
+ * pciVfioFunGoneOnEmt(), and nothing of the device stays behind in the config
+ * space of the functions.  The PCI bus saves the config space and compares what
+ * is there with what it loads.  It has the same to go by this way whether the
+ * VM was started with the device or without, see pciVfioFunConstructEmpty().
+ *
+ * The threads delivering the interrupts of the functions are not running while
+ * a state is saved or loaded, so nobody is looking at the config space.
+ *
+ * @param   pThis       The VFIO PCI device instance, with nothing in the slot.
+ *
+ * @thread  EMT, owning the critical section of the slot.
+ */
+static void pciVfioSlotEmptyComplete(PVFIOPCI pThis)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+    Assert(RTCritSectIsOwner(&pThis->CritSectSlot));
+
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+        if (pFun->iFdVfio == -1)
+            continue;
+        PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
+
+        if (!pFun->fGoneForGuest)
+            pciVfioFunGoneOnEmt(pDevIns, iPciFun);
+
+        /* What pciVfioFunAttach() takes from a device and puts together for it. */
+        for (uint32_t i = 0; i < RT_ELEMENTS(s_aCfgSpaceDesc); i++)
+            if (s_aCfgSpaceDesc[i].fInitFromDev)
+                memset(&pPciDev->abConfig[s_aCfgSpaceDesc[i].offReg], 0, s_aCfgSpaceDesc[i].cbReg);
+        PDMPciDevSetVendorId(pPciDev, UINT16_MAX);
+        PDMPciDevSetDeviceId(pPciDev, UINT16_MAX);
+        PDMPciDevSetCapabilityList(pPciDev, 0);
+        memset(&pPciDev->abConfig[0x40], 0, sizeof(pPciDev->abConfig) - 0x40);
+    }
+}
+
+
+/**
+ * Checks whether the state of the VM can be saved or teleported as far as this
+ * device goes: only with a hot-plug capable slot which is empty.  Without such a
+ * slot the device is part of the VM for good.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns     The device instance.
+ * @param   fFinal      Whether the state gets saved right away, with the VM suspended and
+ *                      this being called on an EMT.
+ */
+static int pciVfioSaveCheck(PPDMDEVINS pDevIns, bool fFinal)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    if (!pThis->pDevInsPort)
+        return pciVfioRefuseSavingState(pDevIns);
+
+    /*
+     * A device which is being put into the slot right now gets there first.  None
+     * is put in from here on until the state is saved, see pciVfioSlotAttachOnEmt().
+     */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    if (!pciVfioSlotIsEmptyForState(pThis))
+        rc = pciVfioRefuseSavingState(pDevIns);
+    else if (fFinal)
+        pciVfioSlotEmptyComplete(pThis);
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLIVEPREP,
+ *      The state of a device of the host can't be moved to another host.  This is
+ *      called before anything of the VM is looked at while it keeps running.}
+ */
+static DECLCALLBACK(int) pciVfioLivePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    RT_NOREF(pSSM);
+    return pciVfioSaveCheck(pDevIns, false /*fFinal*/);
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVSAVEPREP, The state of a device of the host can't be saved.}
+ */
+static DECLCALLBACK(int) pciVfioSavePrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    RT_NOREF(pSSM);
+    return pciVfioSaveCheck(pDevIns, true /*fFinal*/);
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVSAVEEXEC,
+ *      Saves what the VM is built from for each function\, so the state is only
+ *      loaded into a VM which is built the same way.  There is no device in the
+ *      slot\, see pciVfioSavePrep().}
+ */
+static DECLCALLBACK(int) pciVfioSaveExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    for (uint32_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PCIVFIOFUNLAYOUT Layout;
+        if (RT_FAILURE(pciVfioFunQueryLayout(pThis, iPciFun, &Layout)))
+            continue;
+
+        pHlp->pfnSSMPutU32(pSSM, iPciFun);
+        pHlp->pfnSSMPutU32(pSSM, Layout.cbPciCfg);
+        for (uint32_t iBar = 0; iBar < RT_ELEMENTS(Layout.aBars); iBar++)
+        {
+            pHlp->pfnSSMPutU64(pSSM, Layout.aBars[iBar].cb);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].fIoPorts);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].f64Bit);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].fPrefetchable);
+            pHlp->pfnSSMPutBool(pSSM, Layout.aBars[iBar].fMappable);
+        }
+        pHlp->pfnSSMPutU64(pSSM, Layout.cbRom);
+        pHlp->pfnSSMPutBool(pSSM, Layout.fVga);
+        pHlp->pfnSSMPutBool(pSSM, Layout.fMsix);
+        pHlp->pfnSSMPutU8(pSSM, Layout.iBarMsix);
+        for (uint32_t i = 0; i < RT_ELEMENTS(Layout.acIrqVectors); i++)
+            pHlp->pfnSSMPutU32(pSSM, Layout.acIrqVectors[i]);
+        pHlp->pfnSSMPutU32(pSSM, Layout.offMsixTbl);
+        pHlp->pfnSSMPutU32(pSSM, Layout.offMsixPba);
+    }
+    return pHlp->pfnSSMPutU32(pSSM, UINT32_MAX); /* terminator */
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVSAVEDONE,
+ *      Saving the state has read through the memory keeping the place of the
+ *      device memory\, which makes the host keep track of it.}
+ */
+static DECLCALLBACK(int) pciVfioSaveDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    RT_NOREF(pSSM);
+
+    /* This is called for a state which was not saved too. */
+    if (pThis->pDevInsPort)
+    {
+        int rc = RTCritSectEnter(&pThis->CritSectSlot);
+        AssertRCReturn(rc, rc);
+        if (pciVfioSlotIsEmptyForState(pThis))
+            for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+                if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+                    pciVfioFunPlaceholdersDrop(&pThis->aPciFuns[iPciFun]);
+        RTCritSectLeave(&pThis->CritSectSlot);
+    }
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Compares what two VMs are built from for a function.
+ *
+ * @returns What differs, NULL if nothing does.
+ * @param   pLayout1    The one layout.
+ * @param   pLayout2    The other layout.
+ */
+static const char *pciVfioLayoutDiff(PCPCIVFIOFUNLAYOUT pLayout1, PCPCIVFIOFUNLAYOUT pLayout2)
+{
+    if (pLayout1->cbPciCfg != pLayout2->cbPciCfg)
+        return "config spaces";
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout1->aBars); iBar++)
+        if (   pLayout1->aBars[iBar].cb            != pLayout2->aBars[iBar].cb
+            || pLayout1->aBars[iBar].fIoPorts      != pLayout2->aBars[iBar].fIoPorts
+            || pLayout1->aBars[iBar].f64Bit        != pLayout2->aBars[iBar].f64Bit
+            || pLayout1->aBars[iBar].fPrefetchable != pLayout2->aBars[iBar].fPrefetchable
+            || pLayout1->aBars[iBar].fMappable     != pLayout2->aBars[iBar].fMappable)
+            return "BARs";
+    if (   pLayout1->fMsix      != pLayout2->fMsix
+        || pLayout1->iBarMsix   != pLayout2->iBarMsix
+        || pLayout1->offMsixTbl != pLayout2->offMsixTbl
+        || pLayout1->offMsixPba != pLayout2->offMsixPba)
+        return "MSI-X tables";
+    if (pLayout1->cbRom != pLayout2->cbRom)
+        return "ROMs";
+    if (pLayout1->fVga != pLayout2->fVga)
+        return "legacy VGA ranges";
+    for (uint32_t i = 0; i < RT_ELEMENTS(pLayout1->acIrqVectors); i++)
+        if (pLayout1->acIrqVectors[i] != pLayout2->acIrqVectors[i])
+            return "interrupts";
+    return NULL;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADPREP,
+ *      A state is loaded into a VM with nothing in the hot-plug capable slot\, as
+ *      that is what it was saved with.}
+ */
+static DECLCALLBACK(int) pciVfioLoadPrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    /* Without such a slot the device is part of the VM for good, and no state gets saved with that. */
+    if (!pThis->pDevInsPort)
+        return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                        N_("The saved state was made without the PCI device of the host which is "
+                                           "passed through to the VM now. Remove the device from the VM or discard "
+                                           "the saved state"));
+
+    /*
+     * Loading writes to all the memory the guest can have mapped, and this must not
+     * be the memory of a device.  The guest which is loaded doesn't know of a device
+     * in the slot either.  So a device goes out of the slot here, like one the host
+     * takes back, and is put in again when loading is done, see pciVfioLoadDone().
+     */
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    pThis->fLoadUnitSeen = false;
+    pThis->fLoadReattach = false;
+    if (!pciVfioIsOutOfService(pThis))
+    {
+        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded");
+        pThis->fLoadReattach = true;
+    }
+    if (pciVfioSlotIsEmptyForState(pThis))
+        pciVfioSlotEmptyComplete(pThis);
+    else
+        rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                      N_("The saved state can't be loaded as the PCI device of the host which is "
+                                         "passed through to the VM could not be taken out of it"));
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADEXEC,
+ *      Checks that the state was saved by a VM which is built from the same
+ *      layout as this one.}
+ */
+static DECLCALLBACK(int) pciVfioLoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t uPass)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    Assert(uPass == SSM_PASS_FINAL); RT_NOREF(uPass);
+    if (uVersion != VFIO_PCI_SAVED_STATE_VERSION)
+        return VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION;
+
+    uint32_t fFunsSaved = 0;
+    for (;;)
+    {
+        uint32_t iPciFun = 0;
+        int rc = pHlp->pfnSSMGetU32(pSSM, &iPciFun);
+        AssertRCReturn(rc, rc);
+        if (iPciFun == UINT32_MAX)
+            break;
+        if (   iPciFun >= RT_ELEMENTS(pThis->aPciFuns)
+            || (fFunsSaved & RT_BIT_32(iPciFun)))
+            return pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_DATA_UNIT_FORMAT_CHANGED, RT_SRC_POS,
+                                            "iPciFun=%#RX32 fFunsSaved=%#RX32", iPciFun, fFunsSaved);
+        fFunsSaved |= RT_BIT_32(iPciFun);
+
+        PCIVFIOFUNLAYOUT Saved;
+        RT_ZERO(Saved);
+        pHlp->pfnSSMGetU32(pSSM, &Saved.cbPciCfg);
+        for (uint32_t iBar = 0; iBar < RT_ELEMENTS(Saved.aBars); iBar++)
+        {
+            pHlp->pfnSSMGetU64(pSSM, &Saved.aBars[iBar].cb);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].fIoPorts);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].f64Bit);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].fPrefetchable);
+            pHlp->pfnSSMGetBool(pSSM, &Saved.aBars[iBar].fMappable);
+        }
+        pHlp->pfnSSMGetU64(pSSM, &Saved.cbRom);
+        pHlp->pfnSSMGetBool(pSSM, &Saved.fVga);
+        pHlp->pfnSSMGetBool(pSSM, &Saved.fMsix);
+        pHlp->pfnSSMGetU8(pSSM, &Saved.iBarMsix);
+        for (uint32_t i = 0; i < RT_ELEMENTS(Saved.acIrqVectors); i++)
+            pHlp->pfnSSMGetU32(pSSM, &Saved.acIrqVectors[i]);
+        pHlp->pfnSSMGetU32(pSSM, &Saved.offMsixTbl);
+        rc = pHlp->pfnSSMGetU32(pSSM, &Saved.offMsixPba);
+        AssertRCReturn(rc, rc);
+
+        PCIVFIOFUNLAYOUT Layout;
+        rc = pciVfioFunQueryLayout(pThis, iPciFun, &Layout);
+        if (RT_FAILURE(rc))
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
+                                           N_("The state was saved with function %u of a passed through PCI device, "
+                                              "which the VM doesn't have"), iPciFun);
+        const char * const pszWhat = pciVfioLayoutDiff(&Saved, &Layout);
+        if (pszWhat)
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
+                                           N_("The state was saved with another kind of PCI device passed through as "
+                                              "function %u: the %s differ"), iPciFun, pszWhat);
+    }
+
+    for (uint32_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && !(fFunsSaved & RT_BIT_32(iPciFun)))
+            return pHlp->pfnSSMSetCfgError(pSSM, RT_SRC_POS,
+                                           N_("The state was saved without function %u of the passed through PCI device"),
+                                           iPciFun);
+
+    pThis->fLoadUnitSeen = true;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNSSMDEVLOADDONE,
+ *      Puts the device back into the slot if it was taken out for loading the
+ *      state.  The guest is told that a device was plugged in.}
+ */
+static DECLCALLBACK(int) pciVfioLoadDone(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
+{
+    PVFIOPCI      pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PCPDMDEVHLPR3 pHlp  = pDevIns->pHlpR3;
+
+    /* Nothing to do here if loading was refused or failed, this gets called nevertheless. */
+    if (   !pThis->pDevInsPort
+        || RT_FAILURE(pHlp->pfnSSMHandleGetStatus(pSSM)))
+        return VINF_SUCCESS;
+
+    int rc = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRCReturn(rc, rc);
+    bool const fReattach = pThis->fLoadReattach;
+    pThis->fLoadReattach = false;
+
+    /* A state without the unit of this device was saved by a VM which didn't have the device at all. */
+    if (!pThis->fLoadUnitSeen)
+        rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                      N_("The saved state was made without the PCI device of the host which is "
+                                         "configured for the VM now. Remove the device from the VM or discard "
+                                         "the saved state"));
+
+    /* The PCI bus takes what it knows about the interrupt capabilities of a function from the
+       state.  It knows nothing about those of our functions, they are dealt with here. */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns) && RT_SUCCESS(rc); iPciFun++)
+        if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
+            && (   pDevIns->apPciDevs[iPciFun]->Int.s.u8MsiCapOffset
+                || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsiCapSize
+                || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsixCapOffset
+                || pDevIns->apPciDevs[iPciFun]->Int.s.u8MsixCapSize))
+            rc = pHlp->pfnSSMSetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                          N_("The saved state has interrupt capabilities for function %u of the passed "
+                                             "through PCI device which belong to another kind of device"), iPciFun);
+
+    if (RT_SUCCESS(rc))
+    {
+        /* The slot is as empty as before for the guest, whatever was loaded for the functions,
+           and what loading has written to the memory keeping the place of the device memory
+           is of no use to anybody. */
+        pciVfioSlotEmptyComplete(pThis);
+        for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+            if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+                pciVfioFunPlaceholdersDrop(&pThis->aPciFuns[iPciFun]);
+
+        if (fReattach)
+        {
+            int rc2 = pciVfioSlotAttachWorker(pDevIns);
+            if (RT_FAILURE(rc2))
+                LogRel(("VFIO#%d: The device was not put back into the slot after the saved state was loaded (%Rrc)\n",
+                        pThis->iInstance, rc2));
+        }
+    }
+
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
+}
+
+
+/**
+ * @interface_method_impl{PDMDEVREG,pfnInitComplete}
+ */
+static DECLCALLBACK(int) pciVfioInitComplete(PPDMDEVINS pDevIns)
+{
+    PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+
+    /*
+     * Make the guest memory available to the device.  This is done once and before
+     * the guest runs: all of it or the VM doesn't start.  The guest can't enable
+     * bus mastering without it, see pciVfioCfgEmulatedRegWrite().
+     */
+    int rc = pciVfioIommuGuestRamMap(pThis, pDevIns);
+    if (RT_FAILURE(rc))
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                   N_("Failed to make the guest memory available to the passed through PCI device. "
+                                      "The amount of memory the user running the VM may lock might be too low"));
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Returns what the VM is built from for a function, in the form in which it
+ * can be configured for starting the VM without the device, see
+ * pciVfioFunLayoutFromCfg().
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if the function is not configured.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   iPciFun     The function.
+ * @param   pLayout     Where to return the layout.
+ *
+ * @thread  Any.
+ */
+static int pciVfioFunQueryLayout(PVFIOPCI pThis, uint32_t iPciFun, PPCIVFIOFUNLAYOUT pLayout)
+{
+    if (iPciFun >= RT_ELEMENTS(pThis->aPciFuns))
+        return VERR_NOT_FOUND;
+    PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+    if (pFun->iFdVfio == -1)
+        return VERR_NOT_FOUND;
+
+    RT_ZERO(*pLayout);
+    pLayout->cbPciCfg = (uint32_t)pFun->Layout.cbPciCfg;
+    AssertCompile(RT_ELEMENTS(pLayout->aBars) <= RT_ELEMENTS(pFun->aBars));
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars); iBar++)
+    {
+        PCVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        if (pBar->bType == 0)
+            continue;
+        pLayout->aBars[iBar].cb       = pBar->cbRegion;
+        pLayout->aBars[iBar].fIoPorts = pBar->bType == 1;
+        if (pBar->bType == 2)
+        {
+            pLayout->aBars[iBar].f64Bit        = RT_BOOL((uint32_t)pBar->enmAddrSpace & PCI_ADDRESS_SPACE_BAR64);
+            pLayout->aBars[iBar].fPrefetchable = RT_BOOL((uint32_t)pBar->enmAddrSpace & PCI_ADDRESS_SPACE_MEM_PREFETCH);
+            pLayout->aBars[iBar].fMappable     = pBar->pvMmio != NULL;
+        }
+    }
+    pLayout->cbRom    = pFun->Layout.cbRom;
+    pLayout->fVga     = pFun->fVga;
+    pLayout->fMsix    = pFun->Layout.fMsix;
+    pLayout->iBarMsix = pFun->Layout.iBarMsix;
+    AssertCompile(sizeof(pLayout->acIrqVectors) == sizeof(pFun->Layout.acIrqVectors));
+    memcpy(pLayout->acIrqVectors, pFun->Layout.acIrqVectors, sizeof(pLayout->acIrqVectors));
+    pLayout->offMsixTbl = pFun->Layout.offMsixTbl;
+    pLayout->offMsixPba = pFun->Layout.offMsixPba;
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnQueryLayout}
+ */
+static DECLCALLBACK(int) pciVfioPortQueryLayout(PPDMIPCIPASSTHROUGHPORT pInterface, uint32_t iFunction,
+                                                PFNPDMPCIPASSTHROUGHLAYOUTVALUE pfnValue, void *pvUser)
+{
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
+    AssertPtrReturn(pfnValue, VERR_INVALID_POINTER);
+
+    PCIVFIOFUNLAYOUT Layout;
+    int rc = pciVfioFunQueryLayout(pThis, iFunction, &Layout);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /*
+     * The values under the names pciVfioFunLayoutFromCfg() reads them by.  A BAR
+     * which isn't there has no values.
+     */
+    rc = pfnValue(pvUser, "ConfigSpaceSize", Layout.cbPciCfg);
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(Layout.aBars) && RT_SUCCESS(rc); iBar++)
+        if (Layout.aBars[iBar].cb)
+        {
+            static const char * const s_apszBarValues[] = { "Size", "IoPorts", "64Bit", "Prefetchable", "Mappable" };
+            uint64_t const            auBarValues[]     =
+            {
+                Layout.aBars[iBar].cb,
+                Layout.aBars[iBar].fIoPorts,
+                Layout.aBars[iBar].f64Bit,
+                Layout.aBars[iBar].fPrefetchable,
+                Layout.aBars[iBar].fMappable
+            };
+            AssertCompile(RT_ELEMENTS(s_apszBarValues) == RT_ELEMENTS(auBarValues));
+            for (uint32_t i = 0; i < RT_ELEMENTS(s_apszBarValues) && RT_SUCCESS(rc); i++)
+            {
+                char szName[32];
+                RTStrPrintf(szName, sizeof(szName), "Bar%u%s", iBar, s_apszBarValues[i]);
+                rc = pfnValue(pvUser, szName, auBarValues[i]);
+            }
+        }
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "RomSize", Layout.cbRom);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "Vga", Layout.fVga);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "Msix", Layout.fMsix);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixBar", Layout.iBarMsix);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "IntxVectors", Layout.acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsiVectors", Layout.acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixVectors", Layout.acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixTableOffset", Layout.offMsixTbl);
+    if (RT_SUCCESS(rc))
+        rc = pfnValue(pvUser, "MsixPbaOffset", Layout.offMsixPba);
+    return rc;
+}
+
+
+/**
+ * @interface_method_impl{PDMIPCIPASSTHROUGHPORT,pfnQueryState}
+ */
+static DECLCALLBACK(int) pciVfioPortQueryState(PPDMIPCIPASSTHROUGHPORT pInterface, bool *pfHotPlug, bool *pfPresent, bool *pfInUse)
+{
+    PVFIOPCI pThis = RT_FROM_MEMBER(pInterface, VFIOPCI, IPassthroughPort);
+
+    /* A device which is being put into the slot or taken out of it shows as not being there. */
+    bool const fPresent = !pciVfioIsOutOfService(pThis);
+    *pfHotPlug = pThis->pDevInsPort != NULL;
+    *pfPresent = fPresent;
+    *pfInUse   =    fPresent
+                 && (   !pThis->pDevInsPort
+                     || devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort));
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @interface_method_impl{PDMIBASE,pfnQueryInterface}
+ */
+static DECLCALLBACK(void *) pciVfioQueryInterface(PPDMIBASE pInterface, const char *pszIID)
+{
+    PPDMDEVINS pDevIns = RT_FROM_MEMBER(pInterface, PDMDEVINS, IBase);
+    PVFIOPCI   pThis   = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
+    PDMIBASE_RETURN_INTERFACE(pszIID, PDMIBASE, &pDevIns->IBase);
+    PDMIBASE_RETURN_INTERFACE(pszIID, PDMIPCIPASSTHROUGHPORT, &pThis->IPassthroughPort);
+    return NULL;
+}
+
+
+/**
+ * Reads what the VM is to be built from for a function from the configuration,
+ * for a device which isn't there when the VM starts, and checks that it makes
+ * sense.  This is what pciVfioPortQueryLayout() tells for a VM which was
+ * started with the device.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pCfgLayout  The "Layout" node of the configuration of the function.
+ * @param   pLayout     Where to return the layout.
+ */
+static int pciVfioFunLayoutFromCfg(PVFIOPCI pThis, PCVFIOPCIFUN pFun, PCFGMNODE pCfgLayout, PPCIVFIOFUNLAYOUT pLayout)
+{
+    PCPDMDEVHLPR3 const pHlp = pThis->pDevIns->pHlpR3;
+    RT_ZERO(*pLayout);
+
+    uint64_t u64 = 0;
+    bool     f   = false;
+    int rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "ConfigSpaceSize", &u64, 256);
+    pLayout->cbPciCfg = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars) && RT_SUCCESS(rc); iBar++)
+    {
+        char szName[32];
+        RTStrPrintf(szName, sizeof(szName), "Bar%uSize", iBar);
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, szName, &pLayout->aBars[iBar].cb, 0);
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%uIoPorts", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].fIoPorts, false);
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%u64Bit", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].f64Bit, false);
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%uPrefetchable", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].fPrefetchable, false);
+        }
+        if (RT_SUCCESS(rc))
+        {
+            RTStrPrintf(szName, sizeof(szName), "Bar%uMappable", iBar);
+            rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, szName, &pLayout->aBars[iBar].fMappable, false);
+        }
+    }
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "RomSize", &pLayout->cbRom, 0);
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, "Vga", &pLayout->fVga, false);
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgLayout, "Msix", &f, false);
+    pLayout->fMsix = f;
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "MsixBar", &u64, UINT8_MAX);
+    pLayout->iBarMsix = (uint8_t)RT_MIN(u64, UINT8_MAX);
+    static const char * const s_apszIrqs[] = { "IntxVectors", "MsiVectors", "MsixVectors" };
+    AssertCompile(RT_ELEMENTS(s_apszIrqs) == RT_ELEMENTS(pLayout->acIrqVectors));
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_apszIrqs) && RT_SUCCESS(rc); i++)
+    {
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, s_apszIrqs[i], &u64, 0);
+        pLayout->acIrqVectors[i] = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    }
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "MsixTableOffset", &u64, 0);
+    pLayout->offMsixTbl = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    if (RT_SUCCESS(rc))
+        rc = pHlp->pfnCFGMQueryU64Def(pCfgLayout, "MsixPbaOffset", &u64, 0);
+    pLayout->offMsixPba = (uint32_t)RT_MIN(u64, UINT32_MAX);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                               N_("Configuration error: Failed to read the layout of function %u (%Rrc)"), pFun->uPciFun, rc);
+
+    /*
+     * The same rules the constructor has for a device which is there, and what
+     * the VMM requires of the ranges.
+     */
+    const char *pszWhat = NULL;
+    if (   pLayout->cbPciCfg != 256
+        && pLayout->cbPciCfg != 4096)
+        pszWhat = "ConfigSpaceSize";
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars) && !pszWhat; iBar++)
+    {
+        uint64_t const cb = pLayout->aBars[iBar].cb;
+        if (!cb)
+            continue;
+        if (   !RT_IS_POWER_OF_TWO(cb)
+            || (pLayout->aBars[iBar].fIoPorts
+                ? cb < 4 || cb > _32K
+                :    cb < 16
+                  || cb > (pLayout->aBars[iBar].f64Bit ? UINT64_C(0x1000000000) : _2G)
+                  || (pLayout->aBars[iBar].fMappable && (cb & GUEST_PAGE_OFFSET_MASK)))
+            || (   !pLayout->aBars[iBar].fIoPorts
+                && pLayout->aBars[iBar].f64Bit
+                && (   iBar + 1 >= RT_ELEMENTS(pLayout->aBars)
+                    || pLayout->aBars[iBar + 1].cb != 0)))
+            pszWhat = "BARs";
+    }
+    if (   !pszWhat
+        && pLayout->cbRom
+        && (   !RT_IS_POWER_OF_TWO(pLayout->cbRom)
+            || (pLayout->cbRom & GUEST_PAGE_OFFSET_MASK)
+            || pLayout->cbRom > _256M))
+        pszWhat = "RomSize";
+    if (   !pszWhat
+        && (   pLayout->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX] > 1
+            || pLayout->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]  > VBOX_MSI_MAX_ENTRIES
+            || pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] > VBOX_MSIX_MAX_ENTRIES))
+        pszWhat = "interrupt vectors";
+    if (   !pszWhat
+        && pLayout->fMsix)
+    {
+        /* See pciVfioTrySetupMsix(). */
+        uint32_t const cVectors = pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX];
+        uint32_t const cbTbl    = cVectors * sizeof(MSIXTBLENTRY);
+        uint32_t const cbPba    = RT_ALIGN_32(cVectors, 64) / 8;
+        uint8_t const  iBar     = pLayout->iBarMsix;
+        if (   iBar >= RT_ELEMENTS(pLayout->aBars)
+            || !pLayout->aBars[iBar].cb
+            || pLayout->aBars[iBar].fIoPorts
+            || !cVectors
+            || (pLayout->offMsixTbl & 7)
+            || (pLayout->offMsixPba & 7)
+            || (uint64_t)pLayout->offMsixTbl + cbTbl > pLayout->aBars[iBar].cb
+            || (uint64_t)pLayout->offMsixPba + cbPba > pLayout->aBars[iBar].cb
+            || (   pLayout->offMsixTbl < (uint64_t)pLayout->offMsixPba + cbPba
+                && pLayout->offMsixPba < (uint64_t)pLayout->offMsixTbl + cbTbl))
+            pszWhat = "MSI-X";
+    }
+    if (pszWhat)
+        return pciVfioSetError(pThis, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                               N_("Configuration error: The layout of function %u is not a possible one (%s)"),
+                               pFun->uPciFun, pszWhat);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * Builds the VM for a function whose device isn't there, from the layout the
+ * configuration has for it.  The function starts out of service, with the
+ * stand-in in the place of the device file and ordinary memory where the
+ * device memory goes, like a function whose device was taken away.  See
+ * pciVfioFunAttach() for how a device gets in.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   pLayout     What to build the VM from.
+ * @param   iPciDevNo   The PCI device number to register with.
+ * @param   fExposeVga  Whether the legacy VGA ranges are to be exposed if the function has them.
+ */
+static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, PCPCIVFIOFUNLAYOUT pLayout,
+                                    uint32_t iPciDevNo, bool fExposeVga)
+{
+    PPDMDEVINS const pDevIns = pThis->pDevIns;
+
+    /* What the constructor takes from the device otherwise. */
+    pFun->cbPciCfg          = pLayout->cbPciCfg;
+    pFun->cbRom             = (size_t)pLayout->cbRom;
+    pFun->iBarMsix          = pLayout->iBarMsix;
+    AssertCompile(sizeof(pFun->acIrqVectors) == sizeof(pLayout->acIrqVectors));
+    memcpy(pFun->acIrqVectors, pLayout->acIrqVectors, sizeof(pFun->acIrqVectors));
+    pFun->Layout.cbPciCfg   = pFun->cbPciCfg;
+    pFun->Layout.cbRom      = pFun->cbRom;
+    memcpy(pFun->Layout.acIrqVectors, pLayout->acIrqVectors, sizeof(pFun->Layout.acIrqVectors));
+    pFun->Layout.iBarMsix   = pLayout->iBarMsix;
+    pFun->Layout.fMsix      = pLayout->fMsix;
+    if (pLayout->fMsix)
+    {
+        pFun->Layout.offMsixTbl = pLayout->offMsixTbl;
+        pFun->Layout.cbMsixTbl  = pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] * sizeof(MSIXTBLENTRY);
+        pFun->Layout.offMsixPba = pLayout->offMsixPba;
+        pFun->Layout.cbMsixPba  = RT_ALIGN_32(pLayout->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX], 64) / 8;
+    }
+
+    /*
+     * The stand-in for the device file, and a file descriptor number for the
+     * function which refers to it until a device is put in.
+     */
+    int rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdInert);
+    if (RT_FAILURE(rc))
+        return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Failed to create the file descriptor standing in for a removed device"));
+    pFun->iFdVfio = fcntl(pFun->iFdInert, F_DUPFD_CLOEXEC, 0);
+    if (pFun->iFdVfio == -1)
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                               N_("Failed to create the file descriptor standing in for a removed device"));
+    ASMAtomicWriteBool(&pFun->fGone, true);
+    ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
+
+    /*
+     * The PCI device.  The guest sees nothing of it before a device is put in,
+     * which is when the config space is put together.
+     */
+    PDMPciDevSetVendorId(pPciDev, UINT16_MAX);
+    PDMPciDevSetDeviceId(pPciDev, UINT16_MAX);
+    PDMPciDevSetInterruptPin(pPciDev, pLayout->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX] ? 0x01 /* A */ : 0);
+    rc = PDMDevHlpPCIRegisterEx(pDevIns, pPciDev, 0 /*fFlags*/, iPciDevNo, pFun->uPciFun, pFun->szName);
+    if (RT_FAILURE(rc))
+        return rc;
+    rc = PDMDevHlpPCIInterceptConfigAccesses(pDevIns, pPciDev, pciVfioConfigRead, pciVfioConfigWrite);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /*
+     * The BARs, see pciVfioSetupBar().  Ordinary memory keeps the place for the
+     * device memory of those which get mapped.
+     */
+    for (uint32_t iBar = 0; iBar < RT_ELEMENTS(pLayout->aBars); iBar++)
+    {
+        PVFIOPCIBAR pBar = &pFun->aBars[iBar];
+        pBar->iPciFun = (uint8_t)pFun->uPciFun;
+        if (!pLayout->aBars[iBar].cb)
+            continue;
+
+        pBar->cbRegion = pLayout->aBars[iBar].cb;
+        if (pLayout->aBars[iBar].fIoPorts)
+        {
+            pBar->bType = 1;
+            rc = PDMDevHlpPCIIORegionCreateIoEx(pDevIns, pPciDev, iBar, pBar->cbRegion,
+                                                pciVfioPioWrite, pciVfioPioRead, pBar,
+                                                "PIO", NULL /*paExtDescs*/, &pBar->hIoPort);
+            AssertRCReturn(rc, PDMDEV_SET_ERROR(pDevIns, rc, N_("Cannot register PCI I/O region")));
+        }
+        else
+        {
+            pBar->bType  = 2;
+            pBar->pvMmio = NULL;
+            if (pLayout->aBars[iBar].fMappable)
+            {
+                void *pvMmio = mmap(NULL, pBar->cbRegion, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1 /*fd*/, 0 /*offset*/);
+                if (pvMmio == MAP_FAILED)
+                    return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                           N_("Reserving %RX64 bytes of address space for BAR%u failed with %d"),
+                                           pBar->cbRegion, iBar, errno);
+                pBar->pvMmio = pvMmio;
+            }
+
+            uint32_t enmAddrSpace = PCI_ADDRESS_SPACE_MEM;
+            if (pLayout->aBars[iBar].f64Bit)
+                enmAddrSpace |= PCI_ADDRESS_SPACE_BAR64;
+            if (pLayout->aBars[iBar].fPrefetchable)
+                enmAddrSpace |= PCI_ADDRESS_SPACE_MEM_PREFETCH;
+            pBar->fInterceptMmio = pFun->fInterceptMmio || !pBar->pvMmio;
+            pBar->enmAddrSpace   = (PCIADDRESSSPACE)enmAddrSpace;
+        }
+    }
+
+    /* The legacy VGA ranges and the ROM, which is empty until a device is put in. */
+    if (   fExposeVga
+        && pLayout->fVga)
+    {
+        rc = pciVfioVgaCreateRanges(pFun, pDevIns);
+        if (RT_FAILURE(rc))
+            return rc;
+        pFun->fVga = true;
+    }
+    if (pFun->cbRom)
+    {
+        rc = pciVfioRomCreate(pThis, pFun, pPciDev);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+
+    /* The eventfds for the interrupts, one for each vector of the interrupt type with the most vectors. */
+    uint32_t const cMaxVectors = RT_MAX(RT_MAX(pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX],
+                                               pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]),
+                                        pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+    if (cMaxVectors)
+    {
+        pFun->paFdEvts = (int *)RTMemAlloc(cMaxVectors * sizeof(pFun->paFdEvts[0]));
+        if (!pFun->paFdEvts)
+            return pciVfioSetError(pThis, VERR_NO_MEMORY, RT_SRC_POS,
+                                   N_("Failed to allocate memory for %u event file descriptors for interrupts"), cMaxVectors);
+        for (uint32_t i = 0; i < cMaxVectors; i++)
+            pFun->paFdEvts[i] = -1;
+        pFun->cFdEvts = cMaxVectors;
+        for (uint32_t i = 0; i < cMaxVectors; i++)
+        {
+            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->paFdEvts[i]);
+            if (RT_FAILURE(rc))
+                return pciVfioSetError(pThis, rc, RT_SRC_POS,
+                                       N_("Failed to create event file descriptor %u out of %u for interrupts"), i, cMaxVectors);
+        }
+    }
+
+    /* The memory BARs, with the pages of the MSI-X table and pending bits trapped. */
+    for (uint8_t iBar = 0; iBar < RT_ELEMENTS(pFun->aBars); iBar++)
+        if (pFun->aBars[iBar].bType == 2)
+        {
+            rc = pciVfioBarSetupMmio(pThis, pFun, pPciDev, iBar);
+            if (RT_FAILURE(rc))
+                return rc;
+        }
+
+    /* The interrupt poller and what wakes it up. */
+    rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdWakeup);
+    if (RT_FAILURE(rc))
+        return rc;
+    rc = PDMDevHlpThreadCreate(pDevIns, &pFun->pThrdIrq, pFun, pciVfioIrqPoller, pciVfioIrqPollerWakeup,
+                               0 /* cbStack */, RTTHREADTYPE_IO, pFun->szName);
+    AssertLogRelRCReturn(rc, rc);
+
+    LogRel(("VFIO#%d.%u: The device isn't there, the VM is built for it from the configured layout\n",
+            pThis->iInstance, pFun->uPciFun));
     return VINF_SUCCESS;
 }
 
@@ -2833,6 +5809,23 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->iInstance        = iInstance;
     pThis->IommuFd.iFdIommu = -1;
     pThis->fVfioLegacy      = false;
+    pThis->fGuestRamMapped  = false;
+    pThis->fIoasAllocated   = false;
+    pThis->fSetupErrorsToLog     = false;
+    pThis->hThrdWatcher     = NIL_RTTHREAD;
+    pThis->iFdWatcherWakeup = -1;
+    pThis->fWatcherStop     = false;
+    pThis->pDevInsPort      = NULL;
+    pThis->cMsGuestRelease  = 15 * RT_MS_1SEC;
+    pThis->msAttnPressed    = 0;
+    pThis->fLoadReattach    = false;
+    pThis->fLoadUnitSeen    = false;
+
+    pDevIns->IBase.pfnQueryInterface       = pciVfioQueryInterface;
+    pThis->IPassthroughPort.pfnQueryState  = pciVfioPortQueryState;
+    pThis->IPassthroughPort.pfnAttach      = pciVfioPortAttach;
+    pThis->IPassthroughPort.pfnDetach      = pciVfioPortDetach;
+    pThis->IPassthroughPort.pfnQueryLayout = pciVfioPortQueryLayout;
 
     for (uint8_t i = 0; i < RT_ELEMENTS(pThis->aPciFuns); i++)
     {
@@ -2840,16 +5833,38 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
 
         pFun->uPciFun        = UINT32_MAX;
         pFun->iFdVfio        = -1;
+        pFun->fIoasAttached  = false;
+        pFun->fGone          = false;
+        pFun->fGoneForGuest  = false;
+        pFun->fDevMemLeft    = false;
+        pFun->iFdInert       = -1;
+        pFun->iFdEvtReq      = -1;
+        pFun->iFdEvtErr      = -1;
         pFun->iFdWakeup      = -1;
         pFun->fVga           = false;
         pFun->fInterceptMmio = false;
         pFun->iBarMsix       = UINT8_MAX;
         pFun->offMsiCtrl     = 0;
+        pFun->uIrqMode       = UINT8_MAX;
         pFun->uIrqModeCur    = UINT8_MAX;
         pFun->uIrqModeNew    = UINT8_MAX;
     }
 
     int rc = PDMDevHlpSetDeviceCritSect(pDevIns, PDMDevHlpCritSectGetNop(pDevIns));
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /* A critical section for what is done about the hot-plug capable slot.  The destructor checks whether it is there. */
+    rc = RTCritSectInit(&pThis->CritSectSlot);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /* The state of a device isn't saved.  The unit is there for refusing to, and for what
+       saving and loading the state with an empty hot-plug capable slot takes. */
+    rc = PDMDevHlpSSMRegisterEx(pDevIns, VFIO_PCI_SAVED_STATE_VERSION, 512 /*cbGuess*/, NULL /*pszBefore*/,
+                                pciVfioLivePrep, NULL /*pfnLiveExec*/, NULL /*pfnLiveVote*/,
+                                pciVfioSavePrep, pciVfioSaveExec, pciVfioSaveDone,
+                                pciVfioLoadPrep, pciVfioLoadExec, pciVfioLoadDone);
     if (RT_FAILURE(rc))
         return rc;
 
@@ -2860,17 +5875,40 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                      "IommuPath\0"
                                      "VfioPath\0"
                                      "VfioGroupPath\0"
+                                     "GuestReleaseTimeoutMs\0"
                                      "Fun*\0"
                                     ))
         return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
+
+    /*
+     * The guest memory gets mapped for the device once and has to stay where it is
+     * for as long as the VM exists.  This is the case with the native execution
+     * engine (KVM), where each RAM range is allocated in one piece and kept, and it
+     * is not with the others, where pages are allocated and freed as the VM runs.
+     */
+    if (PDMDevHlpGetMainExecutionEngine(pDevIns) != VM_EXEC_ENGINE_NATIVE_API)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("PCI passthrough requires the native execution engine (KVM), which this VM doesn't use. "
+                                      "Select it with 'VBoxManage modifyvm --vm-execution-engine native-api'"));
+
+    /* How long the guest gets for letting go of the device when the host wants it back. */
+    uint64_t cMsGuestRelease = 0;
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "GuestReleaseTimeoutMs", &cMsGuestRelease, pThis->cMsGuestRelease);
+    if (   RT_FAILURE(rc)
+        || cMsGuestRelease > 5 * RT_MS_1MIN)
+        return PDMDevHlpVMSetError(pDevIns, RT_FAILURE(rc) ? rc : VERR_OUT_OF_RANGE, RT_SRC_POS,
+                                   N_("Configuration error: \"GuestReleaseTimeoutMs\" is not a number of milliseconds up to five minutes"));
+    pThis->cMsGuestRelease = (uint32_t)cMsGuestRelease;
 
     rc = pciVfioConfigureAccess(pDevIns, pThis, pHlp, pCfg);
     if (RT_FAILURE(rc))
         return rc;
 
     /* Initialize available functions. */
-    uint32_t iPciDevNo = PDMPCIDEVREG_DEV_NO_FIRST_UNUSED;
-    bool fMultiFn = false;
+    uint32_t iPciDevNo    = PDMPCIDEVREG_DEV_NO_FIRST_UNUSED;
+    bool     fMultiFn     = false;
+    uint32_t cFunsPresent = 0;
+    uint32_t cFunsAbsent  = 0;
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PVFIOPCIFUN pFun    = &pThis->aPciFuns[iPciFun];
@@ -2899,7 +5937,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                         ))
             return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
 
-        rc = pHlp->pfnCFGMQueryBoolDef(pCfg, "InterceptMmio", &pFun->fInterceptMmio, false);
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgFun, "InterceptMmio", &pFun->fInterceptMmio, false);
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"InterceptMmio\" failed"));
@@ -2910,9 +5948,30 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"ExposeVga\" failed"));
 
-        rc = pciVfioFunConfigureAccess(pDevIns, pThis, pFun, pHlp, pCfgFun);
+        /*
+         * A device which isn't there can be put in later if it is in a hot-plug capable
+         * slot and if the configuration says what to build the VM from.
+         */
+        PCFGMNODE const pCfgLayout = pHlp->pfnCFGMGetChildF(pCfgFun, "Layout");
+        pThis->fSetupErrorsToLog = pCfgLayout != NULL;
+        rc = pciVfioFunOpen(pThis, pFun, pCfgFun, &pFun->iFdVfio);
+        pThis->fSetupErrorsToLog = false;
         if (RT_FAILURE(rc))
-            return rc;
+        {
+            if (!pCfgLayout)
+                return rc;
+
+            PCIVFIOFUNLAYOUT Layout;
+            rc = pciVfioFunLayoutFromCfg(pThis, pFun, pCfgLayout, &Layout);
+            if (RT_SUCCESS(rc))
+                rc = pciVfioFunConstructEmpty(pThis, pFun, pPciDev, &Layout, iPciDevNo, fVga);
+            if (RT_FAILURE(rc))
+                return rc;
+            cFunsAbsent++;
+            iPciDevNo = PDMPCIDEVREG_DEV_NO_SAME_AS_PREV;
+            continue;
+        }
+        cFunsPresent++;
 
         struct vfio_device_info DevInfo;
         DevInfo.argsz = sizeof(DevInfo);
@@ -2931,8 +5990,11 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                 iInstance, iPciFun, DevInfo.cap_offset));
 
         if (!(DevInfo.flags & VFIO_DEVICE_FLAGS_PCI))
-            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
                                        N_("VFIO device is not a PCI/PCI Express device. This configuration is not supported"));
+        if (!(DevInfo.flags & VFIO_DEVICE_FLAGS_RESET))
+            LogRel(("VFIO#%d.%u: The function can't be reset on its own, a reset is going to affect everything on its bus\n",
+                    iInstance, iPciFun));
 
         /* Setup access to the PCI config space first. */
         struct vfio_region_info RegionInfo;
@@ -3016,17 +6078,37 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                 return rc;
         }
 
+        /* The numbers come from the device, make sure they are something we can deal with. */
+        if (   pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX] > 1
+            || pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX]  > VBOX_MSI_MAX_ENTRIES
+            || pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX] > VBOX_MSIX_MAX_ENTRIES)
+            return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                       N_("The device has more interrupt vectors than supported (INTx: %u, MSI: %u, MSI-X: %u)"),
+                                       pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX], pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX],
+                                       pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]);
+
         /*
          * Pre create the event file descriptors to not risk running out of file descriptors
          * while the VM is running.
          */
-        uint32_t cMaxVectors = RT_MAX(RT_MAX(pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX],
-                                             pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]),
-                                      pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+        uint32_t const cMaxVectors = RT_MAX(RT_MAX(pFun->acIrqVectors[VFIO_PCI_MSI_IRQ_INDEX],
+                                                   pFun->acIrqVectors[VFIO_PCI_MSIX_IRQ_INDEX]),
+                                            pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+        if (cMaxVectors)
+        {
+            pFun->paFdEvts = (int *)RTMemAlloc(cMaxVectors * sizeof(pFun->paFdEvts[0]));
+            if (!pFun->paFdEvts)
+                return PDMDevHlpVMSetError(pDevIns, VERR_NO_MEMORY, RT_SRC_POS,
+                                           N_("Failed to allocate memory for %u event file descriptors for interrupts"),
+                                           cMaxVectors);
+            for (uint32_t i = 0; i < cMaxVectors; i++)
+                pFun->paFdEvts[i] = -1;
+            pFun->cFdEvts = cMaxVectors;
+        }
 
         for (uint32_t i = 0; i < cMaxVectors; i++)
         {
-            rc = pciVfioLnxEventfd2(0 /*uValInit*/, 0 /*fFlags*/, &pFun->afdEvts[i]);
+            rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->paFdEvts[i]);
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Failed to create event file descriptor %u out of %u for interrupts"),
@@ -3045,49 +6127,33 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                 return rc;
         }
 
+        /* What the VM is built from: the memory BARs are split by it, and a device which gets
+           put in later is compared with it. */
+        pFun->Layout.cbPciCfg   = pFun->cbPciCfg;
+        pFun->Layout.cbRom      = pFun->cbRom;
+        AssertCompile(sizeof(pFun->Layout.acIrqVectors) == sizeof(pFun->acIrqVectors));
+        memcpy(pFun->Layout.acIrqVectors, pFun->acIrqVectors, sizeof(pFun->Layout.acIrqVectors));
+        pFun->Layout.iBarMsix   = pFun->iBarMsix;
+        pFun->Layout.fMsix      = pFun->offMsixCtrl != 0;
+        pFun->Layout.offMsixTbl = pFun->offMsixTbl;
+        pFun->Layout.cbMsixTbl  = pFun->cbMsixTbl;
+        pFun->Layout.offMsixPba = pFun->offMsixPba;
+        pFun->Layout.cbMsixPba  = pFun->cbMsixPba;
+
         /* Create the MMIO region mappings now. */
         for (uint8_t i = 0; i < RT_ELEMENTS(pFun->aBars); i++)
         {
             /* PIO regions were created before. */
             if (pFun->aBars[i].bType == 2)
             {
-                uint64_t const cbRegion = pFun->aBars[i].cbRegion +
-                                          (  i == pFun->iBarMsix
-                                           ? pFun->cbMsix
-                                           : 0);
-
-                rc = PDMDevHlpPCIIORegionRegisterMmioCustom(pDevIns, i, cbRegion, pFun->aBars[i].enmAddrSpace, pciVfioMmioMapUnmap);
-                AssertLogRelRCReturn(rc, rc);
-
-                if (pFun->aBars[i].fInterceptMmio)
-                {
-                    rc = PDMDevHlpMmioCreate(pDevIns, pFun->aBars[i].cbRegion, pPciDev, i /*iPciRegion*/,
-                                             pciVfioMmioWrite, pciVfioMmioRead, &pFun->aBars[i],
-                                             IOMMMIO_FLAGS_READ_PASSTHRU | IOMMMIO_FLAGS_WRITE_PASSTHRU, "MMIO",
-                                             &pFun->aBars[i].hnd.hMmio);
-                    AssertLogRelRCReturn(rc, rc);
-
-                    if (i == pFun->iBarMsix)
-                    {
-                        rc = PDMDevHlpMmioCreate(pDevIns, pFun->cbMsix, pPciDev, i /*iPciRegion*/,
-                                                 pciVfioMsixMmioWrite, pciVfioMsixMmioRead, pFun,
-                                                 IOMMMIO_FLAGS_READ_DWORD_QWORD | IOMMMIO_FLAGS_WRITE_DWORD_QWORD_READ_MISSING,
-                                                 "MSI-X MMIO", &pFun->hMsixMmio);
-                        AssertLogRelRCReturn(rc, rc);
-                    }
-                }
-                else
-                {
-                    rc = PDMDevHlpMmio2CreateFromExisting(pDevIns, pPciDev, i, pFun->aBars[i].cbRegion,
-                                                          0 /*fFlags*/, "MMIO", (void *)pFun->aBars[i].u.pvMmio,
-                                                          &pFun->aBars[i].hnd.hMmio2);
-                    AssertLogRelRCReturn(rc, rc);
-                }
+                rc = pciVfioBarSetupMmio(pThis, pFun, pPciDev, i);
+                if (RT_FAILURE(rc))
+                    return rc;
             }
         }
 
         /* Create wakeup eventfd for IRQ poller. */
-        rc = pciVfioLnxEventfd2(0 /*uValInit*/, 0 /*fFlags*/, &pFun->iFdWakeup);
+        rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdWakeup);
         if (RT_FAILURE(rc))
             return rc;
 
@@ -3104,7 +6170,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         {
             PDMPciDevSetInterruptPin(pPciDev, 0x01); /* A */
 
-            rc = pciVfioIrqReconfigure(pThis, pFun, VFIO_PCI_INTX_IRQ_INDEX, pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX]);
+            rc = pciVfioIrqReconfigure(pThis, pFun, VFIO_PCI_INTX_IRQ_INDEX, 1 /*cVectors*/);
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Failed to set initial interrupt mode to INTx"));
@@ -3117,9 +6183,70 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS, N_("Applying quirk for device failed"));
 
+        /*
+         * For the host taking the device back while the VM exists: what takes the place
+         * of the device file then, and the notifications telling that it is time.
+         */
+        rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pFun->iFdInert);
+        if (RT_FAILURE(rc))
+            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                       N_("Failed to create the file descriptor standing in for a removed device"));
+        rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_REQ_IRQ_INDEX, &pFun->iFdEvtReq);
+        if (RT_SUCCESS(rc))
+            rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_ERR_IRQ_INDEX, &pFun->iFdEvtErr);
+        if (RT_FAILURE(rc))
+            return rc;
+        if (pFun->iFdEvtReq == -1)
+            LogRel(("VFIO#%d.%u: The host can't tell when it wants the device back, removing it while the VM exists is going to block on the host\n",
+                    iInstance, iPciFun));
+
         /* Subsequent function should use the same major as the previous one. */
         iPciDevNo = PDMPCIDEVREG_DEV_NO_SAME_AS_PREV;
     }
+
+    /* One device, which is there or not. */
+    if (cFunsPresent && cFunsAbsent)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("Some functions of the PCI device to pass through are there and others are not"));
+
+    /* The thread watching the notifications of the host about the functions. */
+    rc = pciVfioLnxEventfd2(0 /*uValInit*/, LNX_EFD_CLOEXEC, &pThis->iFdWatcherWakeup);
+    if (RT_FAILURE(rc))
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS, N_("Failed to create the event file descriptor of the watcher thread"));
+    rc = RTThreadCreateF(&pThis->hThrdWatcher, pciVfioWatcherThread, pThis, 0 /*cbStack*/, RTTHREADTYPE_IO,
+                         RTTHREADFLAGS_WAITABLE, "VFIO#%uW", iInstance);
+    if (RT_FAILURE(rc))
+    {
+        pThis->hThrdWatcher = NIL_RTTHREAD;
+        return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS, N_("Failed to create the watcher thread"));
+    }
+
+    /*
+     * Behind a root port with a hot-plug capable slot the device is what is in the
+     * slot.  This is the last thing which can fail, as the port keeps what it is told.
+     */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
+        {
+            PPDMDEVINS const pDevInsPort = devpciR3HotPlugSlotFind(pDevIns, pDevIns->apPciDevs[iPciFun]);
+            if (pDevInsPort)
+            {
+                rc = devpciR3HotPlugSlotRegisterClient(pDevInsPort, pDevIns, pciVfioSlotLinkChanged, cFunsAbsent == 0 /*fPresent*/);
+                if (RT_FAILURE(rc))
+                    return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                               N_("The hot-plug capable slot the passed through PCI device is configured "
+                                                  "to be in is taken by another device"));
+                pThis->pDevInsPort = pDevInsPort;
+                LogRel(("VFIO#%d: The device is in the hot-plug capable slot of PCI bridge #%u\n", iInstance, pDevInsPort->iInstance));
+            }
+            break;
+        }
+
+    if (   cFunsAbsent
+        && !pThis->pDevInsPort)
+        return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                                   N_("The PCI device to pass through isn't there. The VM can start without it only "
+                                      "if it is configured to be in a hot-plug capable slot"));
 
     /* Need to fixup the header type for all functions. */
     if (fMultiFn)
@@ -3133,6 +6260,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         }
     }
 
+    pThis->fSetupErrorsToLog = true;
     return rc;
 }
 
@@ -3169,7 +6297,7 @@ const PDMDEVREG g_DevicePciVfio =
     /* .pfnAttach = */              NULL,
     /* .pfnDetach = */              NULL,
     /* .pfnQueryInterface = */      NULL,
-    /* .pfnInitComplete = */        NULL,
+    /* .pfnInitComplete = */        pciVfioInitComplete,
     /* .pfnPowerOff = */            NULL,
     /* .pfnSoftReset = */           NULL,
     /* .pfnReserved0 = */           NULL,

@@ -1,0 +1,2129 @@
+/* $Id$ */
+/** @file
+ * tstDevPciVfio - Fake VFIO/IOMMUFD kernel interface with a PCI device model.
+ */
+
+/*
+ * Copyright (C) 2026 popolupo
+ *
+ * This file is part of VirtualBox base platform packages, as
+ * available from https://www.virtualbox.org.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation, in version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses>.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ */
+
+/** @page pg_tst_devpcivfio_krnl    tstDevPciVfio - The fake kernel
+ *
+ * The VFIO passthrough device talks to the host kernel through open(),
+ * close(), ioctl(), pread(), pwrite(), mmap(), poll() and eventfds.  The
+ * testcase binary is linked with the GNU ld --wrap option for all but the last
+ * two, which routes these calls from the device code to the wrappers at the end
+ * of this file.  Calls concerning file descriptors or paths not owned by the fake
+ * kernel are forwarded to the C library unchanged.
+ *
+ * A PCI function is modelled by a memory file (memfd).  Every VFIO region
+ * lives at a fixed offset of that file, exactly like with the real vfio-pci
+ * driver, which means pread(), pwrite() and mmap() on the device file
+ * descriptor work without any emulation.  Interrupts are real eventfds, so
+ * the interrupt poller of the device runs unmodified.
+ *
+ * The model does not emulate device behaviour (register write masks, BAR
+ * sizing and the like); the config space is plain storage initialised from
+ * the description the test supplies.  It does emulate the VFIO and IOMMUFD
+ * object life cycles and argument validation closely enough to catch misuse.
+ */
+
+
+/*********************************************************************************************************************************
+*   Header Files                                                                                                                 *
+*********************************************************************************************************************************/
+#include <VBox/pci.h>
+#include <VBox/vmm/pdmdev.h>
+#include <VBox/err.h>
+#include <iprt/asm.h>
+#include <iprt/assert.h>
+#include <iprt/critsect.h>
+#include <iprt/mem.h>
+#include <iprt/string.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+
+#include "../Bus/DevPciVfio.h"
+#include "tstDevPciVfio.h"
+
+
+/*********************************************************************************************************************************
+*   Defined Constants And Macros                                                                                                 *
+*********************************************************************************************************************************/
+/** Maximum number of PCI functions the fake kernel serves. */
+#define TSTVFIO_MAX_DEVS            8
+/** Maximum number of file descriptors the fake kernel hands out. */
+#define TSTVFIO_MAX_FDS             64
+/** Maximum number of DMA mappings. */
+#define TSTVFIO_MAX_DMA             256
+/** Maximum number of I/O address spaces. */
+#define TSTVFIO_MAX_IOAS            16
+/** Each region gets 16 GiB of file offset space. */
+#define TSTVFIO_REGION_SHIFT        34
+/** The page size DMA mappings have to be aligned to. */
+#define TSTVFIO_PAGE_SIZE           UINT64_C(4096)
+/** What the DMA mappings of the container are filed under (legacy interface). */
+#define TSTVFIO_CONTAINER_IOAS      UINT32_C(0xffff0001)
+
+
+/*********************************************************************************************************************************
+*   Structures and Typedefs                                                                                                      *
+*********************************************************************************************************************************/
+/**
+ * File descriptor type.
+ */
+typedef enum TSTVFIOFDTYPE
+{
+    /** The entry is unused. */
+    TSTVFIOFDTYPE_FREE = 0,
+    /** An IOMMUFD context. */
+    TSTVFIOFDTYPE_IOMMU,
+    /** A VFIO device. */
+    TSTVFIOFDTYPE_DEVICE,
+    /** A VFIO container (legacy interface). */
+    TSTVFIOFDTYPE_CONTAINER,
+    /** A VFIO group (legacy interface). */
+    TSTVFIOFDTYPE_GROUP
+} TSTVFIOFDTYPE;
+
+/**
+ * A PCI function of the fake kernel.
+ */
+typedef struct TSTVFIODEV
+{
+    /** The description supplied by the test. */
+    TSTVFIODEVCFG       Cfg;
+    /** The memory file backing all regions. */
+    int                 iFdBacking;
+    /** File offset of each region. */
+    uint64_t            aoffRegions[TSTVFIO_REGION_COUNT];
+    /** Size of each region, 0 if not implemented. */
+    uint64_t            acbRegions[TSTVFIO_REGION_COUNT];
+    /** Mappings of the regions for the test, created on demand. */
+    void               *apvRegions[TSTVFIO_REGION_COUNT];
+    /** The eventfds registered for each interrupt index, -1 if not set. */
+    int                *apaiIrqFds[TSTVFIO_IRQ_INDEX_COUNT];
+    /** Number of open file descriptors referring to this function. */
+    uint32_t            cOpens;
+    /** Number of resets requested. */
+    uint32_t            cResets;
+    /** Number of resets of the bus the function is on. */
+    uint32_t            cBusResets;
+    /** Number of interrupts triggered per interrupt index. */
+    uint32_t            acIrqsTriggered[TSTVFIO_IRQ_INDEX_COUNT];
+    /** The I/O address space the function is attached to, 0 if none. */
+    uint32_t            idIoas;
+    /** Whether the function is bound to an IOMMUFD context, or was handed out by its group. */
+    bool                fBound;
+    /** Whether the function was handed out by its group (legacy interface). */
+    bool                fGroupDevice;
+    /** Whether the function doesn't answer any more. */
+    bool                fGone;
+    /** Whether the function was removed from the host for good: once its user has let go of
+     * it, what the user still has mapped of it is no longer usable. */
+    bool                fRemoved;
+    /** Whether INTx is masked. */
+    bool                fIntxMasked;
+} TSTVFIODEV;
+
+/**
+ * A file descriptor handed out by the fake kernel.
+ */
+typedef struct TSTVFIOFD
+{
+    /** The type. */
+    TSTVFIOFDTYPE       enmType;
+    /** The file descriptor number. */
+    int                 iFd;
+    /** The PCI function for TSTVFIOFDTYPE_DEVICE. */
+    PTSTVFIODEV         pDev;
+} TSTVFIOFD;
+/** Pointer to a file descriptor entry. */
+typedef TSTVFIOFD *PTSTVFIOFD;
+
+/**
+ * A DMA mapping.
+ */
+typedef struct TSTVFIODMA
+{
+    /** The I/O address space the mapping belongs to, 0 if the entry is unused. */
+    uint32_t            idIoas;
+    /** The I/O virtual address. */
+    uint64_t            uIova;
+    /** The size of the mapping. */
+    uint64_t            cb;
+    /** The process address backing the mapping. */
+    uint64_t            uVirt;
+} TSTVFIODMA;
+
+/**
+ * A mapping of a region of a PCI function made by its user.
+ */
+typedef struct TSTVFIOMAP
+{
+    /** Where it is, NULL if the entry is unused. */
+    void               *pv;
+    /** Its size. */
+    size_t              cb;
+    /** The PCI function. */
+    struct TSTVFIODEV  *pDev;
+} TSTVFIOMAP;
+
+/**
+ * The fake kernel state.
+ */
+typedef struct TSTVFIOKRNL
+{
+    /** Whether the fake kernel is active. */
+    bool                fInitialized;
+    /** Serialises everything. */
+    RTCRITSECT          CritSect;
+    /** The PCI functions. */
+    TSTVFIODEV          aDevs[TSTVFIO_MAX_DEVS];
+    /** Number of PCI functions. */
+    uint32_t            cDevs;
+    /** The file descriptors. */
+    TSTVFIOFD           aFds[TSTVFIO_MAX_FDS];
+    /** The DMA mappings. */
+    TSTVFIODMA          aDma[TSTVFIO_MAX_DMA];
+    /** The region mappings the users of the PCI functions have made. */
+    TSTVFIOMAP          aMaps[64];
+    /** Called after config space writes, optional. */
+    PFNTSTVFIOCFGWRITE  pfnCfgWriteHook;
+    /** The user argument for pfnCfgWriteHook. */
+    void               *pvCfgWriteHookUser;
+    /** The I/O address spaces, 0 if the entry is unused. */
+    uint32_t            aidIoas[TSTVFIO_MAX_IOAS];
+    /** The next I/O address space ID. */
+    uint32_t            idIoasNext;
+    /** Whether only the legacy interface is there: no IOMMUFD, no device nodes. */
+    bool                fLegacy;
+    /** Whether the group is in the container (legacy interface). */
+    bool                fGroupInContainer;
+    /** Whether the IOMMU type of the container is set (legacy interface). */
+    bool                fContainerIommuSet;
+    /** Number of requests which were refused for being out of bounds: interrupt
+     * vectors a function hasn't got, accesses beyond the end of a region. */
+    uint32_t            cViolations;
+    /** Fault injection: whether a failure is armed. */
+    bool                fFailArmed;
+    /** Fault injection: the ioctl request to fail. */
+    unsigned long       uFailReq;
+    /** Fault injection: number of matching requests to let pass first. */
+    uint32_t            cFailSkip;
+    /** Fault injection: the errno to fail with. */
+    int                 iFailErrno;
+    /** Fault injection: number of mappings of ordinary memory at a given address to fail. */
+    uint32_t volatile   cFailPlaceholderMaps;
+    /** Called before ordinary memory gets mapped at a given address, optional. */
+    PFNTSTVFIOMMAPHOOK  pfnPlaceholderHook;
+    /** The user argument of the hook. */
+    void               *pvPlaceholderHookUser;
+} TSTVFIOKRNL;
+
+
+/*********************************************************************************************************************************
+*   Internal Functions                                                                                                           *
+*********************************************************************************************************************************/
+RT_C_DECLS_BEGIN
+/* The C library functions behind the wrappers, see GNU ld --wrap. */
+int     __real_open(const char *pszPath, int fFlags, ...);
+int     __real_open64(const char *pszPath, int fFlags, ...);
+int     __real_close(int iFd);
+int     __real_dup2(int iFdOld, int iFdNew);
+int     __real_dup3(int iFdOld, int iFdNew, int fFlags);
+int     __real_ioctl(int iFd, unsigned long uReq, ...);
+ssize_t __real_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __real_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __real_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __real_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
+void   *__real_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
+void   *__real_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
+
+/* The wrappers. */
+int     __wrap_open(const char *pszPath, int fFlags, ...);
+int     __wrap_open64(const char *pszPath, int fFlags, ...);
+int     __wrap_close(int iFd);
+int     __wrap_dup2(int iFdOld, int iFdNew);
+int     __wrap_dup3(int iFdOld, int iFdNew, int fFlags);
+int     __wrap_ioctl(int iFd, unsigned long uReq, ...);
+ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __wrap___pread_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax);
+ssize_t __wrap___pread64_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax);
+ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
+ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off);
+void   *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
+void   *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off);
+RT_C_DECLS_END
+
+
+/*********************************************************************************************************************************
+*   Global Variables                                                                                                             *
+*********************************************************************************************************************************/
+/** The fake kernel. */
+static TSTVFIOKRNL g_Krnl;
+
+
+/**
+ * Creates an anonymous memory file.
+ *
+ * @returns File descriptor or -1 with errno set.
+ */
+static int tstVfioKrnlMemFdCreate(void)
+{
+    return (int)syscall(SYS_memfd_create, "tstDevPciVfio", 0);
+}
+
+
+/**
+ * Looks up a file descriptor.
+ *
+ * @returns Pointer to the entry or NULL if the descriptor is not ours.
+ * @param   iFd                 The file descriptor.
+ */
+static PTSTVFIOFD tstVfioKrnlFdLookup(int iFd)
+{
+    if (iFd >= 0)
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+            if (   g_Krnl.aFds[i].enmType != TSTVFIOFDTYPE_FREE
+                && g_Krnl.aFds[i].iFd == iFd)
+                return &g_Krnl.aFds[i];
+    return NULL;
+}
+
+
+/**
+ * Registers a new file descriptor.
+ *
+ * @returns Pointer to the entry or NULL if the table is full.
+ * @param   iFd                 The file descriptor.
+ * @param   enmType             The type.
+ * @param   pDev                The PCI function for device descriptors.
+ */
+static PTSTVFIOFD tstVfioKrnlFdRegister(int iFd, TSTVFIOFDTYPE enmType, PTSTVFIODEV pDev)
+{
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+        if (g_Krnl.aFds[i].enmType == TSTVFIOFDTYPE_FREE)
+        {
+            g_Krnl.aFds[i].enmType = enmType;
+            g_Krnl.aFds[i].iFd     = iFd;
+            g_Krnl.aFds[i].pDev    = pDev;
+            return &g_Krnl.aFds[i];
+        }
+    return NULL;
+}
+
+
+/**
+ * Checks whether the given I/O address space exists.
+ *
+ * @returns true if it exists, false otherwise.
+ * @param   idIoas              The I/O address space ID.
+ */
+static bool tstVfioKrnlIoasExists(uint32_t idIoas)
+{
+    if (idIoas)
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aidIoas); i++)
+            if (g_Krnl.aidIoas[i] == idIoas)
+                return true;
+    return false;
+}
+
+
+/**
+ * Removes an I/O address space and all its mappings.
+ *
+ * @param   idIoas              The I/O address space ID.
+ */
+static void tstVfioKrnlIoasDestroy(uint32_t idIoas)
+{
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+        if (g_Krnl.aDma[i].idIoas == idIoas)
+            g_Krnl.aDma[i].idIoas = 0;
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aidIoas); i++)
+        if (g_Krnl.aidIoas[i] == idIoas)
+            g_Krnl.aidIoas[i] = 0;
+}
+
+
+/**
+ * Drops the eventfds of one interrupt index.
+ *
+ * @param   pDev                The PCI function.
+ * @param   uIrqIndex           The interrupt index.
+ */
+static void tstVfioKrnlDevIrqDisable(PTSTVFIODEV pDev, uint32_t uIrqIndex)
+{
+    for (uint32_t i = 0; i < pDev->Cfg.acIrqs[uIrqIndex]; i++)
+        if (pDev->apaiIrqFds[uIrqIndex][i] != -1)
+        {
+            __real_close(pDev->apaiIrqFds[uIrqIndex][i]);
+            pDev->apaiIrqFds[uIrqIndex][i] = -1;
+        }
+}
+
+
+/**
+ * Releases everything a user of the PCI function has set up, called when the
+ * last file descriptor goes away.
+ *
+ * @param   pDev                The PCI function.
+ */
+static void tstVfioKrnlDevRelease(PTSTVFIODEV pDev)
+{
+    for (uint32_t i = 0; i < RT_ELEMENTS(pDev->apaiIrqFds); i++)
+        tstVfioKrnlDevIrqDisable(pDev, i);
+    pDev->fBound       = false;
+    pDev->fGroupDevice = false;
+    pDev->idIoas       = 0;
+    if (pDev->fRemoved)
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+            if (g_Krnl.aMaps[i].pv && g_Krnl.aMaps[i].pDev == pDev)
+                mprotect(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb, PROT_NONE);
+    pDev->fIntxMasked = false;
+}
+
+
+/**
+ * Handles an ioctl on an IOMMUFD context.
+ *
+ * @returns 0 on success, -1 with errno set on failure.
+ * @param   uReq                The request.
+ * @param   pvArg               The argument.
+ */
+static int tstVfioKrnlIommuIoctl(unsigned long uReq, void *pvArg)
+{
+    switch (uReq)
+    {
+        case IOMMU_IOAS_ALLOC:
+        {
+            struct iommu_ioas_alloc *pAlloc = (struct iommu_ioas_alloc *)pvArg;
+            if (pAlloc->size < sizeof(*pAlloc) || pAlloc->flags)
+                return errno = EINVAL, -1;
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aidIoas); i++)
+                if (!g_Krnl.aidIoas[i])
+                {
+                    g_Krnl.aidIoas[i]   = g_Krnl.idIoasNext++;
+                    pAlloc->out_ioas_id = g_Krnl.aidIoas[i];
+                    return 0;
+                }
+            return errno = ENOMEM, -1;
+        }
+
+        case IOMMU_IOAS_MAP:
+        {
+            struct iommu_ioas_map *pMap = (struct iommu_ioas_map *)pvArg;
+            if (   pMap->size < sizeof(*pMap)
+                || !(pMap->flags & IOMMU_IOAS_MAP_FIXED_IOVA) /* The model does not allocate IOVAs. */
+                || (pMap->flags & ~(IOMMU_IOAS_MAP_FIXED_IOVA | IOMMU_IOAS_MAP_WRITEABLE | IOMMU_IOAS_MAP_READABLE))
+                || !pMap->length
+                || (pMap->length  & (TSTVFIO_PAGE_SIZE - 1))
+                || (pMap->iova    & (TSTVFIO_PAGE_SIZE - 1))
+                || (pMap->user_va & (TSTVFIO_PAGE_SIZE - 1))
+                || pMap->iova + pMap->length < pMap->iova)
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlIoasExists(pMap->ioas_id))
+                return errno = ENOENT, -1;
+
+            unsigned iFree = RT_ELEMENTS(g_Krnl.aDma);
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (g_Krnl.aDma[i].idIoas != pMap->ioas_id)
+                {
+                    if (!g_Krnl.aDma[i].idIoas && iFree == RT_ELEMENTS(g_Krnl.aDma))
+                        iFree = i;
+                }
+                else if (   pMap->iova                < g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb
+                         && pMap->iova + pMap->length > g_Krnl.aDma[i].uIova)
+                    return errno = EEXIST, -1;
+            if (iFree == RT_ELEMENTS(g_Krnl.aDma))
+                return errno = ENOMEM, -1;
+
+            g_Krnl.aDma[iFree].idIoas = pMap->ioas_id;
+            g_Krnl.aDma[iFree].uIova  = pMap->iova;
+            g_Krnl.aDma[iFree].cb     = pMap->length;
+            g_Krnl.aDma[iFree].uVirt  = pMap->user_va;
+            return 0;
+        }
+
+        case IOMMU_IOAS_UNMAP:
+        {
+            struct iommu_ioas_unmap *pUnmap = (struct iommu_ioas_unmap *)pvArg;
+            if (pUnmap->size < sizeof(*pUnmap))
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlIoasExists(pUnmap->ioas_id))
+                return errno = ENOENT, -1;
+
+            /* Address 0 with the maximum length stands for everything and succeeds with nothing mapped too. */
+            bool const     fAll  = pUnmap->iova == 0 && pUnmap->length == UINT64_MAX;
+            uint64_t const uLast = fAll ? UINT64_MAX : pUnmap->iova + pUnmap->length - 1;
+            if (   !fAll
+                && (!pUnmap->length || uLast < pUnmap->iova))
+                return errno = EINVAL, -1;
+
+            /* Mappings are removed as a whole or not at all. */
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (   g_Krnl.aDma[i].idIoas == pUnmap->ioas_id
+                    && g_Krnl.aDma[i].uIova <= uLast
+                    && g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb - 1 >= pUnmap->iova
+                    && (   g_Krnl.aDma[i].uIova < pUnmap->iova
+                        || g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb - 1 > uLast))
+                    return errno = ENOENT, -1;
+
+            uint64_t cbUnmapped = 0;
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (   g_Krnl.aDma[i].idIoas == pUnmap->ioas_id
+                    && g_Krnl.aDma[i].uIova <= uLast
+                    && g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb - 1 >= pUnmap->iova)
+                {
+                    cbUnmapped += g_Krnl.aDma[i].cb;
+                    RT_ZERO(g_Krnl.aDma[i]);
+                }
+            if (!cbUnmapped && !fAll)
+                return errno = ENOENT, -1;
+            pUnmap->length = cbUnmapped;
+            return 0;
+        }
+
+        case IOMMU_DESTROY:
+        {
+            struct iommu_destroy *pDestroy = (struct iommu_destroy *)pvArg;
+            if (pDestroy->size < sizeof(*pDestroy))
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlIoasExists(pDestroy->id))
+                return errno = ENOENT, -1;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                if (g_Krnl.aDevs[i].idIoas == pDestroy->id)
+                    return errno = EBUSY, -1;
+            tstVfioKrnlIoasDestroy(pDestroy->id);
+            return 0;
+        }
+
+        default:
+            return errno = ENOTTY, -1;
+    }
+}
+
+
+/**
+ * Handles an ioctl on the container (legacy interface).
+ *
+ * @returns The result of the request, -1 with errno set on failure.
+ * @param   uReq                The request.
+ * @param   pvArg               The argument.
+ */
+static int tstVfioKrnlContainerIoctl(unsigned long uReq, void *pvArg)
+{
+    switch (uReq)
+    {
+        case VFIO_GET_API_VERSION:
+            return VFIO_API_VERSION;
+
+        case VFIO_CHECK_EXTENSION:
+            return (uint32_t)(uintptr_t)pvArg == VFIO_TYPE1_IOMMU ? 1 : 0;
+
+        case VFIO_SET_IOMMU:
+            if (   (uint32_t)(uintptr_t)pvArg != VFIO_TYPE1_IOMMU
+                || !g_Krnl.fGroupInContainer
+                || g_Krnl.fContainerIommuSet)
+                return errno = EINVAL, -1;
+            g_Krnl.fContainerIommuSet = true;
+            return 0;
+
+        case VFIO_IOMMU_MAP_DMA:
+        {
+            struct vfio_iommu_type1_dma_map *pMap = (struct vfio_iommu_type1_dma_map *)pvArg;
+            if (   pMap->argsz < sizeof(*pMap)
+                || !(pMap->flags & (VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE))
+                || (pMap->flags & ~(VFIO_DMA_MAP_FLAG_READ | VFIO_DMA_MAP_FLAG_WRITE))
+                || !pMap->size
+                || (pMap->size  & (TSTVFIO_PAGE_SIZE - 1))
+                || (pMap->iova  & (TSTVFIO_PAGE_SIZE - 1))
+                || (pMap->vaddr & (TSTVFIO_PAGE_SIZE - 1))
+                || pMap->iova + pMap->size < pMap->iova
+                || !g_Krnl.fContainerIommuSet)
+                return errno = EINVAL, -1;
+
+            unsigned iFree = RT_ELEMENTS(g_Krnl.aDma);
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (g_Krnl.aDma[i].idIoas != TSTVFIO_CONTAINER_IOAS)
+                {
+                    if (!g_Krnl.aDma[i].idIoas && iFree == RT_ELEMENTS(g_Krnl.aDma))
+                        iFree = i;
+                }
+                else if (   pMap->iova              < g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb
+                         && pMap->iova + pMap->size > g_Krnl.aDma[i].uIova)
+                    return errno = EEXIST, -1;
+            if (iFree == RT_ELEMENTS(g_Krnl.aDma))
+                return errno = ENOMEM, -1;
+
+            g_Krnl.aDma[iFree].idIoas = TSTVFIO_CONTAINER_IOAS;
+            g_Krnl.aDma[iFree].uIova  = pMap->iova;
+            g_Krnl.aDma[iFree].cb     = pMap->size;
+            g_Krnl.aDma[iFree].uVirt  = pMap->vaddr;
+            return 0;
+        }
+
+        case VFIO_IOMMU_UNMAP_DMA:
+        {
+            struct vfio_iommu_type1_dma_unmap *pUnmap = (struct vfio_iommu_type1_dma_unmap *)pvArg;
+            bool const fAll = RT_BOOL(pUnmap->flags & VFIO_DMA_UNMAP_FLAG_ALL);
+            if (   pUnmap->argsz < sizeof(*pUnmap)
+                || (pUnmap->flags & ~VFIO_DMA_UNMAP_FLAG_ALL)
+                || (fAll && (pUnmap->iova || pUnmap->size))  /* Everything is asked for with both being zero. */
+                || (!fAll && !pUnmap->size)
+                || pUnmap->iova + pUnmap->size < pUnmap->iova)
+                return errno = EINVAL, -1;
+
+            uint64_t cbUnmapped = 0;
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                if (   g_Krnl.aDma[i].idIoas == TSTVFIO_CONTAINER_IOAS
+                    && (   fAll
+                        || (   g_Krnl.aDma[i].uIova                       >= pUnmap->iova
+                            && g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb   <= pUnmap->iova + pUnmap->size)))
+                {
+                    cbUnmapped += g_Krnl.aDma[i].cb;
+                    RT_ZERO(g_Krnl.aDma[i]);
+                }
+            pUnmap->size = cbUnmapped;
+            return 0;
+        }
+
+        default:
+            return errno = ENOTTY, -1;
+    }
+}
+
+
+/**
+ * Handles an ioctl on the group (legacy interface).
+ *
+ * @returns The result of the request, -1 with errno set on failure.
+ * @param   uReq                The request.
+ * @param   pvArg               The argument.
+ */
+static int tstVfioKrnlGroupIoctl(unsigned long uReq, void *pvArg)
+{
+    switch (uReq)
+    {
+        case VFIO_GROUP_GET_STATUS:
+        {
+            struct vfio_group_status *pStatus = (struct vfio_group_status *)pvArg;
+            if (pStatus->argsz < sizeof(*pStatus))
+                return errno = EINVAL, -1;
+            pStatus->flags = VFIO_GROUP_FLAGS_VIABLE | (g_Krnl.fGroupInContainer ? VFIO_GROUP_FLAGS_CONTAINER_SET : 0);
+            return 0;
+        }
+
+        case VFIO_GROUP_SET_CONTAINER:
+        {
+            PTSTVFIOFD pFdContainer = tstVfioKrnlFdLookup(*(int *)pvArg);
+            if (!pFdContainer || pFdContainer->enmType != TSTVFIOFDTYPE_CONTAINER)
+                return errno = EBADF, -1;
+            if (g_Krnl.fGroupInContainer)
+                return errno = EINVAL, -1;
+            g_Krnl.fGroupInContainer = true;
+            return 0;
+        }
+
+        case VFIO_GROUP_GET_DEVICE_FD:
+        {
+            /* The functions are only handed out once the group is behind an IOMMU. */
+            if (!g_Krnl.fGroupInContainer || !g_Krnl.fContainerIommuSet)
+                return errno = EINVAL, -1;
+            const char *pszName = (const char *)pvArg;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                if (!strcmp(pszName, g_Krnl.aDevs[i].Cfg.szNode))
+                {
+                    PTSTVFIODEV pDev = &g_Krnl.aDevs[i];
+                    if (pDev->fGone)
+                        return errno = ENODEV, -1;
+                    int iFd = dup(pDev->iFdBacking);
+                    if (iFd == -1)
+                        return -1;
+                    if (!tstVfioKrnlFdRegister(iFd, TSTVFIOFDTYPE_DEVICE, pDev))
+                    {
+                        __real_close(iFd);
+                        return errno = EMFILE, -1;
+                    }
+                    pDev->cOpens++;
+                    pDev->fBound       = true;
+                    pDev->fGroupDevice = true;
+                    return iFd;
+                }
+            return errno = ENODEV, -1;
+        }
+
+        default:
+            return errno = ENOTTY, -1;
+    }
+}
+
+
+/**
+ * Handles VFIO_DEVICE_GET_REGION_INFO.
+ *
+ * @returns 0 on success, -1 with errno set on failure.
+ * @param   pDev                The PCI function.
+ * @param   pInfo               The region info structure.
+ */
+static int tstVfioKrnlDevGetRegionInfo(PTSTVFIODEV pDev, struct vfio_region_info *pInfo)
+{
+    if (   pInfo->argsz < sizeof(*pInfo)
+        || pInfo->index >= TSTVFIO_REGION_COUNT)
+        return errno = EINVAL, -1;
+
+    uint32_t const idxRegion = pInfo->index;
+    uint64_t const cbRegion  = pDev->acbRegions[idxRegion];
+    uint32_t       fFlags    = 0;
+    if (cbRegion)
+        fFlags = idxRegion == VFIO_PCI_CONFIG_REGION_INDEX
+               ? VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE
+               : pDev->Cfg.aRegions[idxRegion].fFlags & ~VFIO_REGION_INFO_FLAG_CAPS;
+
+    pInfo->size       = cbRegion;
+    pInfo->offset     = pDev->aoffRegions[idxRegion];
+    pInfo->cap_offset = 0;
+    if (   cbRegion
+        && idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
+        && pDev->Cfg.aRegions[idxRegion].fMsixMappable)
+    {
+        /* Like the real thing: Report the size required if the capability doesn't fit. */
+        uint32_t const cbNeeded = sizeof(*pInfo) + sizeof(struct vfio_info_cap_header);
+        fFlags |= VFIO_REGION_INFO_FLAG_CAPS;
+        if (pInfo->argsz >= cbNeeded)
+        {
+            struct vfio_info_cap_header *pCap = (struct vfio_info_cap_header *)(pInfo + 1);
+            pCap->id          = VFIO_REGION_INFO_CAP_MSIX_MAPPABLE;
+            pCap->version     = 1;
+            pCap->next        = 0;
+            pInfo->cap_offset = sizeof(*pInfo);
+        }
+        else
+            pInfo->argsz = cbNeeded;
+    }
+    pInfo->flags = fFlags;
+    return 0;
+}
+
+
+/**
+ * Handles VFIO_DEVICE_SET_IRQS.
+ *
+ * @returns 0 on success, -1 with errno set on failure.
+ * @param   pDev                The PCI function.
+ * @param   pSet                The request, followed by the data.
+ */
+static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
+{
+    uint32_t const fData   = pSet->flags & (VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_DATA_BOOL | VFIO_IRQ_SET_DATA_EVENTFD);
+    uint32_t const fAction = pSet->flags & (VFIO_IRQ_SET_ACTION_MASK | VFIO_IRQ_SET_ACTION_UNMASK | VFIO_IRQ_SET_ACTION_TRIGGER);
+    if (   pSet->argsz < sizeof(*pSet)
+        || pSet->index >= TSTVFIO_IRQ_INDEX_COUNT
+        || pSet->count >= UINT32_MAX - pSet->start
+        || (pSet->flags & ~(fData | fAction))
+        || !fData   || (fData   & (fData   - 1))   /* exactly one data type */
+        || !fAction || (fAction & (fAction - 1)))  /* exactly one action */
+        return errno = EINVAL, -1;
+
+    uint32_t const cIrqs = pDev->Cfg.acIrqs[pSet->index];
+    if (   pSet->start >= cIrqs
+        || pSet->start + pSet->count > cIrqs)
+    {
+        g_Krnl.cViolations++;
+        return errno = EINVAL, -1;
+    }
+
+    size_t cbItem = 0;
+    if (fData == VFIO_IRQ_SET_DATA_BOOL)
+        cbItem = sizeof(uint8_t);
+    else if (fData == VFIO_IRQ_SET_DATA_EVENTFD)
+        cbItem = sizeof(int32_t);
+    if (cbItem && pSet->argsz - sizeof(*pSet) < pSet->count * cbItem)
+        return errno = EINVAL, -1;
+
+    int * const paiFds = pDev->apaiIrqFds[pSet->index];
+    if (fAction == VFIO_IRQ_SET_ACTION_TRIGGER)
+    {
+        if (fData == VFIO_IRQ_SET_DATA_EVENTFD)
+        {
+            int32_t const *paiNew = (int32_t const *)(pSet + 1);
+            for (uint32_t i = 0; i < pSet->count; i++)
+            {
+                int iFdNew = -1;
+                if (paiNew[i] != -1)
+                {
+                    /* The copy stands for the eventfd of the caller, so it takes over its close-on-exec flag. */
+                    int const fFdFlags = fcntl(paiNew[i], F_GETFD);
+                    if (fFdFlags == -1)
+                        return -1;
+                    iFdNew = fcntl(paiNew[i], fFdFlags & FD_CLOEXEC ? F_DUPFD_CLOEXEC : F_DUPFD, 0);
+                    if (iFdNew == -1)
+                        return -1;
+                }
+                if (paiFds[pSet->start + i] != -1)
+                    __real_close(paiFds[pSet->start + i]);
+                paiFds[pSet->start + i] = iFdNew;
+            }
+        }
+        else if (fData == VFIO_IRQ_SET_DATA_NONE && !pSet->count)
+            tstVfioKrnlDevIrqDisable(pDev, pSet->index);
+        else
+        {
+            /* Loopback trigger. */
+            uint8_t const *pafFire = (uint8_t const *)(pSet + 1);
+            for (uint32_t i = 0; i < pSet->count; i++)
+                if (   (fData == VFIO_IRQ_SET_DATA_NONE || pafFire[i])
+                    && paiFds[pSet->start + i] != -1)
+                {
+                    uint64_t const uOne = 1;
+                    ssize_t cbWritten = write(paiFds[pSet->start + i], &uOne, sizeof(uOne));
+                    RT_NOREF(cbWritten);
+                }
+        }
+    }
+    else if (pSet->index == VFIO_PCI_INTX_IRQ_INDEX)
+        pDev->fIntxMasked = fAction == VFIO_IRQ_SET_ACTION_MASK;
+    else
+        return errno = EINVAL, -1; /* vfio-pci has no mask/unmask for MSI and MSI-X either. */
+
+    return 0;
+}
+
+
+/**
+ * Brings the config space of a PCI function back to its power-on content, as a
+ * reset does.
+ *
+ * @returns true on success, false on failure.
+ * @param   pDev                The PCI function.
+ */
+static bool tstVfioKrnlDevResetCfg(PTSTVFIODEV pDev)
+{
+    ssize_t cbWritten = __real_pwrite(pDev->iFdBacking, pDev->Cfg.abCfg, pDev->Cfg.cbCfg,
+                                      (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX]);
+    return cbWritten == (ssize_t)pDev->Cfg.cbCfg;
+}
+
+
+/**
+ * Handles an ioctl on a VFIO device.
+ *
+ * @returns 0 on success, -1 with errno set on failure.
+ * @param   pDev                The PCI function.
+ * @param   uReq                The request.
+ * @param   pvArg               The argument.
+ */
+static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg)
+{
+    if (pDev->fGone)
+        return errno = ENODEV, -1;
+
+    if (   pDev->fGroupDevice
+        && (   uReq == VFIO_DEVICE_BIND_IOMMUFD
+            || uReq == VFIO_DEVICE_ATTACH_IOMMUFD_PT
+            || uReq == VFIO_DEVICE_DETACH_IOMMUFD_PT))
+        return errno = ENOTTY, -1;
+
+    if (uReq == VFIO_DEVICE_BIND_IOMMUFD)
+    {
+        struct vfio_device_bind_iommufd *pBind = (struct vfio_device_bind_iommufd *)pvArg;
+        PTSTVFIOFD pFdIommu = tstVfioKrnlFdLookup((int)pBind->iommufd);
+        if (   pBind->argsz < RT_UOFFSETOF(struct vfio_device_bind_iommufd, token_uuid_ptr)
+            || pBind->flags
+            || pDev->fBound)
+            return errno = EINVAL, -1;
+        if (!pFdIommu || pFdIommu->enmType != TSTVFIOFDTYPE_IOMMU)
+            return errno = EBADF, -1;
+        pDev->fBound     = true;
+        pBind->out_devid = (uint32_t)(pDev - &g_Krnl.aDevs[0]) + 1;
+        return 0;
+    }
+
+    /* Nothing else works on a device which isn't bound yet. */
+    if (!pDev->fBound)
+        return errno = EINVAL, -1;
+
+    switch (uReq)
+    {
+        case VFIO_DEVICE_ATTACH_IOMMUFD_PT:
+        {
+            struct vfio_device_attach_iommufd_pt *pAttach = (struct vfio_device_attach_iommufd_pt *)pvArg;
+            if (pAttach->argsz < RT_UOFFSETOF(struct vfio_device_attach_iommufd_pt, pasid) || pAttach->flags)
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlIoasExists(pAttach->pt_id))
+                return errno = ENOENT, -1;
+            if (pDev->Cfg.fNoIommu) /* Binding it went fine, but there is nothing to attach. */
+                return errno = EINVAL, -1;
+            pDev->idIoas = pAttach->pt_id;
+            return 0;
+        }
+
+        case VFIO_DEVICE_DETACH_IOMMUFD_PT:
+        {
+            struct vfio_device_detach_iommufd_pt *pDetach = (struct vfio_device_detach_iommufd_pt *)pvArg;
+            if (pDetach->argsz < RT_UOFFSETOF(struct vfio_device_detach_iommufd_pt, pasid) || pDetach->flags)
+                return errno = EINVAL, -1;
+            pDev->idIoas = 0;
+            return 0;
+        }
+
+        case VFIO_DEVICE_GET_INFO:
+        {
+            struct vfio_device_info *pInfo = (struct vfio_device_info *)pvArg;
+            if (pInfo->argsz < RT_UOFFSETOF(struct vfio_device_info, cap_offset))
+                return errno = EINVAL, -1;
+            pInfo->flags       = (pDev->Cfg.fNotPci ? RT_BIT_32(2) /* a platform device */ : VFIO_DEVICE_FLAGS_PCI) | VFIO_DEVICE_FLAGS_RESET;
+            pInfo->num_regions = TSTVFIO_REGION_COUNT;
+            pInfo->num_irqs    = TSTVFIO_IRQ_INDEX_COUNT;
+            if (pInfo->argsz >= sizeof(*pInfo))
+            {
+                pInfo->cap_offset = 0;
+                pInfo->pad        = 0;
+            }
+            return 0;
+        }
+
+        case VFIO_DEVICE_GET_REGION_INFO:
+            return tstVfioKrnlDevGetRegionInfo(pDev, (struct vfio_region_info *)pvArg);
+
+        case VFIO_DEVICE_GET_IRQ_INFO:
+        {
+            struct vfio_irq_info *pInfo = (struct vfio_irq_info *)pvArg;
+            if (   pInfo->argsz < sizeof(*pInfo)
+                || pInfo->index >= TSTVFIO_IRQ_INDEX_COUNT)
+                return errno = EINVAL, -1;
+            pInfo->count = pDev->Cfg.acIrqs[pInfo->index];
+            pInfo->flags = VFIO_IRQ_INFO_EVENTFD;
+            if (pInfo->index == VFIO_PCI_INTX_IRQ_INDEX)
+                pInfo->flags |= VFIO_IRQ_INFO_MASKABLE | VFIO_IRQ_INFO_AUTOMASKED;
+            else
+                pInfo->flags |= VFIO_IRQ_INFO_NORESIZE;
+            return 0;
+        }
+
+        case VFIO_DEVICE_SET_IRQS:
+            return tstVfioKrnlDevSetIrqs(pDev, (struct vfio_irq_set *)pvArg);
+
+        case VFIO_DEVICE_RESET:
+        {
+            if (pDev->Cfg.fNoFunctionReset)
+                return errno = EINVAL, -1;
+            if (!tstVfioKrnlDevResetCfg(pDev))
+                return errno = EIO, -1;
+            pDev->cResets++;
+            return 0;
+        }
+
+        case VFIO_DEVICE_PCI_HOT_RESET:
+        {
+            /* All functions are on one bus.  Owning them is shown with the group if that is where the
+               function comes from, it goes by the IOMMUFD context otherwise and there are no descriptors. */
+            struct vfio_pci_hot_reset *pReset = (struct vfio_pci_hot_reset *)pvArg;
+            if (pReset->argsz < sizeof(*pReset) || pReset->flags)
+                return errno = EINVAL, -1;
+            if (pDev->fGroupDevice)
+            {
+                int32_t const *paiFdGroups = (int32_t const *)(pReset + 1);
+                if (   !pReset->count
+                    || pReset->argsz < sizeof(*pReset) + pReset->count * sizeof(int32_t))
+                    return errno = EINVAL, -1;
+                for (uint32_t i = 0; i < pReset->count; i++)
+                {
+                    PTSTVFIOFD pFdGroup = tstVfioKrnlFdLookup(paiFdGroups[i]);
+                    if (!pFdGroup || pFdGroup->enmType != TSTVFIOFDTYPE_GROUP)
+                        return errno = EBADF, -1;
+                }
+            }
+            else if (pReset->count)
+                return errno = EINVAL, -1;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                if (g_Krnl.aDevs[i].Cfg.fNoBusReset)
+                    return errno = EPERM, -1;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+            {
+                if (!tstVfioKrnlDevResetCfg(&g_Krnl.aDevs[i]))
+                    return errno = EIO, -1;
+                g_Krnl.aDevs[i].cBusResets++;
+            }
+            return 0;
+        }
+
+        default:
+            return errno = ENOTTY, -1;
+    }
+}
+
+
+/**
+ * Opens a node of the fake kernel.
+ *
+ * @returns File descriptor, -1 with errno set on failure, -2 if the path is not ours.
+ * @param   pszPath             The path being opened.
+ * @param   fFlags              The open flags, O_CLOEXEC is honoured.
+ */
+static int tstVfioKrnlOpen(const char *pszPath, int fFlags)
+{
+    if (!g_Krnl.fInitialized || !pszPath)
+        return -2;
+
+    bool const fIommu = !strcmp(pszPath, TSTVFIO_IOMMU_NODE);
+    if (!fIommu && strncmp(pszPath, RT_STR_TUPLE("/dev/vfio/")))
+        return -2;
+
+    int iFd = -1;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    if (   !strcmp(pszPath, TSTVFIO_CONTAINER_NODE)
+        || !strcmp(pszPath, TSTVFIO_GROUP_NODE))
+    {
+        /* The legacy interface. */
+        errno = ENOENT;
+        if (g_Krnl.fLegacy)
+        {
+            iFd = tstVfioKrnlMemFdCreate();
+            if (   iFd != -1
+                && !tstVfioKrnlFdRegister(iFd, !strcmp(pszPath, TSTVFIO_GROUP_NODE) ? TSTVFIOFDTYPE_GROUP : TSTVFIOFDTYPE_CONTAINER,
+                                          NULL))
+            {
+                __real_close(iFd);
+                iFd   = -1;
+                errno = EMFILE;
+            }
+        }
+    }
+    else if (g_Krnl.fLegacy)
+        errno = ENOENT; /* Neither the IOMMUFD nor device nodes with the legacy interface only. */
+    else if (fIommu)
+    {
+        iFd = tstVfioKrnlMemFdCreate();
+        if (iFd != -1 && !tstVfioKrnlFdRegister(iFd, TSTVFIOFDTYPE_IOMMU, NULL))
+        {
+            __real_close(iFd);
+            iFd   = -1;
+            errno = EMFILE;
+        }
+    }
+    else
+    {
+        /* Never let an unknown VFIO path through to the real host. */
+        errno = ENOENT;
+        for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+            if (!strcmp(pszPath, g_Krnl.aDevs[i].Cfg.szNode))
+            {
+                PTSTVFIODEV pDev = &g_Krnl.aDevs[i];
+                if (pDev->fGone)
+                    errno = ENODEV;
+                else
+                {
+                    iFd = dup(pDev->iFdBacking);
+                    if (iFd != -1)
+                    {
+                        if (tstVfioKrnlFdRegister(iFd, TSTVFIOFDTYPE_DEVICE, pDev))
+                            pDev->cOpens++;
+                        else
+                        {
+                            __real_close(iFd);
+                            iFd   = -1;
+                            errno = EMFILE;
+                        }
+                    }
+                }
+                break;
+            }
+    }
+    RTCritSectLeave(&g_Krnl.CritSect);
+    if (iFd != -1 && (fFlags & O_CLOEXEC))
+        fcntl(iFd, F_SETFD, FD_CLOEXEC);
+    return iFd;
+}
+
+
+/**
+ * Checks a read from or a write to a file descriptor the way the kernel does
+ * it for a device: the device has to be there and the region has to allow it.
+ *
+ * @returns 0 if the access may go ahead, which is also the case for file
+ *          descriptors which are not ours, an errno value if not.
+ * @param   iFd                 The file descriptor.
+ * @param   off                 Offset of the access.
+ * @param   fWrite              Whether this is a write (true) or a read (false).
+ */
+static int tstVfioKrnlCheckFdAccess(int iFd, off_t off, bool fWrite)
+{
+    int iErrno = 0;
+    if (g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd && pFd->enmType == TSTVFIOFDTYPE_DEVICE)
+        {
+            PTSTVFIODEV    pDev      = pFd->pDev;
+            uint64_t const idxRegion = (uint64_t)off >> TSTVFIO_REGION_SHIFT;
+            uint64_t const offRegion = (uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1);
+            if (pDev->fGone)
+                iErrno = ENODEV;
+            else if (   idxRegion >= TSTVFIO_REGION_COUNT
+                     || offRegion >= pDev->acbRegions[idxRegion])
+            {
+                g_Krnl.cViolations++;
+                iErrno = EINVAL;
+            }
+            else if (   idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
+                     && !(  pDev->Cfg.aRegions[idxRegion].fFlags
+                          & (fWrite ? VFIO_REGION_INFO_FLAG_WRITE : VFIO_REGION_INFO_FLAG_READ)))
+                iErrno = EINVAL;
+            else if (   idxRegion <= VFIO_PCI_BAR5_REGION_INDEX
+                     && !(pDev->Cfg.abCfg[VBOX_PCI_BASE_ADDRESS_0 + idxRegion * 4] & PCI_ADDRESS_SPACE_IO))
+            {
+                /* A memory BAR is out of reach while the function doesn't decode memory. */
+                uint16_t u16Cmd = 0;
+                if (   __real_pread(pDev->iFdBacking, &u16Cmd, sizeof(u16Cmd),
+                                    (off_t)(pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX] + VBOX_PCI_COMMAND)) != sizeof(u16Cmd)
+                    || !(u16Cmd & VBOX_PCI_COMMAND_MEMORY))
+                    iErrno = EIO;
+            }
+        }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return iErrno;
+}
+
+
+/*
+ *
+ * Interface for the tests.
+ * Interface for the tests.
+ * Interface for the tests.
+ *
+ */
+
+/**
+ * Initializes the fake kernel.
+ *
+ * @returns VBox status code.
+ */
+int tstVfioKrnlInit(void)
+{
+    AssertReturn(!g_Krnl.fInitialized, VERR_WRONG_ORDER);
+
+    RT_ZERO(g_Krnl);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+        g_Krnl.aFds[i].iFd = -1;
+    g_Krnl.idIoasNext = 1;
+
+    int rc = RTCritSectInit(&g_Krnl.CritSect);
+    if (RT_SUCCESS(rc))
+        g_Krnl.fInitialized = true;
+    return rc;
+}
+
+
+/**
+ * Terminates the fake kernel, releasing all PCI functions.
+ *
+ * File descriptors the device under test has leaked are closed here; use
+ * tstVfioKrnlGetOpenFdCount() before calling this to detect leaks.
+ */
+void tstVfioKrnlTerm(void)
+{
+    if (!g_Krnl.fInitialized)
+        return;
+
+    g_Krnl.fInitialized = false;
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+        if (g_Krnl.aFds[i].enmType != TSTVFIOFDTYPE_FREE)
+            __real_close(g_Krnl.aFds[i].iFd);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+        if (g_Krnl.aMaps[i].pv)
+            munmap(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb);
+
+    for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+    {
+        PTSTVFIODEV pDev = &g_Krnl.aDevs[i];
+        for (uint32_t iRegion = 0; iRegion < RT_ELEMENTS(pDev->apvRegions); iRegion++)
+            if (pDev->apvRegions[iRegion])
+                munmap(pDev->apvRegions[iRegion], pDev->acbRegions[iRegion]);
+        for (uint32_t iIrq = 0; iIrq < RT_ELEMENTS(pDev->apaiIrqFds); iIrq++)
+            if (pDev->apaiIrqFds[iIrq])
+            {
+                tstVfioKrnlDevIrqDisable(pDev, iIrq);
+                RTMemFree(pDev->apaiIrqFds[iIrq]);
+            }
+        __real_close(pDev->iFdBacking);
+    }
+
+    RTCritSectDelete(&g_Krnl.CritSect);
+    RT_ZERO(g_Krnl);
+}
+
+
+/**
+ * Adds a PCI function to the fake kernel.
+ *
+ * @returns VBox status code.
+ * @param   pCfg                The description of the function, copied.
+ * @param   ppDev               Where to return the handle.
+ */
+int tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev)
+{
+    AssertReturn(g_Krnl.fInitialized, VERR_WRONG_ORDER);
+    AssertReturn(g_Krnl.cDevs < RT_ELEMENTS(g_Krnl.aDevs), VERR_OUT_OF_RESOURCES);
+    AssertReturn(pCfg->cbCfg == 256 || pCfg->cbCfg == 4096, VERR_INVALID_PARAMETER);
+    AssertReturn(RTStrEnd(pCfg->szNode, sizeof(pCfg->szNode)), VERR_INVALID_PARAMETER);
+
+    PTSTVFIODEV pDev = &g_Krnl.aDevs[g_Krnl.cDevs];
+    RT_ZERO(*pDev);
+    pDev->Cfg = *pCfg;
+    for (uint32_t i = 0; i < TSTVFIO_REGION_COUNT; i++)
+    {
+        pDev->aoffRegions[i] = (uint64_t)i << TSTVFIO_REGION_SHIFT;
+        pDev->acbRegions[i]  = i == VFIO_PCI_CONFIG_REGION_INDEX ? pCfg->cbCfg : pCfg->aRegions[i].cb;
+        AssertReturn(pDev->acbRegions[i] <= RT_BIT_64(TSTVFIO_REGION_SHIFT), VERR_INVALID_PARAMETER);
+    }
+
+    int rc = VINF_SUCCESS;
+    pDev->iFdBacking = tstVfioKrnlMemFdCreate();
+    if (pDev->iFdBacking == -1)
+        return RTErrConvertFromErrno(errno);
+    if (ftruncate(pDev->iFdBacking, (off_t)((uint64_t)TSTVFIO_REGION_COUNT << TSTVFIO_REGION_SHIFT)) != 0)
+        rc = RTErrConvertFromErrno(errno);
+    else if (   __real_pwrite(pDev->iFdBacking, pCfg->abCfg, pCfg->cbCfg, (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX])
+             != (ssize_t)pCfg->cbCfg)
+        rc = RTErrConvertFromErrno(errno);
+
+    for (uint32_t i = 0; i < TSTVFIO_IRQ_INDEX_COUNT && RT_SUCCESS(rc); i++)
+        if (pCfg->acIrqs[i])
+        {
+            pDev->apaiIrqFds[i] = (int *)RTMemAlloc(pCfg->acIrqs[i] * sizeof(int));
+            if (pDev->apaiIrqFds[i])
+                for (uint32_t iIrq = 0; iIrq < pCfg->acIrqs[i]; iIrq++)
+                    pDev->apaiIrqFds[i][iIrq] = -1;
+            else
+                rc = VERR_NO_MEMORY;
+        }
+
+    if (RT_SUCCESS(rc))
+    {
+        g_Krnl.cDevs++;
+        *ppDev = pDev;
+    }
+    else
+    {
+        for (uint32_t i = 0; i < TSTVFIO_IRQ_INDEX_COUNT; i++)
+            RTMemFree(pDev->apaiIrqFds[i]);
+        __real_close(pDev->iFdBacking);
+        RT_ZERO(*pDev);
+    }
+    return rc;
+}
+
+
+/**
+ * Puts another PCI function into the place of one nobody has open, like
+ * plugging another device in where one was pulled, or the same one again.
+ *
+ * @returns VBox status code, VERR_RESOURCE_BUSY if the function is open.
+ * @param   pDev                The PCI function.
+ * @param   pCfg                The description of the new function, copied.  It is reachable
+ *                              where the old one was whatever the description says.
+ */
+int tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg)
+{
+    AssertReturn(g_Krnl.fInitialized, VERR_WRONG_ORDER);
+    AssertReturn(pCfg->cbCfg == 256 || pCfg->cbCfg == 4096, VERR_INVALID_PARAMETER);
+
+    int rc = VINF_SUCCESS;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    if (pDev->cOpens == 0)
+    {
+        /* What the test has mapped of the old one, and its interrupts. */
+        for (uint32_t iRegion = 0; iRegion < RT_ELEMENTS(pDev->apvRegions); iRegion++)
+            if (pDev->apvRegions[iRegion])
+            {
+                munmap(pDev->apvRegions[iRegion], pDev->acbRegions[iRegion]);
+                pDev->apvRegions[iRegion] = NULL;
+            }
+        for (uint32_t i = 0; i < TSTVFIO_IRQ_INDEX_COUNT; i++)
+        {
+            RTMemFree(pDev->apaiIrqFds[i]);
+            pDev->apaiIrqFds[i] = NULL;
+        }
+
+        /* The new one, with the node of the old one. */
+        char szNode[sizeof(pDev->Cfg.szNode)];
+        memcpy(szNode, pDev->Cfg.szNode, sizeof(szNode));
+        pDev->Cfg = *pCfg;
+        memcpy(pDev->Cfg.szNode, szNode, sizeof(szNode));
+        for (uint32_t i = 0; i < TSTVFIO_REGION_COUNT; i++)
+            pDev->acbRegions[i] = i == VFIO_PCI_CONFIG_REGION_INDEX ? pCfg->cbCfg : pCfg->aRegions[i].cb;
+        if (   ftruncate(pDev->iFdBacking, 0) != 0
+            || ftruncate(pDev->iFdBacking, (off_t)((uint64_t)TSTVFIO_REGION_COUNT << TSTVFIO_REGION_SHIFT)) != 0
+            ||    __real_pwrite(pDev->iFdBacking, pCfg->abCfg, pCfg->cbCfg, (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX])
+               != (ssize_t)pCfg->cbCfg)
+            rc = RTErrConvertFromErrno(errno);
+        for (uint32_t i = 0; i < TSTVFIO_IRQ_INDEX_COUNT && RT_SUCCESS(rc); i++)
+            if (pCfg->acIrqs[i])
+            {
+                pDev->apaiIrqFds[i] = (int *)RTMemAlloc(pCfg->acIrqs[i] * sizeof(int));
+                if (pDev->apaiIrqFds[i])
+                    for (uint32_t iIrq = 0; iIrq < pCfg->acIrqs[i]; iIrq++)
+                        pDev->apaiIrqFds[i][iIrq] = -1;
+                else
+                    rc = VERR_NO_MEMORY;
+            }
+
+        /* It is there and it answers. */
+        pDev->fGone       = false;
+        pDev->fRemoved    = false;
+        pDev->fIntxMasked = false;
+    }
+    else
+        rc = VERR_RESOURCE_BUSY;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return rc;
+}
+
+
+/**
+ * Returns a pointer to the memory of a region of the PCI function, for
+ * inspecting what the guest wrote and for preparing what it will read.
+ *
+ * @returns Pointer to the start of the region, NULL on failure.
+ * @param   pDev                The PCI function.
+ * @param   iRegion             The VFIO region index.
+ */
+void *tstVfioKrnlDevGetRegionPtr(PTSTVFIODEV pDev, uint32_t iRegion)
+{
+    AssertReturn(iRegion < TSTVFIO_REGION_COUNT, NULL);
+    AssertReturn(pDev->acbRegions[iRegion], NULL);
+
+    if (!pDev->apvRegions[iRegion])
+    {
+        void *pv = mmap(NULL, pDev->acbRegions[iRegion], PROT_READ | PROT_WRITE, MAP_SHARED,
+                        pDev->iFdBacking, (off_t)pDev->aoffRegions[iRegion]);
+        AssertReturn(pv != MAP_FAILED, NULL);
+        pDev->apvRegions[iRegion] = pv;
+    }
+    return pDev->apvRegions[iRegion];
+}
+
+
+/**
+ * Lets the PCI function raise an interrupt.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if no eventfd is registered for the vector.
+ * @retval  VERR_INVALID_STATE if the interrupt is INTx and it is masked.
+ * @param   pDev                The PCI function.
+ * @param   uIrqIndex           The VFIO interrupt index.
+ * @param   uVector             The vector within the index.
+ */
+int tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVector)
+{
+    AssertReturn(uIrqIndex < TSTVFIO_IRQ_INDEX_COUNT, VERR_INVALID_PARAMETER);
+    AssertReturn(uVector < pDev->Cfg.acIrqs[uIrqIndex], VERR_INVALID_PARAMETER);
+
+    int rc = VINF_SUCCESS;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    if (pDev->apaiIrqFds[uIrqIndex][uVector] == -1)
+        rc = VERR_NOT_FOUND;
+    else if (uIrqIndex == VFIO_PCI_INTX_IRQ_INDEX && pDev->fIntxMasked)
+        rc = VERR_INVALID_STATE;
+    else
+    {
+        uint64_t const uOne = 1;
+        if (write(pDev->apaiIrqFds[uIrqIndex][uVector], &uOne, sizeof(uOne)) != (ssize_t)sizeof(uOne))
+            rc = RTErrConvertFromErrno(errno);
+        else
+        {
+            pDev->acIrqsTriggered[uIrqIndex]++;
+            /* INTx is level triggered and masked by vfio-pci until the user unmasks it. */
+            if (uIrqIndex == VFIO_PCI_INTX_IRQ_INDEX)
+                pDev->fIntxMasked = true;
+        }
+    }
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return rc;
+}
+
+
+/**
+ * Returns the number of vectors the user has registered eventfds for.
+ *
+ * @returns Number of vectors with an eventfd.
+ * @param   pDev                The PCI function.
+ * @param   uIrqIndex           The VFIO interrupt index.
+ */
+uint32_t tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex)
+{
+    AssertReturn(uIrqIndex < TSTVFIO_IRQ_INDEX_COUNT, 0);
+
+    uint32_t cIrqs = 0;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (uint32_t i = 0; i < pDev->Cfg.acIrqs[uIrqIndex]; i++)
+        if (pDev->apaiIrqFds[uIrqIndex][i] != -1)
+            cIrqs++;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cIrqs;
+}
+
+
+/**
+ * Returns the number of resets the user has requested for the PCI function.
+ *
+ * @returns Number of resets.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev)
+{
+    return pDev->cResets;
+}
+
+
+/**
+ * Returns the number of resets of the bus the PCI function is on.
+ *
+ * @returns Number of bus resets.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetBusResetCount(PTSTVFIODEV pDev)
+{
+    return pDev->cBusResets;
+}
+
+
+/**
+ * Makes the mappings the user of a PCI function has of its regions unusable, or
+ * usable again.  The kernel does that at times, touching such a mapping gets the
+ * process a signal.
+ *
+ * @param   pDev                The PCI function.
+ * @param   fProtect            Whether to make the mappings unusable (true) or usable (false).
+ */
+void tstVfioKrnlDevProtectMappings(PTSTVFIODEV pDev, bool fProtect)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+        if (g_Krnl.aMaps[i].pv && g_Krnl.aMaps[i].pDev == pDev)
+            mprotect(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb, fProtect ? PROT_NONE : PROT_READ | PROT_WRITE);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Sets the callback for writes to the config space of the PCI functions.
+ *
+ * @param   pfnHook             The callback, NULL for none.
+ * @param   pvUser              The user argument for the callback.
+ */
+void tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.pfnCfgWriteHook    = pfnHook;
+    g_Krnl.pvCfgWriteHookUser = pvUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Returns the number of file descriptors open for the PCI function.
+ *
+ * @returns Number of open file descriptors.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev)
+{
+    return pDev->cOpens;
+}
+
+
+/**
+ * Removes the PCI function from the host or brings it back.
+ *
+ * While the function is gone, every ioctl, read and write on its file
+ * descriptors fails and it cannot be opened.
+ *
+ * @param   pDev                The PCI function.
+ * @param   fGone               The new state.
+ */
+void tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    pDev->fGone = fGone;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Signals one of the notifications of a PCI function to its user.
+ *
+ * @param   pDev                The PCI function.
+ * @param   uIrqIndex           VFIO_PCI_REQ_IRQ_INDEX or VFIO_PCI_ERR_IRQ_INDEX.
+ */
+static void tstVfioKrnlDevNotify(PTSTVFIODEV pDev, uint32_t uIrqIndex)
+{
+    if (   pDev->apaiIrqFds[uIrqIndex]
+        && pDev->apaiIrqFds[uIrqIndex][0] != -1)
+    {
+        uint64_t const uOne      = 1;
+        ssize_t const  cbWritten = write(pDev->apaiIrqFds[uIrqIndex][0], &uOne, sizeof(uOne));
+        RT_NOREF(cbWritten);
+    }
+}
+
+
+/**
+ * Asks the user of a PCI function to let go of it, like the host does when the
+ * driver is to be unbound from a device which is still there.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevRequest(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    tstVfioKrnlDevNotify(pDev, VFIO_PCI_REQ_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Removes a PCI function from the host for good, like pulling the plug: it
+ * stops answering, its user is asked to let go of it, and once that has
+ * happened what the user still has mapped of it is unusable.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevRemove(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    pDev->fGone    = true;
+    pDev->fRemoved = true;
+    if (!pDev->cOpens) /* Nobody to ask. */
+        tstVfioKrnlDevRelease(pDev);
+    else
+        tstVfioKrnlDevNotify(pDev, VFIO_PCI_REQ_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Reports an error of a PCI function which the host can't recover from to its user.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevSignalError(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    tstVfioKrnlDevNotify(pDev, VFIO_PCI_ERR_IRQ_INDEX);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Returns the number of file descriptors of the fake kernel which are open.
+ *
+ * @returns Number of open file descriptors.
+ */
+uint32_t tstVfioKrnlGetOpenFdCount(void)
+{
+    uint32_t cFds = 0;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+        if (g_Krnl.aFds[i].enmType != TSTVFIOFDTYPE_FREE)
+            cFds++;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cFds;
+}
+
+
+/**
+ * Counts the file descriptors a process started by this one would inherit:
+ * those of the fake kernel and the eventfds registered for interrupts.
+ *
+ * @returns Number of file descriptors without the close-on-exec flag.
+ */
+uint32_t tstVfioKrnlGetInheritableFdCount(void)
+{
+    uint32_t cFds = 0;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aFds); i++)
+        if (   g_Krnl.aFds[i].enmType != TSTVFIOFDTYPE_FREE
+            && !(fcntl(g_Krnl.aFds[i].iFd, F_GETFD) & FD_CLOEXEC))
+            cFds++;
+    for (uint32_t iDev = 0; iDev < g_Krnl.cDevs; iDev++)
+        for (uint32_t uIrqIndex = 0; uIrqIndex < RT_ELEMENTS(g_Krnl.aDevs[iDev].apaiIrqFds); uIrqIndex++)
+            if (g_Krnl.aDevs[iDev].apaiIrqFds[uIrqIndex])
+                for (uint32_t i = 0; i < g_Krnl.aDevs[iDev].Cfg.acIrqs[uIrqIndex]; i++)
+                    if (   g_Krnl.aDevs[iDev].apaiIrqFds[uIrqIndex][i] != -1
+                        && !(fcntl(g_Krnl.aDevs[iDev].apaiIrqFds[uIrqIndex][i], F_GETFD) & FD_CLOEXEC))
+                        cFds++;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cFds;
+}
+
+
+/**
+ * Selects what the fake kernel has: the IOMMUFD with the device nodes, or the
+ * legacy interface with a container and a group all functions are in.
+ *
+ * @param   fLegacy             Whether to have the legacy interface only.
+ */
+void tstVfioKrnlSetLegacy(bool fLegacy)
+{
+    g_Krnl.fLegacy = fLegacy;
+}
+
+
+/**
+ * Returns the number of requests the fake kernel has refused for being out of
+ * bounds since it was initialized.
+ *
+ * @returns Number of such requests.
+ */
+uint32_t tstVfioKrnlGetViolationCount(void)
+{
+    return g_Krnl.cViolations;
+}
+
+
+/**
+ * Returns the number of bytes mapped for DMA in all I/O address spaces.
+ *
+ * @returns Number of bytes.
+ */
+uint64_t tstVfioKrnlGetDmaMappedBytes(void)
+{
+    uint64_t cb = 0;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+        if (g_Krnl.aDma[i].idIoas)
+            cb += g_Krnl.aDma[i].cb;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cb;
+}
+
+
+/**
+ * Checks whether an I/O virtual address range is completely mapped for DMA
+ * in any I/O address space.
+ *
+ * @returns true if every byte of the range is mapped, false otherwise.
+ * @param   uIova               Start of the range.
+ * @param   cb                  Size of the range.
+ */
+bool tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb)
+{
+    uint64_t const uEnd = uIova + cb;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    bool fProgress = true;
+    while (uIova < uEnd && fProgress)
+    {
+        fProgress = false;
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+            if (   g_Krnl.aDma[i].idIoas
+                && uIova >= g_Krnl.aDma[i].uIova
+                && uIova <  g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb)
+            {
+                uIova     = g_Krnl.aDma[i].uIova + g_Krnl.aDma[i].cb;
+                fProgress = true;
+                break;
+            }
+    }
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return uIova >= uEnd;
+}
+
+
+/**
+ * Arms a single ioctl failure.
+ *
+ * @param   uReq                The ioctl request to fail.
+ * @param   cSkip               Number of matching requests to let pass before failing one.
+ * @param   iErrno              The errno to fail with, 0 to disarm.
+ */
+void tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.fFailArmed = iErrno != 0;
+    g_Krnl.uFailReq   = uReq;
+    g_Krnl.cFailSkip  = cSkip;
+    g_Krnl.iFailErrno = iErrno;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Makes the next mappings of ordinary memory at a given address fail, which is
+ * what takes the place of device memory when a device is let go of.
+ *
+ * @param   cTimes              How many of them fail, 0 for none.
+ */
+void tstVfioKrnlFailPlaceholderMmap(uint32_t cTimes)
+{
+    ASMAtomicWriteU32(&g_Krnl.cFailPlaceholderMaps, cTimes);
+}
+
+
+/**
+ * Sets a function which is called before ordinary memory gets mapped at a
+ * given address, which is when a device is in the middle of being let go of.
+ *
+ * @param   pfnHook             The function, NULL for none.
+ * @param   pvUser              The user argument.
+ */
+void tstVfioKrnlSetPlaceholderMmapHook(PFNTSTVFIOMMAPHOOK pfnHook, void *pvUser)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.pfnPlaceholderHook    = pfnHook;
+    g_Krnl.pvPlaceholderHookUser = pvUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Checks whether a mapping is one which was asked to fail.
+ *
+ * @returns true if the mapping is to fail, false if not.
+ * @param   fFlags              The flags of the mapping, MAP_XXX.
+ */
+static bool tstVfioKrnlIsMmapToFail(int fFlags)
+{
+    if (   (fFlags & (MAP_FIXED | MAP_ANONYMOUS)) != (MAP_FIXED | MAP_ANONYMOUS)
+        || !g_Krnl.fInitialized)
+        return false;
+
+    RTCritSectEnter(&g_Krnl.CritSect);
+    PFNTSTVFIOMMAPHOOK const pfnHook = g_Krnl.pfnPlaceholderHook;
+    void * const             pvUser  = g_Krnl.pvPlaceholderHookUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    if (pfnHook)
+        pfnHook(pvUser);
+
+    for (;;)
+    {
+        uint32_t const cLeft = ASMAtomicReadU32(&g_Krnl.cFailPlaceholderMaps);
+        if (!cLeft)
+            return false;
+        if (ASMAtomicCmpXchgU32(&g_Krnl.cFailPlaceholderMaps, cLeft - 1, cLeft))
+            return true;
+    }
+}
+
+
+/*
+ *
+ * The wrappers, see GNU ld --wrap.
+ * The wrappers, see GNU ld --wrap.
+ * The wrappers, see GNU ld --wrap.
+ *
+ */
+
+int __wrap_open(const char *pszPath, int fFlags, ...)
+{
+    int iFd = tstVfioKrnlOpen(pszPath, fFlags);
+    if (iFd != -2)
+        return iFd;
+
+    int fMode = 0;
+    if ((fFlags & O_CREAT) || (fFlags & O_TMPFILE) == O_TMPFILE)
+    {
+        va_list va;
+        va_start(va, fFlags);
+        fMode = va_arg(va, int);
+        va_end(va);
+    }
+    return __real_open(pszPath, fFlags, fMode);
+}
+
+
+int __wrap_open64(const char *pszPath, int fFlags, ...)
+{
+    int iFd = tstVfioKrnlOpen(pszPath, fFlags);
+    if (iFd != -2)
+        return iFd;
+
+    int fMode = 0;
+    if ((fFlags & O_CREAT) || (fFlags & O_TMPFILE) == O_TMPFILE)
+    {
+        va_list va;
+        va_start(va, fFlags);
+        fMode = va_arg(va, int);
+        va_end(va);
+    }
+    return __real_open64(pszPath, fFlags, fMode);
+}
+
+
+/**
+ * Forgets about a file descriptor which gets closed or replaced by something
+ * else, releasing what it stands for.
+ *
+ * @param   iFd                 The file descriptor.
+ */
+static void tstVfioKrnlFdForget(int iFd)
+{
+    if (g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd)
+        {
+            if (pFd->enmType == TSTVFIOFDTYPE_DEVICE)
+            {
+                PTSTVFIODEV pDev = pFd->pDev;
+                Assert(pDev->cOpens > 0);
+                if (--pDev->cOpens == 0)
+                    tstVfioKrnlDevRelease(pDev);
+            }
+            else if (pFd->enmType == TSTVFIOFDTYPE_IOMMU)
+            {
+                /* Closing the IOMMUFD context destroys everything which lives in it. */
+                for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                    g_Krnl.aDevs[i].idIoas = 0;
+                RT_ZERO(g_Krnl.aDma);
+                RT_ZERO(g_Krnl.aidIoas);
+            }
+            else if (pFd->enmType == TSTVFIOFDTYPE_CONTAINER)
+            {
+                /* The mappings go with the container. */
+                for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aDma); i++)
+                    if (g_Krnl.aDma[i].idIoas == TSTVFIO_CONTAINER_IOAS)
+                        RT_ZERO(g_Krnl.aDma[i]);
+                g_Krnl.fContainerIommuSet = false;
+                g_Krnl.fGroupInContainer  = false;
+            }
+            else
+                g_Krnl.fGroupInContainer = false;
+            pFd->enmType = TSTVFIOFDTYPE_FREE;
+            pFd->iFd     = -1;
+            pFd->pDev    = NULL;
+        }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+}
+
+
+int __wrap_close(int iFd)
+{
+    tstVfioKrnlFdForget(iFd);
+    return __real_close(iFd);
+}
+
+
+/**
+ * Takes note of a file descriptor having been duplicated: a PCI function stays
+ * open until the last file descriptor referring to it is closed.
+ *
+ * @param   iFdOld              The file descriptor which was duplicated.
+ * @param   iFdNew              The duplicate.
+ */
+static void tstVfioKrnlFdDuplicated(int iFdOld, int iFdNew)
+{
+    if (g_Krnl.fInitialized && iFdOld != iFdNew)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFdOld = tstVfioKrnlFdLookup(iFdOld);
+        if (   pFdOld
+            && pFdOld->enmType == TSTVFIOFDTYPE_DEVICE
+            && tstVfioKrnlFdRegister(iFdNew, TSTVFIOFDTYPE_DEVICE, pFdOld->pDev))
+            pFdOld->pDev->cOpens++;
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+}
+
+
+int __wrap_dup2(int iFdOld, int iFdNew)
+{
+    /* What the new file descriptor number stood for is closed by this. */
+    if (iFdOld != iFdNew)
+        tstVfioKrnlFdForget(iFdNew);
+    int const rcLnx = __real_dup2(iFdOld, iFdNew);
+    if (rcLnx != -1)
+        tstVfioKrnlFdDuplicated(iFdOld, iFdNew);
+    return rcLnx;
+}
+
+
+int __wrap_dup3(int iFdOld, int iFdNew, int fFlags)
+{
+    if (iFdOld != iFdNew)
+        tstVfioKrnlFdForget(iFdNew);
+    int const rcLnx = __real_dup3(iFdOld, iFdNew, fFlags);
+    if (rcLnx != -1)
+        tstVfioKrnlFdDuplicated(iFdOld, iFdNew);
+    return rcLnx;
+}
+
+
+int __wrap_ioctl(int iFd, unsigned long uReq, ...)
+{
+    va_list va;
+    va_start(va, uReq);
+    void * const pvArg = va_arg(va, void *);
+    va_end(va);
+
+    if (g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd)
+        {
+            int rcLnx;
+            int iErrno = 0;
+            if (g_Krnl.fFailArmed && g_Krnl.uFailReq == uReq && !g_Krnl.cFailSkip)
+            {
+                g_Krnl.fFailArmed = false;
+                rcLnx  = -1;
+                iErrno = g_Krnl.iFailErrno;
+            }
+            else
+            {
+                if (g_Krnl.fFailArmed && g_Krnl.uFailReq == uReq)
+                    g_Krnl.cFailSkip--;
+                if (pFd->enmType == TSTVFIOFDTYPE_IOMMU)
+                    rcLnx = tstVfioKrnlIommuIoctl(uReq, pvArg);
+                else if (pFd->enmType == TSTVFIOFDTYPE_CONTAINER)
+                    rcLnx = tstVfioKrnlContainerIoctl(uReq, pvArg);
+                else if (pFd->enmType == TSTVFIOFDTYPE_GROUP)
+                    rcLnx = tstVfioKrnlGroupIoctl(uReq, pvArg);
+                else
+                    rcLnx = tstVfioKrnlDevIoctl(pFd->pDev, uReq, pvArg);
+                if (rcLnx == -1)
+                    iErrno = errno;
+            }
+            RTCritSectLeave(&g_Krnl.CritSect);
+            if (rcLnx == -1)
+                errno = iErrno;
+            return rcLnx;
+        }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return __real_ioctl(iFd, uReq, pvArg);
+}
+
+
+/**
+ * Tells the test about a write to the config space of a PCI function if it
+ * asked for that.
+ *
+ * @param   iFd                 The file descriptor written to.
+ * @param   off                 Offset of the write.
+ * @param   cb                  Number of bytes written.
+ */
+static void tstVfioKrnlCfgWriteNotify(int iFd, off_t off, size_t cb)
+{
+    if (!g_Krnl.fInitialized)
+        return;
+
+    PFNTSTVFIOCFGWRITE pfnHook = NULL;
+    void              *pvUser  = NULL;
+    PTSTVFIODEV        pDev    = NULL;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+    if (   pFd
+        && pFd->enmType == TSTVFIOFDTYPE_DEVICE
+        && ((uint64_t)off >> TSTVFIO_REGION_SHIFT) == VFIO_PCI_CONFIG_REGION_INDEX)
+    {
+        pfnHook = g_Krnl.pfnCfgWriteHook;
+        pvUser  = g_Krnl.pvCfgWriteHookUser;
+        pDev    = pFd->pDev;
+    }
+    RTCritSectLeave(&g_Krnl.CritSect);
+
+    /* Not while holding the lock, the callback gets to use this interface. */
+    if (pfnHook)
+        pfnHook(pDev, (uint32_t)((uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1)), cb, pvUser);
+}
+
+
+ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off)
+{
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
+    return __real_pread(iFd, pvBuf, cbBuf, off);
+}
+
+
+ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off)
+{
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
+    return __real_pread64(iFd, pvBuf, cbBuf, off);
+}
+
+
+/*
+ * The C library has variants of pread which check the size of the buffer.  The
+ * compiler picks them where it knows the size of the buffer at run time only,
+ * which depends on the compiler options and is what happens with sanitizers.
+ */
+ssize_t __wrap___pread_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax)
+{
+    AssertRelease(cbBuf <= cbBufMax);
+    return __wrap_pread(iFd, pvBuf, cbBuf, off);
+}
+
+
+ssize_t __wrap___pread64_chk(int iFd, void *pvBuf, size_t cbBuf, off_t off, size_t cbBufMax)
+{
+    AssertRelease(cbBuf <= cbBufMax);
+    return __wrap_pread64(iFd, pvBuf, cbBuf, off);
+}
+
+
+ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
+{
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
+    ssize_t const cbWritten = __real_pwrite(iFd, pvBuf, cbBuf, off);
+    if (cbWritten > 0)
+        tstVfioKrnlCfgWriteNotify(iFd, off, (size_t)cbWritten);
+    return cbWritten;
+}
+
+
+ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
+{
+    int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
+    if (iErrno)
+        return errno = iErrno, -1;
+    ssize_t const cbWritten = __real_pwrite64(iFd, pvBuf, cbBuf, off);
+    if (cbWritten > 0)
+        tstVfioKrnlCfgWriteNotify(iFd, off, (size_t)cbWritten);
+    return cbWritten;
+}
+
+
+/**
+ * Checks whether the user may map the given part of a file of the fake kernel.
+ *
+ * Like vfio-pci this only allows mapping regions which are flagged as mappable.
+ *
+ * @returns true if the mapping can go ahead, false if it has to be refused.
+ * @param   iFd                 The file descriptor.
+ * @param   cb                  Size of the mapping.
+ * @param   fProt               The protection asked for.
+ * @param   off                 Offset of the mapping.
+ */
+static bool tstVfioKrnlIsMmapAllowed(int iFd, size_t cb, int fProt, off_t off)
+{
+    bool fAllowed = true;
+    if (g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd)
+        {
+            fAllowed = false;
+            if (pFd->enmType == TSTVFIOFDTYPE_DEVICE && !pFd->pDev->fGone)
+            {
+                PTSTVFIODEV pDev      = pFd->pDev;
+                uint64_t    idxRegion = (uint64_t)off >> TSTVFIO_REGION_SHIFT;
+                uint64_t    offRegion = (uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1);
+                fAllowed =    idxRegion < TSTVFIO_REGION_COUNT
+                           && idxRegion != VFIO_PCI_CONFIG_REGION_INDEX
+                           && (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_MMAP)
+                           && (   !(fProt & PROT_READ)
+                               || (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_READ))
+                           && (   !(fProt & PROT_WRITE)
+                               || (pDev->Cfg.aRegions[idxRegion].fFlags & VFIO_REGION_INFO_FLAG_WRITE))
+                           && offRegion + cb <= RT_ALIGN_64(pDev->acbRegions[idxRegion], TSTVFIO_PAGE_SIZE);
+            }
+        }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return fAllowed;
+}
+
+
+/**
+ * Remembers a mapping of a region of a PCI function.
+ *
+ * @returns pv.
+ * @param   iFd                 The file descriptor which was mapped.
+ * @param   pv                  The mapping, MAP_FAILED if it failed.
+ * @param   cb                  Size of the mapping.
+ */
+static void *tstVfioKrnlMmapRecord(int iFd, void *pv, size_t cb)
+{
+    if (pv != MAP_FAILED && g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        /* Whatever was mapped there before is gone. */
+        for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+            if (   g_Krnl.aMaps[i].pv
+                && (uintptr_t)g_Krnl.aMaps[i].pv >= (uintptr_t)pv
+                && (uintptr_t)g_Krnl.aMaps[i].pv + g_Krnl.aMaps[i].cb <= (uintptr_t)pv + cb)
+                RT_ZERO(g_Krnl.aMaps[i]);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (pFd && pFd->enmType == TSTVFIOFDTYPE_DEVICE)
+            for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
+                if (!g_Krnl.aMaps[i].pv)
+                {
+                    g_Krnl.aMaps[i].pv   = pv;
+                    g_Krnl.aMaps[i].cb   = cb;
+                    g_Krnl.aMaps[i].pDev = pFd->pDev;
+                    break;
+                }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return pv;
+}
+
+
+void *__wrap_mmap(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
+{
+    if (tstVfioKrnlIsMmapToFail(fFlags))
+    {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    return tstVfioKrnlMmapRecord(iFd, __real_mmap(pvAddr, cb, fProt, fFlags, iFd, off), cb);
+}
+
+
+void *__wrap_mmap64(void *pvAddr, size_t cb, int fProt, int fFlags, int iFd, off_t off)
+{
+    if (tstVfioKrnlIsMmapToFail(fFlags))
+    {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    if (!tstVfioKrnlIsMmapAllowed(iFd, cb, fProt, off))
+    {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    return tstVfioKrnlMmapRecord(iFd, __real_mmap64(pvAddr, cb, fProt, fFlags, iFd, off), cb);
+}

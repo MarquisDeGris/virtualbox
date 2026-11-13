@@ -33,6 +33,7 @@
 
 #include <iprt/cdefs.h>
 #include <iprt/assertcompile.h>
+#include <VBox/types.h>
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
@@ -76,6 +77,17 @@ AssertCompileSize(struct iommu_ioas_map, 4 * sizeof(uint32_t) + 3 * sizeof(uint6
 #define IOMMU_IOAS_MAP_FIXED_IOVA       RT_BIT_32(0)
 #define IOMMU_IOAS_MAP_WRITEABLE        RT_BIT_32(1)
 #define IOMMU_IOAS_MAP_READABLE         RT_BIT_32(2)
+
+
+struct iommu_ioas_unmap
+{
+    uint32_t size;
+    uint32_t ioas_id;
+    uint64_t iova;
+    uint64_t length;
+};
+AssertCompileSize(struct iommu_ioas_unmap, 2 * sizeof(uint32_t) + 2 * sizeof(uint64_t));
+#define IOMMU_IOAS_UNMAP                _IO(IOMMUFD_TYPE, 0x86)
 
 
 #define VFIO_API_VERSION                0
@@ -189,6 +201,16 @@ AssertCompileSize(struct vfio_irq_set, 5 * sizeof(uint32_t));
 
 #define VFIO_DEVICE_RESET               _IO(VFIO_TYPE, VFIO_BASE + 11)
 
+struct vfio_pci_hot_reset
+{
+    uint32_t argsz;
+    uint32_t flags;
+    uint32_t count;
+    /* int32_t group_fds[count] follows. */
+};
+AssertCompileSize(struct vfio_pci_hot_reset, 3 * sizeof(uint32_t));
+#define VFIO_DEVICE_PCI_HOT_RESET       _IO(VFIO_TYPE, VFIO_BASE + 13)
+
 struct vfio_iommu_type1_dma_map
 {
     uint32_t argsz;
@@ -203,6 +225,18 @@ AssertCompileSize(struct vfio_iommu_type1_dma_map, 2 * sizeof(uint32_t) + 3 * si
 #define VFIO_DMA_MAP_FLAG_READ          RT_BIT_32(0)
 #define VFIO_DMA_MAP_FLAG_WRITE         RT_BIT_32(1)
 #define VFIO_DMA_MAP_FLAG_VADDR         RT_BIT_32(2)
+
+struct vfio_iommu_type1_dma_unmap
+{
+    uint32_t argsz;
+    uint32_t flags;
+    uint64_t iova;
+    uint64_t size;
+};
+AssertCompileSize(struct vfio_iommu_type1_dma_unmap, 2 * sizeof(uint32_t) + 2 * sizeof(uint64_t));
+#define VFIO_IOMMU_UNMAP_DMA            _IO(VFIO_TYPE, VFIO_BASE + 14)
+
+#define VFIO_DMA_UNMAP_FLAG_ALL         RT_BIT_32(1)
 
 
 #define VFIO_PCI_BAR0_REGION_INDEX      0
@@ -258,6 +292,48 @@ AssertCompileSize(struct vfio_device_detach_iommufd_pt, 3 * sizeof(uint32_t));
 #define VFIO_DEVICE_DETACH_IOMMUFD_PT   _IO(VFIO_TYPE, VFIO_BASE + 20)
 
 #define VFIO_DEVICE_DETACH_PASID        RT_BIT_32(0)
+
+/**
+ * What a VM is built from for a function of a passed through PCI device.  A VM
+ * which is started without the device takes this from its configuration.
+ */
+typedef struct PCIVFIOFUNLAYOUT
+{
+    /** Size of the PCI config space, 256 or 4096. */
+    uint32_t            cbPciCfg;
+    /** The BARs. */
+    struct
+    {
+        /** Size in bytes, 0 if the BAR isn't there. */
+        uint64_t        cb;
+        /** Whether it is an I/O port BAR, a memory BAR otherwise. */
+        bool            fIoPorts;
+        /** Memory BAR: whether it is a 64-bit one, taking the place of the next BAR too. */
+        bool            f64Bit;
+        /** Memory BAR: whether it is prefetchable. */
+        bool            fPrefetchable;
+        /** Memory BAR: whether VFIO lets it be mapped. */
+        bool            fMappable;
+    }                   aBars[6];
+    /** Size of the ROM in bytes, 0 if there is none. */
+    uint64_t            cbRom;
+    /** Whether the function has legacy VGA ranges which are exposed to the guest. */
+    bool                fVga;
+    /** Whether the guest gets MSI-X. */
+    bool                fMsix;
+    /** The BAR which VFIO says holds the MSI-X state, UINT8_MAX if none. */
+    uint8_t             iBarMsix;
+    /** Number of interrupt vectors: INTx, MSI, MSI-X. */
+    uint32_t            acIrqVectors[3];
+    /** Offset of the MSI-X table in its BAR. */
+    uint32_t            offMsixTbl;
+    /** Offset of the MSI-X pending bit array in its BAR. */
+    uint32_t            offMsixPba;
+} PCIVFIOFUNLAYOUT;
+/** Pointer to the layout of a function. */
+typedef PCIVFIOFUNLAYOUT *PPCIVFIOFUNLAYOUT;
+/** Pointer to the const layout of a function. */
+typedef const PCIVFIOFUNLAYOUT *PCPCIVFIOFUNLAYOUT;
 
 RT_C_DECLS_END
 
