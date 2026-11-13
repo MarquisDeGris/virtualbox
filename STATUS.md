@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-12
+Updated: 2026-11-13
 
 ## Where things are
 
@@ -24,6 +24,21 @@ slot is empty, and there is an interface for the management. The testcase has
 49 tests and three random tests and runs clean with AddressSanitizer,
 LeakSanitizer and UndefinedBehaviorSanitizer (T2). Next: WP7, the management
 in Main and `VBoxManage`.
+
+### Not built, not tested
+
+Since 2026-11-13 GitHub does not start workflow runs for this repository
+("Actions has been disabled for this repository"), and the workflow is the
+only way this work gets built and tested. Everything up to the code branch
+@ `c5cc9847` was built and tested before (runs 212, 213, and 180 for the
+full build of an earlier state). What was written after that is on
+`scratch/mgmt`, on top of the code branch, and has seen no compiler:
+
+- The interfaces of the passthrough device are found at LUN 0 of the device
+  instance, which is where Main looks for the interfaces of a device
+  (`PDMR3QueryDeviceLun`); with a test.
+
+Nothing of it goes onto the code branch before it was built and tested.
 
 ## Done
 
