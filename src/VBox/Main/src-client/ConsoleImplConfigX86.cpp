@@ -257,8 +257,6 @@ int Console::SetBiosDiskInfo(ComPtr<IMachine> pMachine, PCFGMNODE pCfg, PCFGMNOD
 
 HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *pBusMgr, PCFGMNODE pDevices)
 {
-    mHostPciDevices.clear();
-
     SafeIfaceArray<IPCIDeviceAttachment> assignments;
     ComPtr<IMachine> aMachine = i_machine();
 
