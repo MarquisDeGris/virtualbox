@@ -12,6 +12,7 @@ work on the VFIO based PCIe passthrough device (`pci-vfio`):
 | `meta` | this page, the [plan](PLAN.md), the [status](STATUS.md), the [hardware test](HWTEST.md), CI definitions |
 | `main` | unmodified mirror of upstream `main` |
 | `pci-passthrough-hotplug` | the code, based on upstream `main` |
+| `pci-passthrough-hotplug-v1` | the same code as the branch of [pull request 1](https://github.com/MarquisDeGris/virtualbox/pull/1), a draft |
 
 The code is licensed like VirtualBox itself (GPL-3.0-only).
 

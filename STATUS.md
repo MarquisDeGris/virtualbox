@@ -7,9 +7,10 @@ Updated: 2026-11-13
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `c5cc9847` (28 commits; the `fixup!` commit gets squashed when the merge request is opened) |
+| Code branch | `pci-passthrough-hotplug` @ `c5cc9847` (28 commits, one of them a `fixup!`) |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `52582e7d`: the code branch with the `fixup!` commit folded into the commit it belongs to, 27 commits, the same tree (`5501632b`) |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
-| Merge request | not opened yet |
+| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, a draft: WP0 to WP6. The management (WP7) is not in it, see below |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
