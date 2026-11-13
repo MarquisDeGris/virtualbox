@@ -178,7 +178,7 @@ RTEXITCODE handleClipboard(HandlerArg *a);
 
 /* VBoxManageModifyVM.cpp */
 void parseGroups(const char *pcszGroups, com::SafeArray<BSTR> *pGroups);
-uint32_t parsePci(const char *pszPciAddr);
+uint32_t parsePci(const char *pszPciAddr, char chEnd = '\0');
 #ifdef VBOX_WITH_RECORDING
 int parseScreens(const char *pcszScreens, com::SafeArray<BOOL> *pScreens);
 #endif

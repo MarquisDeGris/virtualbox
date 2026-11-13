@@ -2760,7 +2760,9 @@ it unless this changes. -->
         <literal>0000:02:00.0</literal>. The device has to be the only
         one on its guest PCI bus, so a VM can have two such devices at
         most, and it does not start if one of its storage controllers
-        or network adapters got an address on that bus. The VM has to
+        or network adapters got an address on that bus, or if it has
+        so many storage controllers that it needs a further PCI bridge
+        there. The VM has to
         be started with the device once. After that it also starts
         without the device, which can be put in later.
       </para>

@@ -12134,7 +12134,9 @@
         again with <link to="IConsole::plugHostPCIDevice"/>.
 
         <result name="VBOX_E_INVALID_VM_STATE">
-          Virtual machine is neither running nor paused.
+          Virtual machine is neither running nor paused, or it stopped
+          being so while the guest was given time. The device is not taken
+          away from the guest then, whatever @a force says.
         </result>
         <result name="VBOX_E_OBJECT_NOT_FOUND">
           No PCI device of the host with this address is attached to the machine.

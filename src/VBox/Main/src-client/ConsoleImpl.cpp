@@ -3455,10 +3455,12 @@ HRESULT Console::unplugHostPCIDevice(ULONG aHostAddress, ULONG aTimeout, BOOL aF
 
     /*
      * The guest is waited for in pieces, and the VM is let go of in between:
-     * powering the VM off waits for everybody who holds on to it.
+     * powering the VM off waits for everybody who holds on to it.  The time
+     * the guest gets counts from when it is asked first.
      */
     RTMSINTERVAL const cMsPiece = 250;
-    uint64_t const     msStart  = RTTimeMilliTS();
+    uint64_t           msStart  = 0;
+    bool               fStarted = false;
     HRESULT            hrc      = S_OK;
     for (;;)
     {
@@ -3484,7 +3486,13 @@ HRESULT Console::unplugHostPCIDevice(ULONG aHostAddress, ULONG aTimeout, BOOL aF
 
         /* This waits for the guest; release the lock for that. */
         alock.release();
-        uint64_t const     cMsElapsed = RTTimeMilliTS() - msStart;
+        uint64_t const     msNow      = RTTimeMilliTS();
+        if (!fStarted)
+        {
+            msStart  = msNow;
+            fStarted = true;
+        }
+        uint64_t const     cMsElapsed = msNow - msStart;
         RTMSINTERVAL const cMsLeft    = cMsElapsed < aTimeout ? (RTMSINTERVAL)(aTimeout - cMsElapsed) : 0;
         bool const         fLast      = cMsLeft <= cMsPiece;
         int const vrc = pPort->pfnDetach(pPort, fLast ? cMsLeft : cMsPiece, fLast && RT_BOOL(aForce));

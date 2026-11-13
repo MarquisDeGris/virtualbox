@@ -458,19 +458,36 @@ int Console::i_hostPciCheckSlots(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentMan
     pBusMgr->listAttachedPCIDevices(vecAttached);
     for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
     {
+        /* What is known of a device of the host is its first function, see
+           Console::i_attachRawPCIDevices().  Its other functions would be fine too. */
         PCIBusAddress const GuestAddress(mHostPciDevices[iDev].uGuestAddress);
         for (size_t i = 0; i < vecAttached.size(); i++)
-            if (   vecAttached[i].guestAddress.miBus == GuestAddress.miBus
-                && vecAttached[i].guestAddress != GuestAddress)
+        {
+            if (   vecAttached[i].guestAddress.miBus != GuestAddress.miBus
+                || (   vecAttached[i].guestAddress.miDevice == GuestAddress.miDevice
+                    && vecAttached[i].hostAddress.valid()))
+                continue;
+
+            /* The bridge to a further bus is no device the user has given the VM. */
+            if (vecAttached[i].strDeviceName == "ich9pcibridge")
                 return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
                                              N_("With hot-plug for PCI devices of the host, each of them has to be the only "
-                                                "device on its guest PCI bus. The device '%s' of the virtual machine is on "
-                                                "guest PCI bus %d as well, at %02x:%02x.%d. Attach the PCI device of the "
-                                                "host at 01:00.0 or 02:00.0, whichever is free, or give the virtual machine "
-                                                "fewer storage controllers or network adapters"),
-                                             vecAttached[i].strDeviceName.c_str(), GuestAddress.miBus,
-                                             vecAttached[i].guestAddress.miBus, vecAttached[i].guestAddress.miDevice,
-                                             vecAttached[i].guestAddress.miFn);
+                                                "device on its guest PCI bus. The virtual machine has more storage controllers "
+                                                "than it has places for elsewhere and needs a PCI bridge on guest PCI bus %d "
+                                                "for them, at %02x:%02x.%d. Attach the PCI device of the host at 01:00.0, or "
+                                                "give the virtual machine fewer storage controllers"),
+                                             GuestAddress.miBus, vecAttached[i].guestAddress.miBus,
+                                             vecAttached[i].guestAddress.miDevice, vecAttached[i].guestAddress.miFn);
+            return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                         N_("With hot-plug for PCI devices of the host, each of them has to be the only "
+                                            "device on its guest PCI bus. The device '%s' of the virtual machine is on "
+                                            "guest PCI bus %d as well, at %02x:%02x.%d. Attach the PCI device of the "
+                                            "host at 01:00.0 or 02:00.0, whichever is free, or give the virtual machine "
+                                            "fewer storage controllers or network adapters"),
+                                         vecAttached[i].strDeviceName.c_str(), GuestAddress.miBus,
+                                         vecAttached[i].guestAddress.miBus, vecAttached[i].guestAddress.miDevice,
+                                         vecAttached[i].guestAddress.miFn);
+        }
     }
     return VINF_SUCCESS;
 }
@@ -1334,7 +1351,10 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
             /* Add PCI passthrough devices, in hot-plug capable slots if that is asked for. */
             hrc = pMachine->GetExtraData(Bstr("VBoxInternal2/HostPCIHotPlug").raw(), bstr.asOutParam());    H();
             mfHostPciHotPlug = Utf8Str(bstr).equals("1");
-            hrc = i_attachRawPCIDevices(pUVM, pVMM, pBusMgr, pDevices);                           H();
+            hrc = i_attachRawPCIDevices(pUVM, pVMM, pBusMgr, pDevices);
+            if (hrc == E_INVALIDARG) /* A mistake in the configuration, the error of the VM says which. */
+                return VERR_INVALID_PARAMETER;
+            H();
 
             if (enmIommuType == IommuType_AMD)
             {
