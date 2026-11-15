@@ -36,6 +36,10 @@ on:
         description: "Seed of the first random device model (default: the one built into the testcase)"
         required: false
         default: ""
+      expect:
+        description: "pass (default) or fail. With fail the run succeeds if the device testcase fails: for showing that a test catches what it is for, without a failed run"
+        required: false
+        default: pass
 
 permissions:
   contents: read
@@ -173,8 +177,17 @@ jobs:
           which kmk
           kmk --version > kmk-version.log 2>&1 || true
           sed -n '1,3p' kmk-version.log
-          ( time kmk -j"$(nproc)" KBUILD_TYPE=release ${{ inputs.kmk_args }} ) > build.log 2>&1 \
-            || { echo "BUILD FAILED"; grep -n -E '(^|[^a-zA-Z])(error|Error|\*\*\*)[: ]' build.log | head -60; echo ----; tail -120 build.log; exit 1; }
+          if ! ( time kmk -j"$(nproc)" KBUILD_TYPE=release ${{ inputs.kmk_args }} ) > build.log 2>&1; then
+            echo "BUILD FAILED"
+            grep -n -E '(^|[^a-zA-Z])(error|Error|\*\*\*)[: ]' build.log | head -150 || true
+            echo ----
+            tail -120 build.log
+            # With the baseline flavor that is it.  The other flavors go on to the device
+            # testcases where they can, so that one run tells as much as possible, and
+            # fail at the end.
+            if [ "${{ inputs.flavor }}" = "baseline" ]; then exit 1; fi
+            touch build-failed
+          fi
           tail -15 build.log
           grep -c -E 'warning:' build.log || true
 
@@ -246,8 +259,17 @@ jobs:
           fi
           if ! wait $pid; then
             cat "$log"
+            if [ "${{ inputs.expect }}" = "fail" ]; then
+              echo "TEST FAILED, which is what this run was to show"
+              exit 0
+            fi
             echo "TEST FAILED, running it again in the debugger for a backtrace"
             timeout -k 5 $limit gdb -batch -ex run -ex "thread apply all bt" --args ./tstDevPciVfio 2>&1 | tail -150 || true
+            exit 1
+          fi
+          if [ "${{ inputs.expect }}" = "fail" ]; then
+            tail -n 60 "$log"
+            echo "TEST PASSED although this run was to show it failing"
             exit 1
           fi
           tail -n 200 "$log"
@@ -301,6 +323,15 @@ jobs:
           grep -i -E '00 00 00 00 1F 00 00 00 +1F 00 00 00' osc-on.log
           grep -E 'Name \(_CID, EisaId \("PNP0A03"\)' dsdt.dsl
           echo "ACPI table check passed"
+
+      - name: Result of the build of the tree
+        if: inputs.flavor != 'baseline'
+        run: |
+          if [ -e build-failed ]; then
+            echo "The build of the tree failed, see the step Build. What came after it used what was built."
+            exit 1
+          fi
+          echo "The tree was built."
 
       - name: Upload logs
         if: always()

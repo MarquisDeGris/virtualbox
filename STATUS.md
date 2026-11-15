@@ -28,12 +28,15 @@ in Main and `VBoxManage`.
 
 ### Not built, not tested
 
-Since 2026-11-13 GitHub does not start workflow runs for this repository
-("Actions has been disabled for this repository"), and the workflow is the
-only way this work gets built and tested. Everything up to the code branch
-@ `c5cc9847` was built and tested before (runs 212, 213, and 180 for the
-full build of an earlier state). What was written after that is on
-`scratch/mgmt`, on top of the code branch, and has seen no compiler:
+From 2026-11-13 to 2026-11-15 GitHub did not start workflow runs for this
+repository: it had disabled the workflows of the fork, as it does to save
+compute, after 215 runs in two days of which many failed on purpose. The
+workflow is the only way this work gets built and tested. Everything up to
+the code branch @ `c5cc9847` was built and tested before (runs 212, 213,
+and 180 for the full build of an earlier state). What was written after
+that is on `scratch/mgmt`, on top of the code branch, and had seen no
+compiler when this was written; the runs from 216 on are in the table at
+the end:
 
 - The interfaces of the passthrough device are found at LUN 0 of the device
   instance, which is where Main looks for the interfaces of a device
@@ -569,6 +572,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-13 | INTx is raised on an EMT and lowered when the interrupt setup it came from ends or the device goes | The thread waiting for interrupts must not wait for a lock whose holder waits for it; a line raised by a device which is gone or uses another interrupt must not stay raised |
 | 2026-11-13 | A host which has fewer interrupt vectors than asked for: the device takes what there is | The alternative is a device without any interrupt; guests mostly use the first vectors |
 | 2026-11-13 | A PCI device of the host in a hot-plug slot has to be alone on its guest bus, checked when the VM starts | Everything on the bus of the slot comes and goes for the guest with the device; an emulated controller there would vanish with it |
+| 2026-11-15 | Few workflow runs: one per batch of work, the whole log of a failed run is dealt with before the next one, sanitizer and full builds only for candidates for the merge request, no runs which fail on purpose | GitHub had disabled the workflows of the fork. A run which is to show that a test catches a defect is started with `expect: fail` and is green when the testcase fails; deliberate defects on throwaway branches are no longer run one by one |
+| 2026-11-15 | A failed build of the tree does not end a `tests` run at once: the device testcases are built and run with what was built, and the run fails at its end | One run tells about the tree and about the testcase, where it took two before |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
