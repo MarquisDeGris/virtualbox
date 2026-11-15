@@ -5,9 +5,9 @@ person with the hardware has to try, what should happen, and what to look at
 when it does not. See [STATUS.md](STATUS.md) for what was verified without
 hardware and what was not.
 
-The commands marked **(WP7)** exist in code which has not been built yet, see
-the status page. Until that is built, a device can only be taken away from
-the VM by the host (parts D and H), not put in.
+All of it is in the branch of the merge request. Main and `VBoxManage` were
+built and never run: no test without hardware gets to them, so parts F, G
+and I are the first time anybody uses them.
 
 ## 1. What is needed
 
@@ -44,7 +44,7 @@ guest bus 1:
     VBoxManage modifyvm <vm> --pci-attach 0000:03:00.0@0000:01:00.0
     VBoxManage modifyvm <vm> --pci-attach 0000:03:00.1@0000:01:00.1
 
-For the hot-plug tests (parts E to K) in addition **(WP7)**:
+For the hot-plug tests (parts E to K) in addition:
 
     VBoxManage setextradata <vm> VBoxInternal2/HostPCIHotPlug 1
 
@@ -54,8 +54,9 @@ or 2 as well; the VM does not start then and the message names the device
 which is in the way. Attach the PCI device at `0000:02:00.0` instead, or
 take the controller out of the VM.
 
-Until WP7 is built the same is reached with extra data which goes straight
-into the configuration of the devices:
+Should that not do what it is to do, the same can be reached with extra data
+which goes straight into the configuration of the devices, without the
+checks and without the VM starting when the device is not there:
 
     VBoxManage setextradata <vm> VBoxInternal/Devices/ich9pcibridge/0/Config/HotPlug 1
     VBoxManage setextradata <vm> VBoxInternal/Devices/acpi/0/Config/PciExpressNativeHotPlug 1
@@ -136,8 +137,8 @@ With the hot-plug settings of part 2.
    `PciExpressNativeHotPlug` setting, that is the most important thing to
    report, with the VM log and, if it gets that far, a screenshot of the
    device manager.
-3. Linux guest, a reset of the device through its bus. Not built yet, see
-   the status page. Unbind the driver of the device in the guest, then
+3. Linux guest, a reset of the device through its bus. Unbind the driver of
+   the device in the guest, then
 
        echo bus > /sys/bus/pci/devices/0000:01:00.0/reset_method
        echo 1 > /sys/bus/pci/devices/0000:01:00.0/reset
@@ -147,7 +148,7 @@ With the hot-plug settings of part 2.
    guest does not take this for the device having been unplugged. Bind the
    driver again: the device works.
 
-### F. Taking the device out **(WP7)**
+### F. Taking the device out
 
 1. Guest uses the device. `VBoxManage controlvm <vm> unplugpci
    0000:03:00.0`
@@ -167,7 +168,7 @@ With the hot-plug settings of part 2.
    off from another terminal while the command waits. The VM powers off at
    once, the command ends with a message.
 
-### G. Putting the device in **(WP7)**
+### G. Putting the device in
 
 1. After part F, with the device bound to `vfio-pci` again:
    `VBoxManage controlvm <vm> plugpci 0000:03:00.0`
@@ -194,12 +195,12 @@ With the hot-plug settings of part 2.
    guest logs `pciehp: Slot(...): Link Down` and `Card not present` and
    removes the device; Windows shows it as removed.
 3. Plug the cable in. Authorize the device on the host if it asks for
-   that, bind it to `vfio-pci`, then `plugpci` as in part G **(WP7)**. The
+   that, bind it to `vfio-pci`, then `plugpci` as in part G. The
    device works in the guest again.
 4. Repeat five times, also pulling the cable while the device is under
    load (a large copy, a 3D benchmark).
 
-### I. Starting without the device **(WP7)**
+### I. Starting without the device
 
 1. Start the VM once with the device, power it off. `VBoxManage
    getextradata <vm> enumerate` now has one `VBoxInternal2/HostPCILayout/...`
@@ -240,11 +241,11 @@ Steps 2 and 3 start the VM without the device, which needs part I to work.
    configuration, or attached to it, or after another kind of device was
    passed through when the state was saved: refused with a message, the VM
    does not start from that state.
-4. **(WP7)** A VM with hot-plug switched on and something else on the guest
+4. A VM with hot-plug switched on and something else on the guest
    bus of the PCI device, for example a second SATA controller with the
    device at `0000:01:00.0`: the VM does not start, the message names the
    controller.
-5. **(WP7)** A host address with a number which is out of range, such as
+5. A host address with a number which is out of range, such as
    `0000:03:00.8`, is refused by `VBoxManage` and does not stand for
    another device.
 

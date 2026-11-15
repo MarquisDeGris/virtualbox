@@ -251,7 +251,8 @@ All four steps are done, see `STATUS.md`.
   changelog entries.
 - "Detach, save, restore, re-attach" sequence as one documented operation.
 
-Written and reviewed, not built yet, see `STATUS.md`: new methods of
+Done, see `STATUS.md`; built, and never run, as no test without hardware
+gets to Main: new methods of
 `IConsole` instead of the attachment API of `IMachine`, which is for the
 configuration of a VM which does not run; `VBoxManage controlvm plugpci`
 and `unplugpci`; the state in `showvminfo`; manual and changelog. Not
@@ -265,7 +266,7 @@ part of the hardware test, not an operation of its own.
   the hypervisor backend offer. May require a narrowly scoped VMM helper;
   decided after WP5 when the interrupt paths are fully understood.
 
-Not started. What is there (not built yet): the first interrupt reaches the
+Not started. What is there: the first interrupt reaches the
 guest, raised on an EMT, and the line is lowered when the device cannot be
 the one raising it any more. A device or a guest which depends on INTx still
 does not work.

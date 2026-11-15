@@ -1,42 +1,47 @@
 # Status
 
-Updated: 2026-11-13
+Updated: 2026-11-15
 
 ## Where things are
 
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Code branch | `pci-passthrough-hotplug` @ `c5cc9847` (28 commits, one of them a `fixup!`) |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `52582e7d`: the code branch with the `fixup!` commit folded into the commit it belongs to, 27 commits, the same tree (`5501632b`) |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `3d9ea801`, 33 commits |
+| Branch the runs were made on | `scratch/mgmt` @ `a69d5a89`, the same tree as the head of the merge request (`68621baf`) |
+| Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
-| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, a draft: WP0 to WP6. The management (WP7) is not in it, and neither is what a review changed afterwards, see below |
+| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, a draft: WP0 to WP7 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
 
 WP2 (hardening), WP3 (removal of the device on the host), WP4 (saved state:
 refused while the device is in the VM, possible while the hot-plug slot is
-empty), WP5 (hot-plug slot in the root port, ACPI) and WP6 (the passthrough
-device in the slot) are done: the guest is asked before a device is taken out
-of the slot, a device can be put into the empty slot while the VM runs, the
-VM can start with an empty slot, its state can be saved and loaded while the
-slot is empty, and there is an interface for the management. The testcase has
-49 tests and three random tests and runs clean with AddressSanitizer,
-LeakSanitizer and UndefinedBehaviorSanitizer (T2). Next: WP7, the management
-in Main and `VBoxManage`.
+empty), WP5 (hot-plug slot in the root port, ACPI), WP6 (the passthrough
+device in the slot) and WP7 (the management in Main and `VBoxManage`) are
+done: the guest is asked before a device is taken out of the slot, a device
+can be put into the empty slot while the VM runs, the VM can start with an
+empty slot, its state can be saved and loaded while the slot is empty, and
+`VBoxManage controlvm` puts a device in and takes it out. The testcase has
+55 tests and three random tests and runs clean with AddressSanitizer,
+LeakSanitizer and UndefinedBehaviorSanitizer (runs 217 and 218). Main and
+`VBoxManage` are built; they cannot be run in a test without hardware.
+Next: the hardware test, which needs a person with the hardware, and
+before that, if it can be had, a guest operating system using the slot in
+CI (T4).
 
-### Not built, not tested
+### The management and the review, 13 to 15 November
 
 From 2026-11-13 to 2026-11-15 GitHub did not start workflow runs for this
 repository: it had disabled the workflows of the fork, as it does to save
 compute, after 215 runs in two days of which many failed on purpose. The
-workflow is the only way this work gets built and tested. Everything up to
-the code branch @ `c5cc9847` was built and tested before (runs 212, 213,
-and 180 for the full build of an earlier state). What was written after
-that is on `scratch/mgmt`, on top of the code branch, and had seen no
-compiler when this was written; the runs from 216 on are in the table at
-the end:
+workflow is the only way this work gets built and tested. What follows was
+written in that time, on `scratch/mgmt`, without a compiler, and reviewed
+instead. The first build after it (run 216) found one mistake, a status
+code which `VBoxManage` does not have, with all tests passing; run 217 is
+the tree with that put right, run 218 the same with the sanitizers. It is
+in the merge request as six commits since:
 
 - The interfaces of the passthrough device are found at LUN 0 of the device
   instance, which is where Main looks for the interfaces of a device
@@ -44,9 +49,8 @@ the end:
 - Host PCI addresses are ordered by their domain first
   (`PCIBusAddress::operator<`). With addresses from more than one domain
   the order was not a consistent one, and the configuration of a VM is
-  built in that order. With a test, which makes it 50 tests and three
-  fuzz tests once they can run.
-- WP7, the management, as a first complete draft:
+  built in that order. With a test.
+- WP7, the management:
   - Hot-plug is switched on for a VM with the extra data item
     `VBoxInternal2/HostPCIHotPlug`. Main then gives the root port in front
     of each PCI device of the host the hot-plug capable slot and has the
@@ -62,20 +66,14 @@ the end:
     `unplugpci`, the state in `VBoxManage showvminfo`; man pages.
   - Main cannot be run in the test without hardware. What it does is
     part of the hardware test.
-  - Changelog entries.
-  - Checked without a compiler, which is no substitute for one: the XML
-    files which were changed (API definition, the two man pages, the
-    changelog) have their elements balanced; the two new subcommands
-    leave `controlvm` within the number of help scopes its generated
-    help can have (55 of 60); the signatures of the new `IConsole`
-    methods follow what the wrapper generator makes of comparable ones.
+  - Changelog entries, and a topic for the security guide of the manual.
+    The manual is not built by the workflow; the files are well-formed.
 
 - A review of everything above and of the hot-plug code of WP5 and WP6:
   three independent readings, then each point checked against the code,
   and for the behaviour of guests and of the host kernel against the
   sources of Linux and QEMU. What it changed, with tests where the
-  testcase reaches it, which makes it 55 tests and three random tests
-  once they can run:
+  testcase reaches it, which makes it 55 tests and three random tests:
   - Root port: the attention button is pressed along with a device being
     put into the slot if that does not bring the link up. A Linux guest
     does not ask for being told about presence changes of a slot with a
@@ -128,7 +126,6 @@ the end:
 [HWTEST.md](HWTEST.md) has the procedure for the hardware test as a
 draft.
 
-Nothing of it goes onto the code branch before it was built and tested.
 What the review round wrote was read once more by three readers who had
 not seen it, in place of the compiler and of a first test run: one for the
 device code, one who went through every new and changed test step by step
@@ -155,13 +152,19 @@ was looked at and changed:
   when the guest lets go of a device while another thread detaches it);
   it allows for both orders now.
 
-`scratch/mgmt` is at `6e85def2`. The last attempt to start a run was on
-2026-11-13 at 23:45 UTC; the answer is still the one above.
+That the readers found no mistake a compiler would have found, and that
+the compiler then found one, in a line written after their reading, is
+worth noting down: reading by somebody else is worth doing when nothing
+can be built, and it is no build.
 
-What the review found in the code of the merge request is listed in its
-description under "Known problems of this head", as the fixes are not in
-it. `scratch/red-evidence-17` has the tests of the review round on top of
-the code before it and is to fail once runs can be started.
+The six commits of the merge request for all of this, on top of the 27
+it had: the interfaces of the device at LUN 0 (`98f2f08e`); the order of
+host PCI addresses (`82a5f83b`); what the review changed in the root port
+and the passthrough device, with the tests (`3c877103`); Main
+(`f8ea63a1`); `VBoxManage` and its man pages (`e7fc29a1`); changelog and
+manual (`3d9ea801`). The head is what was built and tested. The commits
+before it were not built one by one, to keep the number of runs down; the
+first three change the devices and their testcase only.
 
 ## Done
 
@@ -420,9 +423,11 @@ the code before it and is to fail once runs can be started.
 
 ## Test evidence
 
-Each new test was first run against the device without the fix it belongs to.
+Each new test was run against the device without the fix it belongs to: one
+by one before the fix up to run 215, the tests of the review together and
+afterwards (run 219).
 
-| Test | Before the fix | With fixes (run 212) |
+| Test | Before the fix | With fixes (run 217) |
 |------|----------------|---------------------|
 | Construct, config space, BAR, DMA map, destruct | pass; with the DMA mapping expectations of part 5: fails, 3 checks (run 33) | pass |
 | MSI delivery | pass | pass |
@@ -476,6 +481,14 @@ Each new test was first run against the device without the fix it belongs to.
 | Hot-plug slot: the interface for the management | new feature; deliberate defects are found (runs 185 to 192) | pass |
 | Interrupts after the VM was suspended and resumed | fails, 14 checks (run 202) | pass |
 | Hot-plug slot: random operations with devices coming and going | new test; found the interrupts lost after suspend and resume (run 195); deliberate defects are found (runs 207, 215) | pass |
+| Order of PCI addresses | not run without the change | pass |
+| Interrupts with a host which is short of vectors | fails, 3 checks (run 219) | pass |
+| INTx: raised for the guest and lowered again | fails, 12 checks (run 219) | pass |
+| INTx: raised while the guest changes the interrupt setup | fails, 7 checks (run 219) | pass |
+| Root port: a device is put into the slot of a guest going by the attention button | fails, 9 checks (run 219) | pass |
+| Hot-plug slot: interrupts of a device which was taken out | fails, 3 checks (run 219) | pass |
+| Root port tests which got new cases with the review (slot events, device in the slot, saved state) | fail with 56, 2 and 1 checks (run 219) | pass |
+| Random device models and guest accesses, with the mock taking the PCI lock for an interrupt line like PDM does | runs into the time limit (run 219): each INTx raised while the guest changes the interrupt setup costs five seconds | pass |
 | ACPI table: hardware ID of the root bridge and `_OSC`, executed with the ACPICA tools | without the change: ID and `_OSC` as before (first half of the check) | pass |
 
 ## Test harness (WP1)
@@ -509,9 +522,13 @@ harness since WP5, saved states since the fourth part of WP6.
 
 ## Next
 
-1. WP7: the management in Main and `VBoxManage`, which uses the interface
-   of the device, sets the two settings of WP5 and stores the layout.
-2. T4: a guest operating system using the slot, in CI.
+1. T4: a guest operating system using the slot, in CI, if it can be had
+   with few runs. What it would show first is the one thing nobody has
+   seen yet: a guest taking a device which was put into the slot.
+2. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
+   the hardware.
+3. Not planned for now: WP8 (INTx beyond the first interrupt), events in
+   the API for a device coming and going.
 
 ## Decisions
 
@@ -580,8 +597,8 @@ harness since WP5, saved states since the fourth part of WP6.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 44 tests, ACPI table check | `949a5c03` | all pass (run 131); clean with ASan, LSan and UBSan (run 132) |
-| T2 fuzz | running in CI | `949a5c03` | 2000 models and 400000 operations on the root port per run, 20000 and 2000000 with sanitizers (run 132); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
+| T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not started | | |
 | T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
 | T5 hardware | not run | | needs a human with hardware |
@@ -684,5 +701,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 207 to 211 | `scratch/mutant-fy1` to `scratch/mutant-fy5` | tests | 207, 209, 210 failed as intended; 208, 211 passed | five deliberate defects which take a sequence of events to show. One is caught by the random test alone (207), two by other tests (209, 210). One changes nothing (208: the hold-off of the attention button is cleared when the link goes down as well). One went unnoticed (211: the watcher thread is not woken when a device is put back after a state was loaded), no test got to that |
 | 212, 213 | `scratch/slotfuzz2` | tests, sanitize | passed | with a test for that case: 49 tests and three random tests; the tree of the code branch @ `c5cc9847` |
 | 214, 215 | `scratch/mutant-fy5b`, `scratch/mutant-fy1b` | tests | failed as intended | the defect which went unnoticed is caught by the new test, the other one by the random test again |
+| 216 | `scratch/mgmt` @ `6e85def2` | tests | failed | the first build of what was written from 13 to 15 November: one error in the tree (a status code `VBoxManage` does not have); the testcase was built and run nevertheless, 55 tests and three random tests passed |
+| 217 | `scratch/mgmt` @ `a8da0d19` | tests | passed | the tree builds, 55 tests and three random tests pass; no compiler warning in a file this work changes |
+| 218 | `scratch/mgmt` @ `a69d5a89` | sanitize | passed | the tree of the head of the merge request (`3d9ea801`); no reports from the sanitizers |
+| 219 | `scratch/red-evidence-18` | tests, testcase expected to fail | failed | the testcase against root port and device as they were before the review: eight tests fail as they are to, then the random test of the device ran into the time limit, which a run cannot expect. The reason is the defect the INTx change is about, see the evidence table |
 
 Run numbers are those GitHub shows for the `build` workflow.
