@@ -27,9 +27,9 @@ empty slot, its state can be saved and loaded while the slot is empty, and
 55 tests and three random tests and runs clean with AddressSanitizer,
 LeakSanitizer and UndefinedBehaviorSanitizer (runs 217 and 218). Main and
 `VBoxManage` are built; they cannot be run in a test without hardware.
-Next: the hardware test, which needs a person with the hardware, and
-before that, if it can be had, a guest operating system using the slot in
-CI (T4).
+Next: the hardware test, which needs a person with the hardware. The
+merge request is marked ready for it, see "Ready for the hardware test"
+below.
 
 ### The management and the review, 13 to 15 November
 
@@ -522,13 +522,10 @@ harness since WP5, saved states since the fourth part of WP6.
 
 ## Next
 
-1. T4: a guest operating system using the slot, in CI, if it can be had
-   with few runs. What it would show first is the one thing nobody has
-   seen yet: a guest taking a device which was put into the slot.
-2. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
-   the hardware.
-3. Not planned for now: WP8 (INTx beyond the first interrupt), events in
-   the API for a device coming and going.
+1. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
+   the hardware. The merge request is marked ready for it.
+2. Not planned for now: T3 and T4 (see the test tiers), WP8 (INTx beyond
+   the first interrupt), events in the API for a device coming and going.
 
 ## Decisions
 
@@ -590,6 +587,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-13 | A host which has fewer interrupt vectors than asked for: the device takes what there is | The alternative is a device without any interrupt; guests mostly use the first vectors |
 | 2026-11-13 | A PCI device of the host in a hot-plug slot has to be alone on its guest bus, checked when the VM starts | Everything on the bus of the slot comes and goes for the guest with the device; an emulated controller there would vanish with it |
 | 2026-11-15 | Few workflow runs: one per batch of work, the whole log of a failed run is dealt with before the next one, sanitizer and full builds only for candidates for the merge request, no runs which fail on purpose | GitHub had disabled the workflows of the fork. A run which is to show that a test catches a defect is started with `expect: fail` and is green when the testcase fails; deliberate defects on throwaway branches are no longer run one by one |
+| 2026-11-15 | The simulation tiers T3 and T4 are not run; the merge request goes to the hardware test without them | T3 does not fit a driver which takes PCI devices behind an IOMMU only. T4 would take many trial runs to set up, which is what the workflows of the fork were disabled for; its first finding would be what part G of the hardware test shows |
+| 2026-11-15 | No build of the head from nothing | The `tests` flavor builds the tree on top of the cached build of `main` and compiles every file which differs; a build from nothing costs a long run and would tell the same |
 | 2026-11-15 | A failed build of the tree does not end a `tests` run at once: the device testcases are built and run with what was built, and the run fails at its end | One run tells about the tree and about the testcase, where it took two before |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -599,9 +598,47 @@ harness since WP5, saved states since the fourth part of WP6.
 |------|-------|--------|------|
 | T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
 | T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
-| T3 kernel simulation | not started | | |
-| T4 system simulation | not started | | runner has `/dev/kvm`, kernel 7.0, 4 CPUs, 15 GB RAM |
-| T5 hardware | not run | | needs a human with hardware |
+| T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
+| T4 system simulation | not run | | It takes a virtual machine with an emulated IOMMU as the host, inside a runner which is a virtual machine itself, and VirtualBox in it running a third. Getting that to work takes many trial runs, and the workflows of this fork were disabled once for the number of runs. What it would have shown first, a guest taking a device which was put into the slot, is part G of the hardware test |
+| T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
+
+## Security requirements and what shows them
+
+The requirements are in PLAN.md, section 4.
+
+| | Shown by |
+|---|----------|
+| S1 | Test "Device without IOMMU, device which is not PCI". The interface the driver uses by default (IOMMUFD) has no mode without an IOMMU |
+| S2 | The tests for MSI vector counts, the MSI-X table, capability lists and the layout from the configuration; the random test with made-up device models, with the sanitizers; "Interrupts with a host which is short of vectors". The fake kernel counts every request which is out of bounds, and every test checks that count |
+| S3 | "Guest memory can not be made available to the device", also with the legacy interface |
+| S4 | "The host takes the device back ...", "Hot-plug slot: the device is detached", "... interrupts of a device which was taken out", and after every operation of the random test of the slot: nothing of an absent device mapped into the guest or answering, the device file closed, no file descriptor more than before. The mapping of the guest memory is not removed with the device: it stays for the life of the VM (S11) and for the next device, while the device is taken out of the address space when it is let go of |
+| S5 | The tests with a device which stops answering on every guest access path; the random tests; "INTx: raised while the guest changes the interrupt setup" for the one wait an EMT has, which is bounded |
+| S6 | "Host address which is not a PCI address" |
+| S7 | "I/O port BAR, device which stops answering", "Legacy VGA ranges ...", "Trapped BAR accesses do not need the mapping of the BAR", the removal tests |
+| S8 | "Saved state is refused", "Hot-plug slot: saved states which are refused" |
+| S9 | Review; part 1 of the hardware test says what the user of the VM needs |
+| S10 | Runs 217 and 218; no compiler warning in a file this work changes |
+| S11 | "Execution engines without fixed guest memory" |
+
+## Ready for the hardware test
+
+By the definition in PLAN.md, section 7:
+
+1. WP0 to WP7 are done. WP8 (INTx) is not, as allowed there.
+2. T1 and T2 are green on the head of the merge request, with and without
+   the sanitizers (runs 217 and 218).
+3. T3 and T4 were not run; the table above says why.
+4. The security requirements are mapped to tests, see above. S9 is a
+   matter of the hardware test.
+5. The tree builds without a compiler warning in a file this work changes.
+   The manual and the man pages are updated; the manual itself is not
+   built by the workflow.
+6. HWTEST.md has the procedure, with what to expect and what to look at.
+
+What the hardware test is the first to show, because nothing before it
+could: a guest operating system using the slot (Linux and Windows), Main
+and `VBoxManage` doing what they were written to do, the real kernel
+interface, a real device.
 
 ## CI runs
 
