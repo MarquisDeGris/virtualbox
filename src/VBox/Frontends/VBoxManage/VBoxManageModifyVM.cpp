@@ -578,27 +578,48 @@ static HRESULT setExtraData(ComPtr<IMachine> &rSessionMachine, const char *pszVa
 }
 
 
-/** Parse PCI address in format 0000:01:02.03 and convert it to the numeric representation. */
-static uint32_t parsePci(const char *pszPciAddr)
+/**
+ * Checks that a number of a PCI address starts the way it has to: with a hex
+ * digit, and without a prefix telling its base.
+ */
+static bool parsePciIsNumber(const char *psz)
+{
+    return RT_C_IS_XDIGIT(psz[0])
+        && psz[1] != 'x'
+        && psz[1] != 'X';
+}
+
+
+/**
+ * Parse PCI address in format 0000:01:02.3 and convert it to the numeric representation.
+ *
+ * The address has to end the string, or to be followed by @a chEnd if that is
+ * given.  A number which is out of range for its place makes the address
+ * invalid, as it would stand for another device otherwise.
+ */
+uint32_t parsePci(const char *pszPciAddr, char chEnd /*= '\0'*/)
 {
     uint16_t u16Domain = UINT16_MAX;
     uint8_t aVals[3] = {0, 0, 0};
 
     char *pszNext = (char *)pszPciAddr;
-    int vrc = RTStrToUInt16Ex(pszNext, &pszNext, 16, &u16Domain);
-    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != ':')
+    int vrc = parsePciIsNumber(pszNext) ? RTStrToUInt16Ex(pszNext, &pszNext, 16, &u16Domain) : VERR_INVALID_PARAMETER;
+    if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != ':' || u16Domain == UINT16_MAX)
         return UINT32_MAX;
 
-    vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[0]);
-    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != ':')
+    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[0]) : VERR_INVALID_PARAMETER;
+    if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != ':')
         return UINT32_MAX;
 
-    vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[1]);
-    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != '.')
+    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[1]) : VERR_INVALID_PARAMETER;
+    if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != '.' || aVals[1] > 0x1f)
         return UINT32_MAX;
 
-    vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[2]);
-    if (RT_FAILURE(vrc) || pszNext == NULL)
+    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[2]) : VERR_INVALID_PARAMETER;
+    if (   (vrc != VINF_SUCCESS && vrc != VWRN_TRAILING_CHARS)
+        || pszNext == NULL
+        || (*pszNext != '\0' && *pszNext != chEnd)
+        || aVals[2] > 7)
         return UINT32_MAX;
 
     return ((uint32_t)u16Domain << 16) | (aVals[0] << 8) | (aVals[1] << 3) | (aVals[2] << 0);
@@ -3646,7 +3667,7 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
                 const char* pAt = strchr(ValueUnion.psz, '@');
                 uint32_t uHostAddr, uGuestAddr;
 
-                uHostAddr = parsePci(ValueUnion.psz);
+                uHostAddr = parsePci(ValueUnion.psz, '@');
                 uGuestAddr = pAt != NULL ? parsePci(pAt + 1) : uHostAddr;
 
                 if (uHostAddr == UINT32_MAX || uGuestAddr == UINT32_MAX)
