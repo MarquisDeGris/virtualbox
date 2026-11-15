@@ -3988,10 +3988,10 @@ static DECLCALLBACK(VBOXSTRICTRC) ich9pcibridgeR3SlotConfigWrite(PPDMDEVINS pDev
     Assert(cb <= 4);
 
     /*
-     * The guest gets here with the PCI lock held.  A reset of the VM, loading a
-     * saved state and the fake PCI BIOS write to the config space without it,
-     * and they are not alone with the slot: the device in it comes and goes on
-     * other threads.
+     * The guest gets here with the PCI lock held.  A reset of the VM and
+     * loading a saved state write to the config space without it, and they are
+     * not alone with the slot: the device in it comes and goes on other
+     * threads.
      */
     PDEVPCIBUSCC const pBusCC = PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC);
     int const          rcLock = pBusCC->pPciHlpR3->pfnLock(pDevIns, VERR_IGNORED);

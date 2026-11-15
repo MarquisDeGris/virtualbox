@@ -3721,9 +3721,9 @@ static void tstPortCfgWrite(uint32_t offReg, uint32_t u32Value, unsigned cb)
 
 
 /**
- * Writes to the config space of the root port the way a reset of the VM, loading
- * a saved state and the fake PCI BIOS do it: straight to the port, without the
- * PCI lock being held.
+ * Writes to the config space of the root port the way a reset of the VM and
+ * loading a saved state do it: straight to the port, without the PCI lock being
+ * held.
  */
 static void tstPortCfgWriteDirect(PPDMDEVINS pDevInsPort, uint32_t offReg, uint32_t u32Value, unsigned cb)
 {
