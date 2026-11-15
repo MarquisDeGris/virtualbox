@@ -546,6 +546,7 @@
             <topicref href="topics/security-shared-folders.dita"/>
             <topicref href="topics/security-cd-dvd-passthrough.dita"/>
             <topicref href="topics/security-usb-passthrough.dita"/>
+            <topicref href="topics/security-pci-passthrough.dita"/>
          </topicref>
          <topicref href="topics/auth-config-using.dita"/>
          <topicref href="topics/pot-insecure.dita"/>

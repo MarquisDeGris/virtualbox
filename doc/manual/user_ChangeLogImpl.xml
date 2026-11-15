@@ -99,6 +99,22 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>PCI passthrough on Linux hosts (experimental): A device can be
+          put into the running VM and taken out of it if PCI hot-plug is
+          enabled for the VM, see the plugpci and unplugpci commands of
+          VBoxManage controlvm. The VM keeps running when the host takes the
+          device back or the device gets unplugged, and it can be started
+          without the device</para>
+      </listitem>
+
+      <listitem>
+        <para>PCI passthrough on Linux hosts: Fixed interrupts of the device
+          no longer arriving after the VM was paused and resumed, and
+          problems with MSI and MSI-X of devices which have several vectors
+          or share a BAR between the MSI-X table and other registers</para>
+      </listitem>
+
+      <listitem>
         <para>VBoxManage: Added natnetwork log and dhcpserver log commands
           to display NAT network and DHCP server log files</para>
       </listitem>
