@@ -608,19 +608,19 @@ uint32_t parsePci(const char *pszPciAddr, char chEnd /*= '\0'*/)
     uint8_t aVals[3] = {0, 0, 0};
 
     char *pszNext = (char *)pszPciAddr;
-    int vrc = parsePciIsNumber(pszNext) ? RTStrToUInt16Ex(pszNext, &pszNext, 16, &u16Domain) : VERR_NO_DIGITS;
+    int vrc = parsePciIsNumber(pszNext) ? RTStrToUInt16Ex(pszNext, &pszNext, 16, &u16Domain) : VERR_INVALID_PARAMETER;
     if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != ':' || u16Domain == UINT16_MAX)
         return UINT32_MAX;
 
-    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[0]) : VERR_NO_DIGITS;
+    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[0]) : VERR_INVALID_PARAMETER;
     if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != ':')
         return UINT32_MAX;
 
-    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[1]) : VERR_NO_DIGITS;
+    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[1]) : VERR_INVALID_PARAMETER;
     if (vrc != VWRN_TRAILING_CHARS || pszNext == NULL || *pszNext != '.' || aVals[1] > 0x1f)
         return UINT32_MAX;
 
-    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[2]) : VERR_NO_DIGITS;
+    vrc = parsePciIsNumber(pszNext + 1) ? RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[2]) : VERR_INVALID_PARAMETER;
     if (   (vrc != VINF_SUCCESS && vrc != VWRN_TRAILING_CHARS)
         || pszNext == NULL
         || (*pszNext != '\0' && *pszNext != chEnd)
