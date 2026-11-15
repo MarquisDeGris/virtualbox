@@ -3398,8 +3398,10 @@ static uint32_t g_cMsTstGuestRelease = 0;
 static PPDMIPCIPASSTHROUGHPORT tstDevGetPort(PPDMDEVINS pDevIns)
 {
     PPDMIPCIPASSTHROUGHPORT pPort = NULL;
-    if (pDevIns->IBase.pfnQueryInterface)
-        pPort = PDMIBASE_QUERY_INTERFACE(&pDevIns->IBase, PDMIPCIPASSTHROUGHPORT);
+    PPDMIBASE               pBase = NULL;
+    int rc = tstPdmQueryDeviceLun(pDevIns->pReg->szName, pDevIns->iInstance, 0 /*iLun*/, &pBase);
+    if (RT_SUCCESS(rc))
+        pPort = PDMIBASE_QUERY_INTERFACE(pBase, PDMIPCIPASSTHROUGHPORT);
     if (!pPort)
         RTTestIFailed("the passthrough device has no interface for the management\n");
     return pPort;
@@ -6143,6 +6145,14 @@ static void tstSlotInterface(void)
         PPDMIPCIPASSTHROUGHPORT pPort = tstDevGetPort(g_pTstDevInsVfio);
         if (pPort)
         {
+            /* The interface is at LUN 0 of this instance and nowhere else. */
+            PPDMIBASE pBase = NULL;
+            RTTESTI_CHECK_RC(tstPdmQueryDeviceLun("pci-vfio", 0 /*iInstance*/, 1 /*iLun*/, &pBase), VERR_PDM_LUN_NOT_FOUND);
+            RTTESTI_CHECK_RC(tstPdmQueryDeviceLun("pci-vfio", 1 /*iInstance*/, 0 /*iLun*/, &pBase), VERR_PDM_DEVICE_INSTANCE_NOT_FOUND);
+            RTTESTI_CHECK_RC(tstPdmQueryDeviceLun("pci-vfio", 0 /*iInstance*/, 0 /*iLun*/, &pBase), VINF_SUCCESS);
+            RTTESTI_CHECK(pBase && PDMIBASE_QUERY_INTERFACE(pBase, PDMIPCIPASSTHROUGHPORT) == pPort);
+            RTTESTI_CHECK(pBase && !pBase->pfnQueryInterface(pBase, "00000000-0000-0000-0000-000000000000"));
+
             tstSlotCheckState(__LINE__, pPort, false /*fHotPlug*/, true /*fPresent*/, true /*fInUse*/);
             RTTESTI_CHECK_RC(pPort->pfnAttach(pPort), VERR_NOT_SUPPORTED);
             RTTESTI_CHECK_RC(pPort->pfnDetach(pPort, 0 /*cMsWait*/, true /*fForce*/), VERR_NOT_SUPPORTED);
