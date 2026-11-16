@@ -27,7 +27,8 @@ and I are the first time anybody uses them.
   nodes, and may lock all of the guest memory (`ulimit -l`, at least the RAM
   of the VM).
 - VirtualBox built from the branch of the merge request,
-  `pci-passthrough-hotplug-v1`, with KVM as execution engine:
+  `pci-passthrough-hotplug-v1`, see [INSTALL.md](INSTALL.md) for building it
+  and for preparing the host, with KVM as execution engine:
   `VBoxManage modifyvm <vm> --vm-execution-engine native-api`.
 - A VM with the ICH9 chipset and EFI. Guests to try: a current Linux, and
   Windows 10 or 11.

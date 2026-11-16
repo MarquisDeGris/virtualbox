@@ -1,0 +1,45 @@
+#!/bin/busybox sh
+# Init of the virtual machine which stands in for the host in the simulation,
+# see run.sh.
+#
+# The machine has no disk.  Its root file system is the one of the runner,
+# read-only through 9p, so the VirtualBox which was built there and everything
+# it needs are at the paths they were built for.  What is written goes to
+# memory (/tmp, /run) and to the directory for results (/mnt).
+
+bb=/bin/busybox
+$bb mkdir -p /proc /sys /dev /host
+$bb mount -t proc proc /proc
+$bb mount -t sysfs sys /sys
+$bb mount -t devtmpfs dev /dev
+# The initramfs has no /dev/console, so the kernel started this without one.
+exec < /dev/console > /dev/console 2>&1
+
+echo "L1-INIT: kernel $($bb uname -r)"
+for m in $($bb cat /modules.list 2> /dev/null); do
+    $bb insmod "/modules/$m" || echo "L1-INIT: loading $m failed"
+done
+
+if ! $bb mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144,cache=loose,ro hostroot /host; then
+    echo "L1-INIT: FAILED to mount the file system of the runner"
+    $bb sync
+    $bb poweroff -f
+fi
+
+$bb mount -t proc proc /host/proc
+$bb mount -t sysfs sys /host/sys
+$bb mount -t devtmpfs dev /host/dev
+$bb mkdir -p /host/dev/pts /host/dev/shm
+$bb mount -t devpts devpts /host/dev/pts
+$bb mount -t tmpfs tmpfs /host/dev/shm
+$bb mount -t tmpfs tmpfs /host/tmp
+$bb mount -t tmpfs tmpfs /host/run
+$bb mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 simout /host/mnt \
+    || echo "L1-INIT: FAILED to mount the directory for the results"
+
+# SIM_DIR and the other SIM_ variables come from the kernel command line.
+$bb chroot /host /bin/bash "$SIM_DIR/l1.sh"
+echo "L1-INIT: the script ended with $?"
+
+$bb sync
+$bb poweroff -f

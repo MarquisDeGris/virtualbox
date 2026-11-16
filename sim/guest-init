@@ -1,0 +1,101 @@
+#!/bin/busybox sh
+# Init of the test guest of the simulation, see run.sh.
+#
+# The guest is a Linux kernel with this script and busybox in its initramfs.
+# It tells on the serial port what it sees of an NVMe drive which is passed
+# through to it: when the drive is there it reads from it and writes to it,
+# and it says when the drive comes and goes.  Lines of this script start with
+# "GUEST: ", everything else on the serial port is the kernel.
+
+bb=/bin/busybox
+$bb mkdir -p /proc /sys /dev /tmp
+$bb mount -t proc proc /proc
+$bb mount -t sysfs sys /sys
+$bb mount -t devtmpfs dev /dev
+# The initramfs has no /dev/console, so the kernel started this without one.
+exec < /dev/console > /dev/console 2>&1
+$bb --install -s /bin
+export PATH=/bin
+
+say() { echo "GUEST: $*"; }
+
+say "UP $(uname -r)"
+
+for m in $(cat /modules.list 2> /dev/null); do
+    insmod "/modules/$m" || say "insmod $m failed"
+done
+
+for d in /sys/bus/pci/devices/*; do
+    drv=none
+    [ -e "$d/driver" ] && drv=$(basename "$(readlink "$d/driver")")
+    say "pci: ${d##*/} $(cat "$d/vendor"):$(cat "$d/device") class $(cat "$d/class") driver $drv"
+done
+
+# The drive: whatever has the class of an NVMe controller.
+finddev()
+{
+    for d in /sys/bus/pci/devices/*; do
+        if [ "$(cat "$d/class" 2> /dev/null)" = 0x010802 ]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+blk()
+{
+    for b in /dev/nvme*n1; do
+        if [ -b "$b" ]; then
+            echo "$b"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Reads the first 8 MiB from the drive itself, not from the page cache.
+readsum()
+{
+    echo 3 > /proc/sys/vm/drop_caches
+    dd if="$1" bs=1M count=8 2> /dev/null | md5sum | cut -d' ' -f1
+}
+
+n=0
+rr=0
+tick=0
+state=absent
+while :; do
+    if d=$(finddev); then
+        if [ "$state" = absent ]; then
+            state=present
+            n=$((n + 1))
+            say "PRESENT $n ${d##*/} $(cat "$d/vendor"):$(cat "$d/device")"
+            i=0
+            while [ "$i" -lt 40 ] && ! blk > /dev/null; do
+                sleep 1
+                i=$((i + 1))
+            done
+            if b=$(blk); then
+                say "READ $n md5=$(readsum "$b")"
+                if echo "written by the guest, round $n" | dd of="$b" bs=1M seek=12 conv=fsync 2> /dev/null; then
+                    say "WROTE $n"
+                else
+                    say "WRITE-FAILED $n"
+                fi
+                say "IRQ $n $(grep -c nvme /proc/interrupts) lines: $(grep nvme /proc/interrupts | head -n 2 | tr -s ' ' | cut -c1-120 | tr '\n' '|')"
+            else
+                say "NODRIVE $n"
+            fi
+        elif [ $((tick % 10)) = 0 ] && b=$(blk); then
+            rr=$((rr + 1))
+            say "REREAD $rr md5=$(readsum "$b")"
+        fi
+    elif [ "$state" = present ]; then
+        state=absent
+        say "GONE $n"
+    fi
+    [ $((tick % 10)) = 0 ] && say "ALIVE $tick"
+    tick=$((tick + 1))
+    sleep 1
+done

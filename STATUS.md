@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-15
+Updated: 2026-11-16
 
 ## Where things are
 
@@ -11,7 +11,7 @@ Updated: 2026-11-15
 | Branch the runs were made on | `scratch/mgmt` @ `a69d5a89`, the same tree as the head of the merge request (`68621baf`) |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
-| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, a draft: WP0 to WP7 |
+| Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -30,6 +30,37 @@ LeakSanitizer and UndefinedBehaviorSanitizer (runs 217 and 218). Main and
 Next: the hardware test, which needs a person with the hardware. The
 merge request is marked ready for it, see "Ready for the hardware test"
 below.
+
+### Installation and the simulation, from 16 November
+
+A check of what was delivered found two gaps. Nothing said how to build
+and install the branch and how to prepare the host: that is
+[INSTALL.md](INSTALL.md) now. And the README still called the work a draft
+in an early state.
+
+The system simulation (T4), which had been dropped on 2026-11-15, is being
+set up after all: it is the one thing without hardware which shows the
+code at work instead of compiled, with the real VMM, a real kernel
+interface, a guest operating system, Main and `VBoxManage`. The flavor
+`sim` of the workflow runs the VirtualBox it has built with a small Linux
+guest (`sim/` on this branch):
+
+1. On the runner itself, which has KVM and no IOMMU: a VM without anything
+   of this work, and a VM with an empty hot-plug capable slot, including
+   its saved state.
+2. In a virtual machine standing in for a host, with an emulated IOMMU and
+   an emulated NVMe drive behind a PCIe root port: the drive is bound to
+   `vfio-pci` there and VirtualBox passes it on to its guest, which reads
+   from it and writes to it. Then what the hardware test asks for as far
+   as it goes without hardware: pause and resume, the refused saved state,
+   `unplugpci` and `plugpci` with the guest being asked and without, the
+   host asking for the device back, a start without the device, a saved
+   state with the empty slot.
+
+The second part is a third level of virtualization on a runner which is a
+virtual machine itself; whether the runners allow it is not known yet. The
+first runs are for finding that out and do not fail on what they find
+(`sim_strict: no`). Nothing of this has run yet.
 
 ### The management and the review, 13 to 15 November
 
@@ -523,9 +554,12 @@ harness since WP5, saved states since the fourth part of WP6.
 ## Next
 
 1. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
-   the hardware. The merge request is marked ready for it.
-2. Not planned for now: T3 and T4 (see the test tiers), WP8 (INTx beyond
-   the first interrupt), events in the API for a device coming and going.
+   the hardware. The merge request is marked ready for it;
+   [INSTALL.md](INSTALL.md) says how to build and install.
+2. The system simulation (T4), see "Installation and the simulation"
+   above: get it to run, deal with what it finds, then make it strict.
+3. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
+   first interrupt), events in the API for a device coming and going.
 
 ## Decisions
 
@@ -590,6 +624,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-15 | The simulation tiers T3 and T4 are not run; the merge request goes to the hardware test without them | T3 does not fit a driver which takes PCI devices behind an IOMMU only. T4 would take many trial runs to set up, which is what the workflows of the fork were disabled for; its first finding would be what part G of the hardware test shows |
 | 2026-11-15 | No build of the head from nothing | The `tests` flavor builds the tree on top of the cached build of `main` and compiles every file which differs; a build from nothing costs a long run and would tell the same |
 | 2026-11-15 | A failed build of the tree does not end a `tests` run at once: the device testcases are built and run with what was built, and the run fails at its end | One run tells about the tree and about the testcase, where it took two before |
+| 2026-11-16 | The system simulation (T4) is set up after all, which takes back the decision of 2026-11-15 for T4 | Everything else which was verified is compiled code and a testcase against a kernel interface written by the same hand; only the simulation shows the VMM, the kernel, a guest, Main and `VBoxManage` working together before hardware does. The cost in runs is kept down: the scripts are written in one go, a run which is for finding out succeeds whatever it finds, and each run is read completely before the next |
+| 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -599,7 +635,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
 | T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | not run | | It takes a virtual machine with an emulated IOMMU as the host, inside a runner which is a virtual machine itself, and VirtualBox in it running a third. Getting that to work takes many trial runs, and the workflows of this fork were disabled once for the number of runs. What it would have shown first, a guest taking a device which was put into the slot, is part G of the hardware test |
+| T4 system simulation | being set up, not run yet | | It takes a virtual machine with an emulated IOMMU as the host, inside a runner which is a virtual machine itself, and VirtualBox in it running a third. See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
