@@ -143,6 +143,8 @@ uint32_t    tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex);
 void        tstVfioKrnlDevSetIrqsAvailable(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t cIrqs);
 uint32_t    tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlDevGetBusResetCount(PTSTVFIODEV pDev);
+uint32_t    tstVfioKrnlDevGetRefusedResetCount(PTSTVFIODEV pDev);
+uint32_t    tstVfioKrnlDevGetRefusedBusResetCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevProtectMappings(PTSTVFIODEV pDev, bool fProtect);
 void        tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser);
 uint32_t    tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev);

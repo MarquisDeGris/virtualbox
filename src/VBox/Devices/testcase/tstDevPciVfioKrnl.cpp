@@ -132,6 +132,11 @@ typedef struct TSTVFIODEV
     uint32_t            cResets;
     /** Number of resets of the bus the function is on. */
     uint32_t            cBusResets;
+    /** Number of resets of the function which were refused as the host is busy with it. */
+    uint32_t            cResetsRefused;
+    /** Number of resets of the bus asked for through the function which were refused
+     * as the host is busy with a function on the bus. */
+    uint32_t            cBusResetsRefused;
     /** Number of interrupts triggered per interrupt index. */
     uint32_t            acIrqsTriggered[TSTVFIO_IRQ_INDEX_COUNT];
     /** Number of vectors the host has for each interrupt index, 0 for as many as the
@@ -150,6 +155,10 @@ typedef struct TSTVFIODEV
     bool                fRemoved;
     /** Whether INTx is masked. */
     bool                fIntxMasked;
+    /** Whether the host is busy with the function itself: it has asked its user to let
+     * go of it and waits for that.  Like the kernel, which has the device locked for as
+     * long, it refuses to reset the function or its bus meanwhile. */
+    bool                fHeld;
 } TSTVFIODEV;
 
 /**
@@ -412,6 +421,7 @@ static void tstVfioKrnlDevRelease(PTSTVFIODEV pDev)
             if (g_Krnl.aMaps[i].pv && g_Krnl.aMaps[i].pDev == pDev)
                 mprotect(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb, PROT_NONE);
     pDev->fIntxMasked = false;
+    pDev->fHeld       = false; /* The host has what it waited for. */
 }
 
 
@@ -944,6 +954,11 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
         {
             if (pDev->Cfg.fNoFunctionReset)
                 return errno = EINVAL, -1;
+            if (pDev->fHeld)
+            {
+                pDev->cResetsRefused++;
+                return errno = EAGAIN, -1;
+            }
             if (!tstVfioKrnlDevResetCfg(pDev))
                 return errno = EIO, -1;
             pDev->cResets++;
@@ -975,6 +990,12 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
             for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
                 if (g_Krnl.aDevs[i].Cfg.fNoBusReset)
                     return errno = EPERM, -1;
+            for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
+                if (g_Krnl.aDevs[i].fHeld)
+                {
+                    pDev->cBusResetsRefused++;
+                    return errno = EAGAIN, -1;
+                }
             for (uint32_t i = 0; i < g_Krnl.cDevs; i++)
             {
                 if (!tstVfioKrnlDevResetCfg(&g_Krnl.aDevs[i]))
@@ -1311,6 +1332,7 @@ int tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg)
         pDev->fGone       = false;
         pDev->fRemoved    = false;
         pDev->fIntxMasked = false;
+        pDev->fHeld       = false;
         RT_ZERO(pDev->acIrqsAvailable);
     }
     else
@@ -1447,6 +1469,32 @@ uint32_t tstVfioKrnlDevGetBusResetCount(PTSTVFIODEV pDev)
 
 
 /**
+ * Returns the number of resets of the PCI function which were refused because
+ * the host was busy with it, see tstVfioKrnlDevRequest().
+ *
+ * @returns Number of refused resets.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetRefusedResetCount(PTSTVFIODEV pDev)
+{
+    return pDev->cResetsRefused;
+}
+
+
+/**
+ * Returns the number of resets of the bus which were asked for through the PCI
+ * function and refused because the host was busy with a function on the bus.
+ *
+ * @returns Number of refused bus resets.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetRefusedBusResetCount(PTSTVFIODEV pDev)
+{
+    return pDev->cBusResetsRefused;
+}
+
+
+/**
  * Makes the mappings the user of a PCI function has of its regions unusable, or
  * usable again.  The kernel does that at times, touching such a mapping gets the
  * process a signal.
@@ -1530,11 +1578,16 @@ static void tstVfioKrnlDevNotify(PTSTVFIODEV pDev, uint32_t uIrqIndex)
  * Asks the user of a PCI function to let go of it, like the host does when the
  * driver is to be unbound from a device which is still there.
  *
+ * The host waits for that with the device locked, which makes it refuse to reset
+ * the function or its bus until the user has let go.
+ *
  * @param   pDev                The PCI function.
  */
 void tstVfioKrnlDevRequest(PTSTVFIODEV pDev)
 {
     RTCritSectEnter(&g_Krnl.CritSect);
+    if (pDev->cOpens)
+        pDev->fHeld = true;
     tstVfioKrnlDevNotify(pDev, VFIO_PCI_REQ_IRQ_INDEX);
     RTCritSectLeave(&g_Krnl.CritSect);
 }

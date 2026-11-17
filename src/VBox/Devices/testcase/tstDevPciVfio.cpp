@@ -6841,6 +6841,51 @@ static void tstSlotStateHostRequest(void)
 }
 
 
+/**
+ * The host does not reset a device it is waiting for, it has it locked.  A guest
+ * which lets go of the device switches the slot off, and that resets the device:
+ * the reset of the function is refused then.  There is no point in asking for a
+ * reset of the bus instead, which is refused for the same reason, and nothing of
+ * this keeps the host from getting the device.
+ */
+static void tstSlotHostRequestReset(void)
+{
+    RTTestISub("Hot-plug slot: the host does not reset a device it waits for");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    g_cMsTstGuestRelease = RT_MS_1MIN;
+    int rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    g_cMsTstGuestRelease = 0;
+    if (RT_SUCCESS(rc))
+    {
+        tstSlotGuestEnableDevice();
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+        uint32_t const cResetsBefore = tstVfioKrnlDevGetResetCount(pDev);
+
+        /* The host wants the device back, the guest is asked and switches the slot off. */
+        tstVfioKrnlDevRequest(pDev);
+        RTTESTI_CHECK_MSG(tstSlotGuestLetGoWhenAsked(RT_MS_5SEC), ("the guest was not asked to let go of the device\n"));
+        RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("the host didn't get the device\n"));
+
+        /* The function was not reset, at most it was tried once, and the bus was left alone. */
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore,
+                          ("%u reset(s)\n", tstVfioKrnlDevGetResetCount(pDev) - cResetsBefore));
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetRefusedResetCount(pDev) <= 1,
+                          ("%u reset(s) of the function refused\n", tstVfioKrnlDevGetRefusedResetCount(pDev)));
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetRefusedBusResetCount(pDev) == 0,
+                          ("%u reset(s) of the bus asked for and refused\n", tstVfioKrnlDevGetRefusedBusResetCount(pDev)));
+
+        tstSlotCheckEmpty(__LINE__, pDevInsPort);
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+    }
+    tstFixtureTeardown();
+}
+
+
 /*
  *
  * Random operations on a VM with a device in a hot-plug capable slot.
@@ -7390,6 +7435,7 @@ int main()
     tstSlotSavedStateRefused();
     tstSlotStateHostRequest();
     tstSlotInterface();
+    tstSlotHostRequestReset();
     tstFuzz();
     tstPortFuzz();
     tstSlotFuzz();
