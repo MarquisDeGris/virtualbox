@@ -245,6 +245,17 @@ MD5=$(head -c 8M "$WORK/nvme.img" | md5sum | cut -d' ' -f1)
 echo "checksum of the first 8 MiB of the drive: $MD5"
 
 
+note "The checklist of INSTALL.md on the runner, which has no IOMMU"
+sh "$SIM/../tools/pci-passthrough-check.sh" > "$WORK/check-runner.log" 2>&1
+rc=$?
+cat "$WORK/check-runner.log"
+if [ "$rc" = 1 ] && grep -q '^MISSING  no IOMMU in use' "$WORK/check-runner.log"; then
+    stage "the checklist script tells that the runner has no IOMMU" ok
+else
+    stage "the checklist script tells that the runner has no IOMMU" FAILED "exit code $rc"
+fi
+
+
 note "Part 1: VirtualBox on the runner"
 sudo chmod 666 /dev/kvm
 sudo modprobe iommufd 2> /dev/null || echo "the kernel of the runner has no iommufd module"

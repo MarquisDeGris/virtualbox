@@ -347,7 +347,9 @@ jobs:
         with:
           ref: meta
           path: ci-meta
-          sparse-checkout: sim
+          sparse-checkout: |
+            sim
+            tools
 
       - name: Simulation
         if: inputs.flavor == 'sim'

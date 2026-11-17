@@ -79,6 +79,13 @@ else
     exit 1
 fi
 
+echo "==== $WHERE: the checklist of INSTALL.md for $addr"
+if sh "$SIM_DIR/../tools/pci-passthrough-check.sh" "$addr"; then
+    stage "the checklist script finds nothing missing for the drive" ok
+else
+    stage "the checklist script finds nothing missing for the drive" FAILED
+fi
+
 if [ ! -c /dev/kvm ]; then
     stage "VirtualBox with the drive passed through" skipped "it takes KVM"
     exit 0

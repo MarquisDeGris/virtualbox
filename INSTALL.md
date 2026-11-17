@@ -7,26 +7,108 @@ What of this was done by somebody or something, and what was not:
 
 | Part | State |
 |------|-------|
+| 1. The checklist and its script | Written from the source and the documentation of the kernel; what the simulation has of it is said at its end |
 | 2. Building | What the workflow of this fork does in every run, on Ubuntu 24.04 |
 | 3. Running from the build directory, without kernel modules of VirtualBox | Done by the simulation on a runner of the workflow (run 220, as root), see [STATUS.md](STATUS.md) |
 | 4. Preparing a device: binding to `vfio-pci`, permissions | Binding as the simulation does it with an emulated device; never with a real one |
 | 4. Thunderbolt and USB4 | From the documentation of the kernel, **never tried** |
 | A build with the graphical user interface, packages, an installer | **Not built** by anything here |
 
-## 1. What the host needs
+## 1. Checklist: what has to be switched on
 
-- A PC with an IOMMU (Intel VT-d or AMD-Vi) which is switched on in the
-  firmware. This is the only firmware setting needed. Without an IOMMU the
-  device refuses to work, there is no mode without it.
-- Linux 6.12 or newer with `CONFIG_IOMMUFD`, `CONFIG_VFIO_PCI`,
-  `CONFIG_VFIO_DEVICE_CDEV` and KVM. The kernels of current distributions
-  have them. On Intel the kernel may need `intel_iommu=on` on its command
-  line.
-- Check:
+Everything in this list has to be there. On a PC with a current
+distribution most of it is; a host which is locked down may have some of
+it switched off. The list says for each item how to see whether it is
+there, what happens when it is not, and what can be done then.
 
-      dmesg | grep -i -e DMAR -e IOMMU      # the IOMMU is found and enabled
-      ls /sys/kernel/iommu_groups           # not empty
-      ls -l /dev/kvm
+A script goes through the list on a host and tells what is missing. It
+only reads. Run it as the user who is to run the VM, with the PCI
+addresses of the functions of the device if the device is plugged in:
+
+    sh tools/pci-passthrough-check.sh 0000:0a:00.0 0000:0a:00.1
+
+([tools/pci-passthrough-check.sh](tools/pci-passthrough-check.sh) on this
+branch.)
+
+There is no reduced mode: where an item marked **stop** cannot be had, the
+device cannot be passed through on that host.
+
+### Firmware
+
+Nothing in the running system can change these.
+
+| | What | How to see | When it is not there | What can be done |
+|---|------|-----------|----------------------|------------------|
+| F1 | The IOMMU (Intel VT-d, AMD-Vi) is on | `ls /sys/kernel/iommu_groups` is not empty | The device is in no IOMMU group and cannot be bound for passing through | **stop.** It has to be switched on in the firmware. Without it a device could reach all memory of the host, so there is no mode without it |
+| F2 | Interrupt remapping, a part of the IOMMU | `/proc/interrupts` has names starting with `IR-`; the kernel log says `DMAR-IR: Enabled IRQ remapping` or `AMD-Vi: Interrupt remapping enabled` | The kernel does not hand the device out | **stop.** See "What must not be used" below |
+| F3 | Hardware virtualization (VT-x, AMD-V) is on | `/dev/kvm` is there once the KVM module is loaded | No VM with KVM | **stop** |
+| F4 | For a device on Thunderbolt or USB4: PCIe tunnelling is allowed | `cat /sys/bus/thunderbolt/devices/domain0/security` says `none`, `user` or `secure` | With `dponly`, `usbonly` or `nopcie` the PCIe devices of an enclosure never appear on the host | **stop** for such devices. Devices in a slot of the PC do not need it |
+
+### Kernel
+
+Whoever builds the system for the host decides these.
+
+| | What | How to see | When it is not there | What can be done |
+|---|------|-----------|----------------------|------------------|
+| K1 | Linux 6.12 or newer | `uname -r` | The device was written for the interface of that kernel | **stop** |
+| K2 | KVM (`CONFIG_KVM`, module `kvm_intel` or `kvm_amd`) | `ls -l /dev/kvm` | The VM does not start. If the VM uses another execution engine: "PCI passthrough requires the native execution engine (KVM), which this VM doesn't use" | **stop.** A host which runs its VMs with the kernel driver of VirtualBox (`vboxdrv`) only cannot pass a device through: the device needs the memory of the guest to stay where it is, which only the KVM engine guarantees. Changing that is work in the VMM which has not been done |
+| K3 | VFIO for PCI (`CONFIG_VFIO_PCI`, module `vfio-pci`) | `ls /sys/bus/pci/drivers/vfio-pci` after `modprobe vfio-pci` | No device can be bound for passing through | **stop** |
+| K4 | IOMMUFD and VFIO device nodes (`CONFIG_IOMMUFD`, `CONFIG_VFIO_DEVICE_CDEV`) | `/dev/iommu` is there; `/dev/vfio/devices/vfio0` appears when a device is bound to `vfio-pci` | The device falls back by itself to the older interface, `/dev/vfio/vfio` with a node for the IOMMU group (`CONFIG_VFIO_CONTAINER`, `CONFIG_VFIO_GROUP`) | Works with a limit: the VM cannot start without its device. The older interface was only ever tested against a made-up kernel interface |
+| K5 | The IOMMU is switched on in the kernel | as F1; the kernel log says `DMAR: IOMMU enabled` | as F1 | On Intel, `intel_iommu=on` on the kernel command line unless the kernel was built with it as its default (`CONFIG_INTEL_IOMMU_DEFAULT_ON`). Where the command line cannot be changed, it takes a kernel built that way |
+| K6 | The modules can be loaded, or are loaded | `cat /proc/sys/kernel/modules_disabled` is 0 | With 1 nothing more can be loaded | Load `kvm_intel` or `kvm_amd`, `vfio-pci`, `iommufd` and, for Thunderbolt, `thunderbolt` before the host locks module loading, or build them into the kernel |
+| K7 | For devices which get plugged in: PCIe hot-plug and Thunderbolt on the host (`CONFIG_HOTPLUG_PCI_PCIE`, `CONFIG_USB4`) | plug the device in, it shows in `/sys/bus/pci/devices` | The host does not see the device arrive | **stop** for such devices |
+
+### The device on the host
+
+Whoever administers the host does these, each time the device was plugged
+in or the host started. See section 4 for how.
+
+| | What | How to see | When it is not so | What can be done |
+|---|------|-----------|-------------------|------------------|
+| D1 | A device on Thunderbolt or USB4 is authorized, if the security level is `user` or `secure` | its PCI functions are in `/sys/bus/pci/devices` | The PCI devices do not appear | `boltctl authorize`, or a rule of the host which does it |
+| D2 | All functions of the device, and nothing else, are in one IOMMU group | `ls /sys/bus/pci/devices/<address>/iommu_group/devices` | What else is in the group belongs to the same VM as far as the IOMMU can tell | Another slot or port. See "What must not be used" below |
+| D3 | Each function is bound to `vfio-pci`, and the driver of the host for the device (a graphics driver, say) does not have it | `readlink /sys/bus/pci/devices/<address>/driver` | The VM does not start: "The PCI device 0000:0a:00.0 is not bound to a VFIO driver". With hot-plug switched on it starts with the slot empty instead, if it was started with the device once before | Binding takes root and writing to sysfs (`driver_override`, `unbind`, `drivers_probe`). Where nobody may do that by hand, a service of the host has to, when the device appears |
+
+### The user who runs the VM
+
+| | What | How to see | When it is not so | What can be done |
+|---|------|-----------|-------------------|------------------|
+| U1 | May read and write `/dev/kvm` | `ls -l /dev/kvm` | The VM does not start | Group or ownership of the node |
+| U2 | May read and write `/dev/iommu` and the node of each function, `/dev/vfio/devices/vfio<n>` (older interface: `/dev/vfio/vfio` and `/dev/vfio/<group>`) | `ls -l` | The VM does not start, the message names the path which could not be opened | Ownership of the nodes, set when the device is bound. The node of a function is new each time the device is bound |
+| U3 | May lock as much memory as the VM has RAM | `ulimit -l`, in KiB | "Failed to make the guest memory available to the passed through PCI device. The amount of memory the user running the VM may lock might be too low" | The limit of the user (`RLIMIT_MEMLOCK`), for example in `/etc/security/limits.conf` or in the unit which starts the VM |
+| U4 | May read `/sys/bus/pci/devices/<address>/` and what is below it | `ls` | The node of the function is not found | Where the VM process is confined (a policy of SELinux or AppArmor, a namespace with its own `/sys` or `/dev`), these paths and the nodes of U1 and U2 have to be allowed for it |
+
+The kernel driver of VirtualBox (`vboxdrv`) is not needed and does not have
+to be loaded.
+
+### The VM
+
+| | What | How |
+|---|------|-----|
+| V1 | Chipset ICH9, firmware EFI | `VBoxManage modifyvm <vm> --chipset ich9 --firmware efi` |
+| V2 | KVM as execution engine | `VBoxManage modifyvm <vm> --vm-execution-engine native-api` |
+| V3 | The device attached, for hot-plug at device 0 of guest bus 1 or 2 and alone there | section 2 of [HWTEST.md](HWTEST.md) |
+| V4 | For a graphics card which is to show the start of the guest: the emulated graphics controller off, `ExposeVga` set | the top of `src/VBox/Devices/Bus/DevPciVfio.cpp` |
+
+### What must not be used to get around a missing item
+
+Each of these makes the missing item go away and takes the protection
+with it which the item is there for:
+
+- The mode of VFIO without an IOMMU (`enable_unsafe_noiommu_mode`). The
+  device refuses a function which is in that mode.
+- `allow_unsafe_interrupts`, for a host without interrupt remapping.
+- Patches and kernel parameters which split IOMMU groups the hardware
+  does not separate (`pcie_acs_override`).
+
+### What of this list was seen working
+
+The simulation (see [STATUS.md](STATUS.md)) runs with the generic kernel
+7.0 of Ubuntu 24.04 in a virtual machine with an emulated Intel IOMMU:
+F1, F2, K1 to K5, D2, D3 and U1 to U4 for root are what it has. The
+messages quoted above are from the source; of them the one of D3 was seen
+there. F4, K7 and D1 are from the documentation of the kernel and were
+never tried, as nothing here has Thunderbolt.
 
 ## 2. Building
 
@@ -105,9 +187,11 @@ first result; it is not how it should stay.
 ## 4. Preparing the device
 
 1. A device on Thunderbolt or USB4 has to be authorized on the host before
-   its PCI devices show up, depending on the security level of the port:
-   `boltctl list`, `boltctl authorize <uuid>`. With the level `none` or
-   `dponly` there is nothing to do.
+   its PCI devices show up, if the security level of the port is `user` or
+   `secure`: `boltctl list`, `boltctl authorize <uuid>`. With the level
+   `none` there is nothing to do. With `dponly`, `usbonly` or `nopcie`
+   there are no PCI devices to be had from the port at all, see F4 of the
+   checklist.
 2. Find the device and all its functions:
 
        lspci -D -nn
