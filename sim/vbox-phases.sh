@@ -250,6 +250,24 @@ guest_goes_on() # <what> [<seconds>]
     return 1
 }
 
+# A device which goes in the normal way must not leave lines in the log of the
+# VM which read like errors of the device.  The reset which the guest causes by
+# switching the slot off used to, when it met a function already out of
+# service or a host holding on to the device it waits for.
+check_log_quiet()
+{
+    local log="$VMDIR/Logs/VBox.log" n
+    local re='Failed to update command register|could not be reset|t be reset on its own|Failed to clear the command register'
+    n=$(grep -a -c -E "$re" "$log" 2> /dev/null)
+    if [ "${n:-0}" = 0 ]; then
+        stage "the log of the VM has no line about a failed reset or register write" ok
+    else
+        stage "the log of the VM has no line about a failed reset or register write" FAILED "$n"
+        grep -a -E "$re" "$log" | cut -c1-200 | sed 's/^/    | /'
+    fi
+    grep -a 'The device is not reset now' "$log" | cut -c1-200 | head -n 2 | sed 's/^/    | /'
+}
+
 # The device of the host and the driver it has to be bound to.
 bind_dev()
 {
@@ -522,6 +540,7 @@ phase_hotplug()
             diag
         fi
         guest_reads 3 "guest: takes the device again and reads from the drive"
+        check_log_quiet
     fi
     end_phase
 }
@@ -578,6 +597,7 @@ phase_hostremove()
         else
             stage "host: the device is back after a rescan" FAILED
         fi
+        check_log_quiet
     fi
     end_phase
     # For the phases after this one.
