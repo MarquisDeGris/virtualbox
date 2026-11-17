@@ -29,6 +29,11 @@ note()    { echo "note     $*"; }
 
 rw() { [ -r "$1" ] && [ -w "$1" ]; }
 
+# Who runs this.  The name of the user is not printed: what this prints is meant
+# to be passed on.
+me="this user"
+[ "$(id -u)" = 0 ] && me=root
+
 echo "---- the kernel"
 rel=$(uname -r)
 maj=${rel%%.*}
@@ -66,9 +71,9 @@ fi
 echo "---- KVM"
 if [ -c /dev/kvm ]; then
     if rw /dev/kvm; then
-        ok "/dev/kvm is there and $(id -un) may use it"
+        ok "/dev/kvm is there and $me may use it"
     else
-        bad "/dev/kvm is there but $(id -un) may not read and write it"
+        bad "/dev/kvm is there but $me may not read and write it"
     fi
 else
     bad "/dev/kvm is not there: KVM is not in the kernel, its module (kvm_intel, kvm_amd) is not loaded, or virtualization is off in the firmware. The device needs KVM as execution engine of the VM"
@@ -87,9 +92,9 @@ else
 fi
 if [ -c /dev/iommu ]; then
     if rw /dev/iommu; then
-        ok "/dev/iommu is there and $(id -un) may use it"
+        ok "/dev/iommu is there and $me may use it"
     else
-        bad "/dev/iommu is there but $(id -un) may not read and write it"
+        bad "/dev/iommu is there but $me may not read and write it"
     fi
     if [ -d /dev/vfio/devices ] || [ ! -d /sys/bus/pci/drivers/vfio-pci ]; then
         :
@@ -99,9 +104,9 @@ if [ -c /dev/iommu ]; then
 elif [ -c /dev/vfio/vfio ]; then
     note "/dev/iommu is not there (CONFIG_IOMMUFD, module iommufd), /dev/vfio/vfio is: the device uses the older interface then. A VM cannot start without its device that way"
     if rw /dev/vfio/vfio; then
-        ok "/dev/vfio/vfio is there and $(id -un) may use it"
+        ok "/dev/vfio/vfio is there and $me may use it"
     else
-        bad "/dev/vfio/vfio is there but $(id -un) may not read and write it"
+        bad "/dev/vfio/vfio is there but $me may not read and write it"
     fi
 else
     unsure "neither /dev/iommu nor /dev/vfio/vfio is there: the modules iommufd and vfio are not loaded, or the kernel has neither CONFIG_IOMMUFD nor CONFIG_VFIO_CONTAINER"
@@ -111,9 +116,9 @@ echo "---- memory the user may lock"
 lim=$(ulimit -l 2> /dev/null)
 [ "$(id -u)" = 0 ] && lim=unlimited     # the limit does not hold root back
 case "$lim" in
-    unlimited) ok "$(id -un) may lock any amount of memory" ;;
-    '')        unsure "could not find out how much memory $(id -un) may lock (ulimit -l)" ;;
-    *)         note "$(id -un) may lock $((lim / 1024)) MiB (ulimit -l): this has to be at least the RAM of the VM" ;;
+    unlimited) ok "$me may lock any amount of memory" ;;
+    '')        unsure "could not find out how much memory $me may lock (ulimit -l)" ;;
+    *)         note "$me may lock $((lim / 1024)) MiB (ulimit -l): this has to be at least the RAM of the VM" ;;
 esac
 
 echo "---- Thunderbolt and USB4"
@@ -166,9 +171,9 @@ for addr in "$@"; do
             if [ -z "$node" ]; then
                 note "it has no VFIO device node (CONFIG_VFIO_DEVICE_CDEV): the older interface is used, through /dev/vfio/$(basename "$(readlink "$dev/iommu_group")")"
             elif rw "$node"; then
-                ok "$node is there and $(id -un) may use it"
+                ok "$node is there and $me may use it"
             else
-                bad "$node is there but $(id -un) may not read and write it"
+                bad "$node is there but $me may not read and write it"
             fi
             ;;
         '') bad "it is bound to no driver: it has to be bound to vfio-pci (INSTALL.md, section 4)" ;;
