@@ -117,10 +117,40 @@ four and a half minutes:
 | Pause and resume of the VM, then reading again | works |
 | `controlvm savestate` with the device in the VM | refused; the log and the runtime error of the VM say why; the VM runs on. `VBoxManage` itself only says that saving failed |
 
-This is the first time the device passed anything through. What has not
-run yet: the device in the hot-plug capable slot (`unplugpci`, `plugpci`,
-the host asking for it back, a start without it, a saved state with the
-slot empty) in that virtual machine. The next run has them.
+This is the first time the device passed anything through.
+
+**Run 222** (2026-11-17) added the device in the hot-plug capable slot,
+on a runner of another kind than the two runs before it. 67 checks, two
+of them failed, both for one check being wrong:
+
+| What | Result |
+|------|--------|
+| A VM with the drive in the hot-plug capable slot | boots; the guest is given PCIe hot-plug, its driver has the slot (`Slot Status 0x0040`: occupied), the guest reads from the drive |
+| The layout Main stores | stored |
+| `controlvm unplugpci` | the guest is asked (`pciehp: Slot(1): Button press: will power off in 5 sec`), lets go, the command returns after 6 seconds, the guest has no drive any more, `showvminfo` tells `hotplug,absent,unused` |
+| `controlvm plugpci` | the guest is told (`Button press: will power on`, `Card present`), switches the slot on, its driver binds, it reads from the drive what is on it |
+| `controlvm unplugpci --timeout=1000 --force` while the guest uses the drive | the device is taken away, the guest notices, the VM runs on; `plugpci` afterwards gives the guest the drive back |
+| A VM whose device is not bound to `vfio-pci` when it starts | starts from the stored layout with the slot empty; `plugpci` is refused while the device is not bound, and puts it in once it is; the guest reads from the drive |
+| `unplugpci`, `savestate`, start again with the device there | the state is saved and loaded, and the device is put into the slot again by itself, as designed for a device which is there when a state is loaded: the guest takes it and reads from the drive. The check expected to have to call `plugpci` and failed on "is in the virtual machine already"; it is corrected, and the case of the device not being there when the state is loaded is added |
+| The host wants the device back (`echo 1 > /sys/bus/pci/devices/.../remove`) while the guest uses it | the kernel relays the request once, the guest is asked and lets go, the host has the device after 6 seconds, the VM runs on; after a rescan `plugpci` gives the guest the drive back |
+
+The whole second part took 14 minutes. Among the messages of the guest
+kernel about the slot and the drive, in all phases, there is none about a
+timeout, a failure or an error.
+
+The logs of the VMs have two lines which read like errors and are none
+where they stand: the guest switching the slot off resets the device, and
+that reset finds the function already taken out of service (`Failed to
+update command register in device (VERR_SEEK_ON_DEVICE)`) or the host
+holding on to the device it is waiting for (`The device could not be
+reset (VERR_TRY_AGAIN)`). The device is released either way and the host
+kernel resets it then. HWTEST.md says so; keeping the device from writing
+these lines in that situation is left for the next change to the code.
+
+What the simulation does not have, and cannot: a Windows guest, a device
+with more than one function, a graphics card, Thunderbolt, a device which
+is pulled without the host being asked first (the emulated drive can be
+taken away from the simulated host that way; not done yet).
 
 ### The management and the review, 13 to 15 November
 
@@ -696,7 +726,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
 | T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | being set up; the part without a device and plain passthrough pass | `3d9ea801` | Runs 220 and 221: on the runner a VM with an empty hot-plug capable slot, the guest taking the slot, the management commands and a saved state all work. In a virtual machine with an emulated IOMMU as the host, a guest reads from and writes to a passed through NVMe drive, with MSI-X interrupts, also after pause and resume. The device in the hot-plug capable slot has not run there yet. See "Installation and the simulation" above |
+| T4 system simulation | runs; every phase has passed, not yet all in one run | `3d9ea801` | Runs 220 to 222, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, a saved state with the empty slot. One check was wrong in run 222 and is corrected. See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -841,5 +871,6 @@ interface, a real device.
 | 219 | `scratch/red-evidence-18` | tests, testcase expected to fail | failed | the testcase against root port and device as they were before the review: eight tests fail as they are to, then the random test of the device ran into the time limit, which a run cannot expect. The reason is the defect the INTx change is about, see the evidence table |
 | 220 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | first run of the simulation, 53 minutes. On the runner: 14 checks, all pass (VM with an empty hot-plug capable slot, the guest takes the slot, `plugpci` refused for a device which is not there, saved state). In the virtual machine standing in for the host: set-up passes (nested KVM, IOMMU, drive bound to `vfio-pci`), VMs with the drive start, their guest does not get through its start in three attempts of ten minutes each; the test setup is too slow at that depth of nesting, see above |
 | 221 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 17 minutes. On the runner as in run 220, all pass. Host emulated in software: the VM of VirtualBox ends with a triple fault at once in all five phases. Host on KVM with slow timers in the VM: 15 checks, all pass: a guest reads from and writes to the passed through drive, MSI-X interrupts, pause and resume, saving the state refused |
+| 222 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 24 minutes, a runner of another kind (Azure; 220 and 221 were on AWS). 67 checks, 65 pass: all of run 221 with the host on KVM, and the device in the hot-plug capable slot: `unplugpci`, `plugpci`, forced removal, the host asking for the device back, a start without the device, a saved state with the empty slot. The two which fail are one wrong expectation of the check: a device which is there when a state is loaded is put into the slot by itself |
 
 Run numbers are those GitHub shows for the `build` workflow.

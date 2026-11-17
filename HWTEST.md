@@ -67,6 +67,35 @@ lines starting with `VFIO#0`. With the hot-plug slot there is
 
     VFIO#0: The device is in the hot-plug capable slot of PCI bridge #0
 
+What the log has when a device is taken out and put in, as the simulation
+shows it with a Linux guest (see [STATUS.md](STATUS.md)):
+
+    PCI: Bridge #0: The attention button of the hot-plug slot was pressed
+    PCI: Bridge #0: The link to the hot-plug slot is down
+    VFIO#0.0: The function is taken out of service: it was detached
+    VFIO#0: The link to the device is down
+    PCI: Bridge #0: A device was taken out of the hot-plug slot
+    ...
+    VFIO#0: A device was put into the slot
+    PCI: Bridge #0: A device was put into the hot-plug slot
+    PCI: Bridge #0: The link to the hot-plug slot is up
+    VFIO#0: The link to the device is up
+
+Two lines which read like errors and are none in that place. Both come from
+the guest switching the slot off, which resets the device, at the moment
+the device is on its way out:
+
+    VFIO#0.0: Failed to update command register in device (VERR_SEEK_ON_DEVICE)
+
+when the function was taken out of service a moment before, and
+
+    VFIO#0.0: The function can't be reset on its own (11)
+    VFIO#0: The device could not be reset (VERR_TRY_AGAIN). ...
+
+when it is the host which wants the device back: the host holds on to the
+device while it waits. The host kernel resets the device when it gets it
+back.
+
 ## 3. What to try
 
 Each part says what to do, what should happen, and what to note down. Keep

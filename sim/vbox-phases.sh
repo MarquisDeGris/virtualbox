@@ -632,14 +632,46 @@ phase_startempty()
         fi
         wait_serial 'GUEST: GONE 1' 30 || echo "    the guest has not said that the drive is gone"
         if saved_state_round; then
-            serial_mark
+            # The device is there when the state is loaded, so it is put into the
+            # slot again without anybody asking: a device being plugged in for
+            # the guest.
+            guest_reads 2 "guest: gets the device back when the state is loaded with the device there, and reads from the drive"
+            check_pcistate hotplug,present,inuse
             if run controlvm "$VM" plugpci "$HOSTADDR"; then
-                stage "plugpci after the state was loaded" ok
+                stage "plugpci of the device which is in the VM already is refused" FAILED "it went through"
             else
-                stage "plugpci after the state was loaded" FAILED
+                stage "plugpci of the device which is in the VM already is refused" ok
+            fi
+
+            # The same with the device not being there when the state is loaded.
+            serial_mark
+            if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
+                stage "unplugpci before the state is saved a second time" ok
+            else
+                stage "unplugpci before the state is saved a second time" FAILED
                 diag
             fi
-            guest_reads 2 "guest: takes the device after the state was loaded and reads from the drive"
+            wait_serial 'GUEST: GONE 2' 30 || echo "    the guest has not said that the drive is gone"
+            echo "+ unbinding $HOSTADDR from vfio-pci, the device is not to be had"
+            unbind_dev
+            if saved_state_round; then
+                if serial_has 'GUEST: PRESENT'; then
+                    stage "guest: finds the slot empty when the state is loaded without the device" FAILED
+                else
+                    stage "guest: finds the slot empty when the state is loaded without the device" ok
+                fi
+                check_pcistate hotplug,absent,unused
+                echo "+ binding $HOSTADDR to vfio-pci again"
+                bind_dev || echo "    binding failed"
+                serial_mark
+                if run controlvm "$VM" plugpci "$HOSTADDR"; then
+                    stage "plugpci after the state was loaded without the device" ok
+                else
+                    stage "plugpci after the state was loaded without the device" FAILED
+                    diag
+                fi
+                guest_reads 3 "guest: takes the device after the state was loaded without it, and reads from the drive"
+            fi
         fi
     fi
     end_phase
