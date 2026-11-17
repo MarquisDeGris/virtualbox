@@ -81,20 +81,11 @@ shows it with a Linux guest (see [STATUS.md](STATUS.md)):
     PCI: Bridge #0: The link to the hot-plug slot is up
     VFIO#0: The link to the device is up
 
-Two lines which read like errors and are none in that place. Both come from
-the guest switching the slot off, which resets the device, at the moment
-the device is on its way out:
+When it is the host which wants the device back, the guest switching the
+slot off cannot reset the device, as the host holds on to it while it
+waits. The log says so, and that is as it should be:
 
-    VFIO#0.0: Failed to update command register in device (VERR_SEEK_ON_DEVICE)
-
-when the function was taken out of service a moment before, and
-
-    VFIO#0.0: The function can't be reset on its own (11)
-    VFIO#0: The device could not be reset (VERR_TRY_AGAIN). ...
-
-when it is the host which wants the device back: the host holds on to the
-device while it waits. The host kernel resets the device when it gets it
-back.
+    VFIO#0: The device is not reset now, the host is busy with it and refuses.  The host resets it when it is let go of
 
 ## 3. What to try
 

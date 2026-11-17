@@ -7,8 +7,8 @@ Updated: 2026-11-17
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `3d9ea801`, 33 commits |
-| Branch the runs were made on | `scratch/mgmt` @ `a69d5a89`, the same tree as the head of the merge request (`68621baf`) |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `dd43ddf3`, 34 commits |
+| Branch the runs were made on | `scratch/quiet-reset` @ `dd43ddf3`, the commit which is the head of the merge request |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
@@ -24,11 +24,11 @@ done: the guest is asked before a device is taken out of the slot, a device
 can be put into the empty slot while the VM runs, the VM can start with an
 empty slot, its state can be saved and loaded while the slot is empty, and
 `VBoxManage controlvm` puts a device in and takes it out. The testcase has
-55 tests and three random tests and runs clean with AddressSanitizer,
-LeakSanitizer and UndefinedBehaviorSanitizer (runs 217 and 218). Main and
+56 tests and three random tests and runs clean with AddressSanitizer,
+LeakSanitizer and UndefinedBehaviorSanitizer (runs 224 and 225). Main and
 `VBoxManage` are built, and since 2026-11-17 a simulation runs all of it
-with a Linux guest and an emulated device behind an emulated IOMMU: 77
-checks, all pass (run 223), see the next section.
+with a Linux guest and an emulated device behind an emulated IOMMU: 79
+checks, all pass (run 224, which fails if one does), see the next section.
 Next: the hardware test, which needs a person with the hardware. The
 merge request is marked ready for it, see "Ready for the hardware test"
 below.
@@ -146,8 +146,8 @@ that reset finds the function already taken out of service (`Failed to
 update command register in device (VERR_SEEK_ON_DEVICE)`) or the host
 holding on to the device it is waiting for (`The device could not be
 reset (VERR_TRY_AGAIN)`). The device is released either way and the host
-kernel resets it then. HWTEST.md says so; keeping the device from writing
-these lines in that situation is left for the next change to the code.
+kernel resets it then. The device no longer writes them there, see run
+224 below.
 
 **Run 223** (2026-11-17) is the first in which everything passes: 77
 checks, none failed, none skipped, 20 minutes. New in it: a state which
@@ -159,9 +159,29 @@ and the script of the checklist in [INSTALL.md](INSTALL.md): on the
 runner it tells that there is no IOMMU, in the simulated host it finds
 nothing missing for the drive.
 
+**Runs 224 and 225** (2026-11-17) are for the one change to the code
+which the simulation led to, the commit `dd43ddf3` on top of the merge
+request as it was: a device on its way out is not reported as failing.
+A failed write to the command register is not logged for a function
+which is out of service by then. A reset which the host refuses because
+it is busy with the device is told apart from a function which has no
+reset of its own: the bus is not reset instead, which the host would
+refuse as well, and one line says what is the case (`The device is not
+reset now, the host is busy with it and refuses. The host resets it when
+it is let go of`). Nothing changes for the guest or the host. The fake
+kernel of the testcase refuses resets while it waits for a function, as
+the kernel does, and a new test has the host ask for a device the guest
+uses (56 tests). Run 224: the tree builds, the tests pass, and the
+simulation passes with `sim_strict: yes`, 79 checks, among them that the
+logs of the VMs have none of the old lines; the new line is in the log
+where the host asks for the device. Run 225: the tests with the
+sanitizers, no report. The new test was not run against the device as it
+was: it fails there by construction, as the old reset asks for the reset
+of the bus which the fake kernel counts as refused.
+
 The simulation has passed on both kinds of runner seen so far (AWS in
-runs 221 and 223, Azure in run 222). With `sim_strict: yes` a run fails
-when a check fails; the runs so far were made without it.
+runs 221, 223 and 224, Azure in run 222). With `sim_strict: yes` a run
+fails when a check fails; run 224 was made that way.
 
 What the simulation does not have, and cannot: a Windows guest, a device
 with more than one function, a graphics card, Thunderbolt. What it could
@@ -662,10 +682,8 @@ harness since WP5, saved states since the fourth part of WP6.
 1. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
    the hardware. The merge request is marked ready for it;
    [INSTALL.md](INSTALL.md) says how to build and install.
-2. With the next change to the code: keep the device from writing the two
-   log lines which read like errors when a device is taken out in the
-   normal way (see run 222 above), and run the simulation with
-   `sim_strict: yes` next to the tests.
+2. With every change to the code: the simulation with `sim_strict: yes`
+   next to the tests and the sanitizers.
 3. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
@@ -734,6 +752,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-15 | No build of the head from nothing | The `tests` flavor builds the tree on top of the cached build of `main` and compiles every file which differs; a build from nothing costs a long run and would tell the same |
 | 2026-11-15 | A failed build of the tree does not end a `tests` run at once: the device testcases are built and run with what was built, and the run fails at its end | One run tells about the tree and about the testcase, where it took two before |
 | 2026-11-16 | The system simulation (T4) is set up after all, which takes back the decision of 2026-11-15 for T4 | Everything else which was verified is compiled code and a testcase against a kernel interface written by the same hand; only the simulation shows the VMM, the kernel, a guest, Main and `VBoxManage` working together before hardware does. The cost in runs is kept down: the scripts are written in one go, a run which is for finding out succeeds whatever it finds, and each run is read completely before the next |
+| 2026-11-17 | A reset which the host refuses because it is busy with the device is not followed by a reset of the bus, and neither that nor a write to a function which has just gone out of service is logged as a failure of the device | Seen in the simulation with a real kernel: the host has a device locked while it waits to get it back, and the guest letting go of the device resets it at that very moment. The bus reset would be refused for the same reason; the host resets the device when it has it. The log is what a person testing on hardware reads |
 | 2026-11-17 | In the simulation the VM inside the virtual machine standing in for the host has the timers VirtualBox emulates at a twentieth of their speed, and its guest kernel keeps quiet on the serial port | Run 220: the guest of VirtualBox is at the third level of hardware virtualization at least there, an exit from it takes a millisecond, and its kernel does not get past its timer tick. Run 221: with the slow timers it does, and what follows runs at its normal speed. Emulating the host in software instead was tried in the same run and does not get VirtualBox to run a guest |
 | 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -742,10 +761,10 @@ harness since WP5, saved states since the fourth part of WP6.
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
-| T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 56 tests, ACPI table check | `dd43ddf3` | all pass with ASan, LSan and UBSan (run 225) and without them (run 224) |
+| T2 fuzz | running in CI | `dd43ddf3` | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 225); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | passes | `3d9ea801` | Run 223, 77 checks, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function, no Windows guest. See "Installation and the simulation" above |
+| T4 system simulation | passes | `dd43ddf3` | Run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function, no Windows guest. See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -772,8 +791,9 @@ By the definition in PLAN.md, section 7:
 
 1. WP0 to WP7 are done. WP8 (INTx) is not, as allowed there.
 2. T1 and T2 are green on the head of the merge request, with and without
-   the sanitizers (runs 217 and 218).
-3. T4 passes (run 223). T3 was not run; the table above says why.
+   the sanitizers (runs 224 and 225).
+3. T4 passes on the head of the merge request (run 224). T3 was not run;
+   the table above says why.
 4. The security requirements are mapped to tests, see above. S9 is a
    matter of the hardware test.
 5. The tree builds without a compiler warning in a file this work changes.
@@ -894,5 +914,7 @@ not a virtual machine.
 | 221 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 17 minutes. On the runner as in run 220, all pass. Host emulated in software: the VM of VirtualBox ends with a triple fault at once in all five phases. Host on KVM with slow timers in the VM: 15 checks, all pass: a guest reads from and writes to the passed through drive, MSI-X interrupts, pause and resume, saving the state refused |
 | 222 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 24 minutes, a runner of another kind (Azure; 220 and 221 were on AWS). 67 checks, 65 pass: all of run 221 with the host on KVM, and the device in the hot-plug capable slot: `unplugpci`, `plugpci`, forced removal, the host asking for the device back, a start without the device, a saved state with the empty slot. The two which fail are one wrong expectation of the check: a device which is there when a state is loaded is put into the slot by itself |
 | 223 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 20 minutes, AWS. 77 checks, all pass, none skipped: everything of run 222 with the corrected check, a state loaded with and without the device, and the script of the checklist of INSTALL.md on the runner and in the simulated host |
+| 224 | `scratch/quiet-reset` @ `dd43ddf3` | sim, strict | passed | the head of the merge request with the commit about the log of a device on its way out: the tree builds without a warning in a file this work changes, 56 tests and three random tests pass, the simulation passes with 79 checks, 20 minutes, AWS |
+| 225 | `scratch/quiet-reset` @ `dd43ddf3` | sanitize | passed | the same commit; no reports from the sanitizers |
 
 Run numbers are those GitHub shows for the `build` workflow.
