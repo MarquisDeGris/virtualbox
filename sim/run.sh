@@ -10,19 +10,20 @@
 #      kernel which has VFIO.  In there the drive is bound to vfio-pci and
 #      VirtualBox passes it on to its guest.
 #
-#      That machine is emulated in software (TCG), with an AMD processor whose
-#      virtualization extension QEMU emulates too, and its time is counted in
-#      instructions (-icount).  With KVM instead, the guest of VirtualBox is
-#      the third level of hardware virtualization on a runner which is a
-#      virtual machine itself; run 220 showed every exit from that guest to
-#      take about a millisecond there, and the guest kernel not to get past
-#      switching on its 1000 Hz timer tick.  In software all levels live in
-#      one emulator and slow down together, clocks included, so nothing times
-#      out against anything else.
+#      The runner is a virtual machine itself, so the guest of VirtualBox is
+#      the third level of hardware virtualization at least, and every exit
+#      from it to VirtualBox takes about a millisecond (run 220).  A kernel
+#      does not get past switching on its timer tick of 1000 interrupts a
+#      second that way: while they still go through the PIC each takes
+#      several exits.  So the timers VirtualBox emulates run at a twentieth
+#      of their speed in that VM (the "warp drive" of its time manager).
+#      Once the kernel is up it takes its time from KVM and none of that
+#      matters any more (run 221).
 #
-#      Should that not get a guest to read from the drive, the machine is
-#      tried once more with KVM and with time in the VM of VirtualBox slowed
-#      down, to learn whether that is a way.
+#      Emulating that machine in software instead, with an AMD processor
+#      whose virtualization extension QEMU emulates as well, was tried in run
+#      221: VirtualBox does not get a guest going on that, with or without a
+#      device.
 #
 # The guest is the same in both: a kernel with guest-init, which tells on its
 # serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox and
@@ -263,22 +264,15 @@ if ! grep -q '^9p\.ko$' "$WORK/l1-root/modules.list" \
 fi
 # Runs the virtual machine which stands in for the host until its script is
 # done or the time is up.
-run_simhost() # <tcg|kvm> <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds>
+run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds>
 {
-    local accel=$1 where=$2 phases=$3 bootwait=$4 warp=$5 limit=$6 t0 rc
+    local where=$1 phases=$2 bootwait=$3 warp=$4 limit=$5 t0 rc
     local cmdline="console=ttyS0 loglevel=4 mitigations=off intel_iommu=on rdinit=/init panic=-1"
     cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
     [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
-    local -a machine
-    if [ "$accel" = tcg ]; then
-        # All of it in software, with an AMD processor as QEMU emulates one, and
-        # the time of the machine counted in instructions: one nanosecond each.
-        machine=(-machine q35 -accel tcg -cpu max,la57=off -smp 2 -m 6G -icount shift=0,sleep=on)
-    else
-        machine=(-machine q35,kernel-irqchip=split -accel kvm -cpu host -smp 4 -m 8G)
-    fi
     t0=$(date +%s)
-    sudo timeout -k 30 "$limit" qemu-system-x86_64 "${machine[@]}" \
+    sudo timeout -k 30 "$limit" qemu-system-x86_64 \
+        -machine q35,kernel-irqchip=split -accel kvm -cpu host -smp 4 -m 8G \
         -nodefaults -display none -monitor none -serial stdio -no-reboot \
         -kernel "$VMLINUZ" -initrd "$WORK/l1.cpio.gz" -append "$cmdline" \
         -device intel-iommu,intremap=on \
@@ -289,18 +283,13 @@ run_simhost() # <tcg|kvm> <name in the results> <phases> <seconds to wait for a 
         -device nvme,drive=nvm0,serial=SIM0001,bus=rp1 \
         < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/$where-console.log"
     rc=${PIPESTATUS[0]}
-    echo "$where ($accel) ended with $rc after $(( $(date +%s) - t0 )) s"
+    echo "$where ended with $rc after $(( $(date +%s) - t0 )) s"
     if ! grep -q "^$where/setup: KVM is there" "$STAGES"; then
         stage "$where: the virtual machine standing in for the host ran its script" FAILED
     fi
 }
 
-run_simhost tcg simhost plain,passthrough,hotplug,startempty,hostremove 150 "" 6000
-
-if ! grep -q '^simhost/passthrough: guest: reads from the drive which is passed through: ok' "$STAGES"; then
-    note "Part 2 once more, with KVM and time in the VM at a twentieth of its speed"
-    run_simhost kvm simhost-kvm plain,passthrough 900 5 2400
-fi
+run_simhost simhost plain,passthrough,hotplug,startempty,hostremove 600 5 4200
 
 if grep -q 'written by the guest' "$WORK/nvme.img"; then
     stage "what the guest wrote is on the drive of the simulated host" ok \

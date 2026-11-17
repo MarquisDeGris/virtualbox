@@ -90,15 +90,37 @@ of hardware virtualization at least, and the cost of an exit multiplies
 with each level. The same VM on the runner needs 200000 exits for a
 complete start, which is nothing there.
 
-So the machine standing in for the host is emulated in software now (QEMU
-without KVM, with an AMD processor whose virtualization extension QEMU
-emulates as well), and its time is counted in instructions. Everything
-slows down together then, the clocks included, and no level waits for
-another one. Should that not get a guest to read from the drive, the same
-run tries KVM once more with time in the VM slowed down to a twentieth,
-to learn whether that would be a way. The kernel of the guest keeps quiet
-on the serial port there, as each character costs three exits. Not run
-yet.
+**Run 221** (2026-11-17) tried two ways around that:
+
+- The machine standing in for the host emulated in software (QEMU without
+  KVM, with an AMD processor whose virtualization extension QEMU emulates
+  as well, time counted in instructions). That machine works, KVM in it
+  loads, and VirtualBox starts its VM, but the VM ends at once with a
+  triple fault of the guest, with or without a device. Not followed up:
+  it is VirtualBox on an emulated processor nobody runs it on.
+- KVM as before, and the timers VirtualBox emulates slowed down to a
+  twentieth of their speed in that VM (`VBoxInternal/TM/WarpDrivePercentage`
+  = 5), the kernel of the guest keeping quiet on the serial port. **That
+  works**: the tick which the kernel could not get past comes twenty
+  times less often, and once the kernel is up it takes its time from KVM.
+
+With the second way the simulation got through the first two phases, in
+four and a half minutes:
+
+| What | Result |
+|------|--------|
+| A VM without a device, in the virtual machine standing in for the host | boots the guest, the guest keeps running |
+| A VM with the NVMe drive passed through (no hot-plug) | boots the guest; the guest finds the drive at `01:00.0` with its real IDs and its driver binds |
+| The guest reads the first 8 MiB of the drive | the checksum is that of the image file on the outside: memory access of the device through the IOMMU, to guest memory which VirtualBox mapped through IOMMUFD |
+| The guest writes to the drive | what it wrote is in the image file on the outside |
+| Interrupts | MSI-X, two vectors in use, both counting (`/proc/interrupts` of the guest) |
+| Pause and resume of the VM, then reading again | works |
+| `controlvm savestate` with the device in the VM | refused; the log and the runtime error of the VM say why; the VM runs on. `VBoxManage` itself only says that saving failed |
+
+This is the first time the device passed anything through. What has not
+run yet: the device in the hot-plug capable slot (`unplugpci`, `plugpci`,
+the host asking for it back, a start without it, a saved state with the
+slot empty) in that virtual machine. The next run has them.
 
 ### The management and the review, 13 to 15 November
 
@@ -663,7 +685,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-15 | No build of the head from nothing | The `tests` flavor builds the tree on top of the cached build of `main` and compiles every file which differs; a build from nothing costs a long run and would tell the same |
 | 2026-11-15 | A failed build of the tree does not end a `tests` run at once: the device testcases are built and run with what was built, and the run fails at its end | One run tells about the tree and about the testcase, where it took two before |
 | 2026-11-16 | The system simulation (T4) is set up after all, which takes back the decision of 2026-11-15 for T4 | Everything else which was verified is compiled code and a testcase against a kernel interface written by the same hand; only the simulation shows the VMM, the kernel, a guest, Main and `VBoxManage` working together before hardware does. The cost in runs is kept down: the scripts are written in one go, a run which is for finding out succeeds whatever it finds, and each run is read completely before the next |
-| 2026-11-17 | The machine standing in for the host in the simulation is emulated in software, with its time counted in instructions, instead of running on KVM | Run 220: with KVM the guest of VirtualBox is at the third level of hardware virtualization at least, an exit from it takes a millisecond, and its kernel does not get past its timer tick. In one emulator all levels share one clock which goes as fast as the emulation does. It does not depend on what the runner offers for nesting either, which differs from run to run |
+| 2026-11-17 | In the simulation the VM inside the virtual machine standing in for the host has the timers VirtualBox emulates at a twentieth of their speed, and its guest kernel keeps quiet on the serial port | Run 220: the guest of VirtualBox is at the third level of hardware virtualization at least there, an exit from it takes a millisecond, and its kernel does not get past its timer tick. Run 221: with the slow timers it does, and what follows runs at its normal speed. Emulating the host in software instead was tried in the same run and does not get VirtualBox to run a guest |
 | 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -674,7 +696,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
 | T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | being set up; the part without a device passes | `3d9ea801` | Run 220: on the runner a VM with an empty hot-plug capable slot, the guest taking the slot, the management commands and a saved state all work. With a device, in a virtual machine with an emulated IOMMU as the host, the VM starts and opens the device through the real kernel interface, but its guest did not get through its start there for reasons of the test setup. See "Installation and the simulation" above |
+| T4 system simulation | being set up; the part without a device and plain passthrough pass | `3d9ea801` | Runs 220 and 221: on the runner a VM with an empty hot-plug capable slot, the guest taking the slot, the management commands and a saved state all work. In a virtual machine with an emulated IOMMU as the host, a guest reads from and writes to a passed through NVMe drive, with MSI-X interrupts, also after pause and resume. The device in the hot-plug capable slot has not run there yet. See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -818,5 +840,6 @@ interface, a real device.
 | 218 | `scratch/mgmt` @ `a69d5a89` | sanitize | passed | the tree of the head of the merge request (`3d9ea801`); no reports from the sanitizers |
 | 219 | `scratch/red-evidence-18` | tests, testcase expected to fail | failed | the testcase against root port and device as they were before the review: eight tests fail as they are to, then the random test of the device ran into the time limit, which a run cannot expect. The reason is the defect the INTx change is about, see the evidence table |
 | 220 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | first run of the simulation, 53 minutes. On the runner: 14 checks, all pass (VM with an empty hot-plug capable slot, the guest takes the slot, `plugpci` refused for a device which is not there, saved state). In the virtual machine standing in for the host: set-up passes (nested KVM, IOMMU, drive bound to `vfio-pci`), VMs with the drive start, their guest does not get through its start in three attempts of ten minutes each; the test setup is too slow at that depth of nesting, see above |
+| 221 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 17 minutes. On the runner as in run 220, all pass. Host emulated in software: the VM of VirtualBox ends with a triple fault at once in all five phases. Host on KVM with slow timers in the VM: 15 checks, all pass: a guest reads from and writes to the passed through drive, MSI-X interrupts, pause and resume, saving the state refused |
 
 Run numbers are those GitHub shows for the `build` workflow.
