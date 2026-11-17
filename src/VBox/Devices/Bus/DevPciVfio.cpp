@@ -3443,8 +3443,11 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
             Assert(rcStrict == VINF_SUCCESS);
         }
 
+        /* A function which went out of service while this was on its way has the stand-in in the
+           place of its device, which refuses the write.  That is no failure to tell about. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, (uint16_t)uValue);
-        if (RT_FAILURE(rc))
+        if (   RT_FAILURE(rc)
+            && !pFun->fGone)
             LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
 
         rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
@@ -4529,8 +4532,14 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
     /*
      * Reset the functions.  Where a function can't be reset on its own, which is
      * common for devices with several functions, the bus they are on gets reset.
+     *
+     * The host refuses a reset while it is busy with the device itself, which it is
+     * for as long as it waits for the device to be given back.  A reset of the bus
+     * is refused then as well, so it is not asked for.  The host resets the device
+     * when it is let go of.
      */
     bool fBusReset = false;
+    bool fHostBusy = false;
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
     {
         PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
@@ -4538,17 +4547,32 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
             && !pFun->fGone
             && ioctl(pFun->iFdVfio, VFIO_DEVICE_RESET, NULL) == -1)
         {
-            LogRelMax(16, ("VFIO#%d.%u: The function can't be reset on its own (%d)\n", pThis->iInstance, pFun->uPciFun, errno));
-            fBusReset = true;
+            int const iErrno = errno;
+            if (pFun->fGone)
+            { /* It went out of service meanwhile and this was its stand-in refusing. */ }
+            else if (iErrno == EAGAIN)
+                fHostBusy = true;
+            else
+            {
+                LogRelMax(16, ("VFIO#%d.%u: The function can't be reset on its own (%d)\n", pThis->iInstance, pFun->uPciFun, iErrno));
+                fBusReset = true;
+            }
         }
     }
-    if (fBusReset)
+    if (   fBusReset
+        && !fHostBusy)
     {
         int rc = pciVfioBusReset(pThis);
-        if (RT_FAILURE(rc))
+        if (rc == VERR_TRY_AGAIN)
+            fHostBusy = true;
+        else if (   RT_FAILURE(rc)
+                 && !pciVfioIsOutOfService(pThis))
             LogRelMax(16, ("VFIO#%d: The device could not be reset (%Rrc).  It keeps its state apart from being disabled "
                            "until the guest sets it up again\n", pThis->iInstance, rc));
     }
+    if (fHostBusy)
+        LogRelMax(16, ("VFIO#%d: The device is not reset now, the host is busy with it and refuses.  The host resets it "
+                       "when it is let go of\n", pThis->iInstance));
 
     /*
      * Whatever the reset has done to the command register of a function, the guest
@@ -4564,7 +4588,8 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
         PPDMPCIDEV pPciDev = pDevIns->apPciDevs[iPciFun];
 
         int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, 0);
-        if (RT_FAILURE(rc))
+        if (   RT_FAILURE(rc)
+            && !pFun->fGone)
             LogRelMax(16, ("VFIO#%d.%u: Failed to clear the command register of the device after the reset (%Rrc)\n",
                            pThis->iInstance, pFun->uPciFun, rc));
 
