@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-16
+Updated: 2026-11-17
 
 ## Where things are
 
@@ -26,7 +26,9 @@ empty slot, its state can be saved and loaded while the slot is empty, and
 `VBoxManage controlvm` puts a device in and takes it out. The testcase has
 55 tests and three random tests and runs clean with AddressSanitizer,
 LeakSanitizer and UndefinedBehaviorSanitizer (runs 217 and 218). Main and
-`VBoxManage` are built; they cannot be run in a test without hardware.
+`VBoxManage` are built, and since 2026-11-17 a simulation runs all of it
+with a Linux guest and an emulated device behind an emulated IOMMU: 77
+checks, all pass (run 223), see the next section.
 Next: the hardware test, which needs a person with the hardware. The
 merge request is marked ready for it, see "Ready for the hardware test"
 below.
@@ -147,10 +149,24 @@ reset (VERR_TRY_AGAIN)`). The device is released either way and the host
 kernel resets it then. HWTEST.md says so; keeping the device from writing
 these lines in that situation is left for the next change to the code.
 
+**Run 223** (2026-11-17) is the first in which everything passes: 77
+checks, none failed, none skipped, 20 minutes. New in it: a state which
+is loaded while the device is there (the device is back in the slot by
+itself and the guest reads from the drive), one which is loaded while the
+device is not there (the slot stays empty, `plugpci` puts the device in
+afterwards), `plugpci` refused for a device which is in the VM already,
+and the script of the checklist in [INSTALL.md](INSTALL.md): on the
+runner it tells that there is no IOMMU, in the simulated host it finds
+nothing missing for the drive.
+
+The simulation has passed on both kinds of runner seen so far (AWS in
+runs 221 and 223, Azure in run 222). With `sim_strict: yes` a run fails
+when a check fails; the runs so far were made without it.
+
 What the simulation does not have, and cannot: a Windows guest, a device
-with more than one function, a graphics card, Thunderbolt, a device which
-is pulled without the host being asked first (the emulated drive can be
-taken away from the simulated host that way; not done yet).
+with more than one function, a graphics card, Thunderbolt. What it could
+have and does not yet: a device which is pulled without the host being
+asked first, and an error of the device reported by the host.
 
 ### The management and the review, 13 to 15 November
 
@@ -646,10 +662,13 @@ harness since WP5, saved states since the fourth part of WP6.
 1. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
    the hardware. The merge request is marked ready for it;
    [INSTALL.md](INSTALL.md) says how to build and install.
-2. The system simulation (T4), see "Installation and the simulation"
-   above: get it to run, deal with what it finds, then make it strict.
+2. With the next change to the code: keep the device from writing the two
+   log lines which read like errors when a device is taken out in the
+   normal way (see run 222 above), and run the simulation with
+   `sim_strict: yes` next to the tests.
 3. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
-   first interrupt), events in the API for a device coming and going.
+   first interrupt), events in the API for a device coming and going, a
+   device pulled without notice and a device error in the simulation.
 
 ## Decisions
 
@@ -726,7 +745,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
 | T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | runs; every phase has passed, not yet all in one run | `3d9ea801` | Runs 220 to 222, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, a saved state with the empty slot. One check was wrong in run 222 and is corrected. See "Installation and the simulation" above |
+| T4 system simulation | passes | `3d9ea801` | Run 223, 77 checks, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function, no Windows guest. See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -754,7 +773,7 @@ By the definition in PLAN.md, section 7:
 1. WP0 to WP7 are done. WP8 (INTx) is not, as allowed there.
 2. T1 and T2 are green on the head of the merge request, with and without
    the sanitizers (runs 217 and 218).
-3. T3 and T4 were not run; the table above says why.
+3. T4 passes (run 223). T3 was not run; the table above says why.
 4. The security requirements are mapped to tests, see above. S9 is a
    matter of the hardware test.
 5. The tree builds without a compiler warning in a file this work changes.
@@ -762,10 +781,12 @@ By the definition in PLAN.md, section 7:
    built by the workflow.
 6. HWTEST.md has the procedure, with what to expect and what to look at.
 
-What the hardware test is the first to show, because nothing before it
-could: a guest operating system using the slot (Linux and Windows), Main
-and `VBoxManage` doing what they were written to do, the real kernel
-interface, a real device.
+What the simulation has shown since this was written: a Linux guest
+using the slot, Main and `VBoxManage` doing what they were written to do,
+the kernel interface of a real kernel. What the hardware test is still
+the first to show: a Windows guest, a real device, a device with several
+functions, a graphics card, Thunderbolt, and what a host does which is
+not a virtual machine.
 
 ## CI runs
 
@@ -872,5 +893,6 @@ interface, a real device.
 | 220 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | first run of the simulation, 53 minutes. On the runner: 14 checks, all pass (VM with an empty hot-plug capable slot, the guest takes the slot, `plugpci` refused for a device which is not there, saved state). In the virtual machine standing in for the host: set-up passes (nested KVM, IOMMU, drive bound to `vfio-pci`), VMs with the drive start, their guest does not get through its start in three attempts of ten minutes each; the test setup is too slow at that depth of nesting, see above |
 | 221 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 17 minutes. On the runner as in run 220, all pass. Host emulated in software: the VM of VirtualBox ends with a triple fault at once in all five phases. Host on KVM with slow timers in the VM: 15 checks, all pass: a guest reads from and writes to the passed through drive, MSI-X interrupts, pause and resume, saving the state refused |
 | 222 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 24 minutes, a runner of another kind (Azure; 220 and 221 were on AWS). 67 checks, 65 pass: all of run 221 with the host on KVM, and the device in the hot-plug capable slot: `unplugpci`, `plugpci`, forced removal, the host asking for the device back, a start without the device, a saved state with the empty slot. The two which fail are one wrong expectation of the check: a device which is there when a state is loaded is put into the slot by itself |
+| 223 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 20 minutes, AWS. 77 checks, all pass, none skipped: everything of run 222 with the corrected check, a state loaded with and without the device, and the script of the checklist of INSTALL.md on the runner and in the simulated host |
 
 Run numbers are those GitHub shows for the `build` workflow.

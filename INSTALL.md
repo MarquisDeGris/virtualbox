@@ -7,10 +7,11 @@ What of this was done by somebody or something, and what was not:
 
 | Part | State |
 |------|-------|
-| 1. The checklist and its script | Written from the source and the documentation of the kernel; what the simulation has of it is said at its end |
+| 1. The checklist and its script | Written from the source and the documentation of the kernel; what the simulation has of it is said at its end. The script ran in the simulation |
 | 2. Building | What the workflow of this fork does in every run, on Ubuntu 24.04 |
-| 3. Running from the build directory, without kernel modules of VirtualBox | Done by the simulation on a runner of the workflow (run 220, as root), see [STATUS.md](STATUS.md) |
-| 4. Preparing a device: binding to `vfio-pci`, permissions | Binding as the simulation does it with an emulated device; never with a real one |
+| 3. Running from the build directory, without kernel modules of VirtualBox | Done by the simulation in every run, as root, see [STATUS.md](STATUS.md) |
+| 4. Preparing a device: binding to `vfio-pci`, permissions | Binding as the simulation does it with an emulated device, as root; never with a real one, never as another user |
+| 6. Taking a device out and putting it in while the VM runs | Done by the simulation with an emulated device, see [STATUS.md](STATUS.md) |
 | 4. Thunderbolt and USB4 | From the documentation of the kernel, **never tried** |
 | A build with the graphical user interface, packages, an installer | **Not built** by anything here |
 
@@ -105,10 +106,14 @@ with it which the item is there for:
 
 The simulation (see [STATUS.md](STATUS.md)) runs with the generic kernel
 7.0 of Ubuntu 24.04 in a virtual machine with an emulated Intel IOMMU:
-F1, F2, K1 to K5, D2, D3 and U1 to U4 for root are what it has. The
-messages quoted above are from the source; of them the one of D3 was seen
-there. F4, K7 and D1 are from the documentation of the kernel and were
-never tried, as nothing here has Thunderbolt.
+F1, F2, K1 to K5, D2, D3 and U1 to U4 for root are what it has, and with
+them everything it tries works. The script ran there (run 223): it finds
+nothing missing for the drive in that machine, and on the runner outside
+of it, which has no IOMMU, it says so. The messages quoted above are from
+the source; of them the one of D3 was seen there. F4, K7 and D1 are from
+the documentation of the kernel and were never tried, as nothing here has
+Thunderbolt. A host on which an item is switched off was not tried
+either, apart from the IOMMU.
 
 ## 2. Building
 

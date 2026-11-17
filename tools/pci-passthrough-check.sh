@@ -109,6 +109,7 @@ fi
 
 echo "---- memory the user may lock"
 lim=$(ulimit -l 2> /dev/null)
+[ "$(id -u)" = 0 ] && lim=unlimited     # the limit does not hold root back
 case "$lim" in
     unlimited) ok "$(id -un) may lock any amount of memory" ;;
     '')        unsure "could not find out how much memory $(id -un) may lock (ulimit -l)" ;;
