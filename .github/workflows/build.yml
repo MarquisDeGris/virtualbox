@@ -353,7 +353,7 @@ jobs:
         if: inputs.flavor == 'sim'
         # Everything in the script has a time limit of its own which adds up to
         # less than this one.
-        timeout-minutes: 100
+        timeout-minutes: 170
         continue-on-error: ${{ inputs.sim_strict != 'yes' }}
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}

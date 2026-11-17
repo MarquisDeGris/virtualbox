@@ -5,19 +5,35 @@
 # It tells on the serial port what it sees of an NVMe drive which is passed
 # through to it: when the drive is there it reads from it and writes to it,
 # and it says when the drive comes and goes.  Lines of this script start with
-# "GUEST: ", everything else on the serial port is the kernel.
+# "GUEST: ".  The kernel may be told to keep quiet on the serial port, as
+# every character there is costly where virtualization is nested, so the
+# kernel messages the checks go by are passed on from here ("GUEST: k: ").
 
 bb=/bin/busybox
 $bb mkdir -p /proc /sys /dev /tmp
 $bb mount -t proc proc /proc
 $bb mount -t sysfs sys /sys
 $bb mount -t devtmpfs dev /dev
-# The initramfs has no /dev/console, so the kernel started this without one.
+# The initramfs has no /dev/console, so the kernel may have started this
+# without one.
 exec < /dev/console > /dev/console 2>&1
 $bb --install -s /bin
 export PATH=/bin
 
 say() { echo "GUEST: $*"; }
+
+# Passes on the kernel messages about PCI hot-plug and the drive which have
+# come since the last call.
+kseen=0
+kmsg()
+{
+    kall=$(dmesg | wc -l)
+    if [ "$kall" -gt "$kseen" ]; then
+        dmesg | sed -n "$((kseen + 1)),${kall}p" | grep -E '_OSC|PNP0A0|pciehp|nvme|AER|DPC|Timeout' \
+            | cut -c1-200 | while read -r l; do say "k: $l"; done
+        kseen=$kall
+    fi
+}
 
 say "UP $(uname -r)"
 
@@ -30,6 +46,8 @@ for d in /sys/bus/pci/devices/*; do
     [ -e "$d/driver" ] && drv=$(basename "$(readlink "$d/driver")")
     say "pci: ${d##*/} $(cat "$d/vendor"):$(cat "$d/device") class $(cat "$d/class") driver $drv"
 done
+kmsg
+say "READY"
 
 # The drive: whatever has the class of an NVMe controller.
 finddev()
@@ -76,6 +94,7 @@ while :; do
                 sleep 1
                 i=$((i + 1))
             done
+            kmsg
             if b=$(blk); then
                 say "READ $n md5=$(readsum "$b")"
                 if echo "written by the guest, round $n" | dd of="$b" bs=1M seek=12 conv=fsync 2> /dev/null; then
@@ -93,9 +112,13 @@ while :; do
         fi
     elif [ "$state" = present ]; then
         state=absent
+        kmsg
         say "GONE $n"
     fi
-    [ $((tick % 10)) = 0 ] && say "ALIVE $tick"
+    if [ $((tick % 10)) = 0 ]; then
+        kmsg
+        say "ALIVE $tick"
+    fi
     tick=$((tick + 1))
     sleep 1
 done

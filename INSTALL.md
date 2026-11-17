@@ -8,7 +8,7 @@ What of this was done by somebody or something, and what was not:
 | Part | State |
 |------|-------|
 | 2. Building | What the workflow of this fork does in every run, on Ubuntu 24.04 |
-| 3. Running from the build directory, without kernel modules of VirtualBox | What the simulation does, see [STATUS.md](STATUS.md) for how far that got |
+| 3. Running from the build directory, without kernel modules of VirtualBox | Done by the simulation on a runner of the workflow (run 220, as root), see [STATUS.md](STATUS.md) |
 | 4. Preparing a device: binding to `vfio-pci`, permissions | Binding as the simulation does it with an emulated device; never with a real one |
 | 4. Thunderbolt and USB4 | From the documentation of the kernel, **never tried** |
 | A build with the graphical user interface, packages, an installer | **Not built** by anything here |

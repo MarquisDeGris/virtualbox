@@ -8,8 +8,21 @@
 #   2. In a virtual machine which stands in for a host: QEMU with an emulated
 #      IOMMU and an emulated NVMe drive behind a PCIe root port, running a
 #      kernel which has VFIO.  In there the drive is bound to vfio-pci and
-#      VirtualBox passes it on to its guest, a third level of virtualization.
-#      Whether the runner allows that is one of the things this finds out.
+#      VirtualBox passes it on to its guest.
+#
+#      That machine is emulated in software (TCG), with an AMD processor whose
+#      virtualization extension QEMU emulates too, and its time is counted in
+#      instructions (-icount).  With KVM instead, the guest of VirtualBox is
+#      the third level of hardware virtualization on a runner which is a
+#      virtual machine itself; run 220 showed every exit from that guest to
+#      take about a millisecond there, and the guest kernel not to get past
+#      switching on its 1000 Hz timer tick.  In software all levels live in
+#      one emulator and slow down together, clocks included, so nothing times
+#      out against anything else.
+#
+#      Should that not get a guest to read from the drive, the machine is
+#      tried once more with KVM and with time in the VM of VirtualBox slowed
+#      down, to learn whether that is a way.
 #
 # The guest is the same in both: a kernel with guest-init, which tells on its
 # serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox and
@@ -49,7 +62,7 @@ finish()
     cat "$STAGES"
     local failed ran
     failed=$(grep -c ': FAILED' "$STAGES")
-    ran=$(grep -c '^simulated host/passthrough: ' "$STAGES")
+    ran=$(grep -c '^simhost[^/]*/passthrough: ' "$STAGES")
     echo
     echo "$(grep -c ': ok' "$STAGES") ok, $failed failed, $(grep -c ': skipped' "$STAGES") skipped"
     if [ "$STRICT" = yes ] && { [ "$failed" != 0 ] || [ "$ran" = 0 ]; }; then
@@ -189,31 +202,40 @@ make_initrd() # <name> <init script> <module>...
 
 note "The guest"
 make_initrd guest "$SIM/guest-init" nvme
-GUEST_CMDLINE="console=ttyS0,115200 ignore_loglevel rdinit=/init panic=30 pciehp.dyndbg=+p"
-ESP=$WORK/esp.img
-truncate -s 200M "$ESP"
-mkfs.vfat -F 32 -n SIM "$ESP" > /dev/null
-mmd -i "$ESP" ::/EFI ::/EFI/BOOT
-# Two ways to boot: a unified kernel image where the firmware looks for one,
-# and a script for the shell of the firmware should that not work.
-mcopy -i "$ESP" "$VMLINUZ" ::/vmlinuz.efi
-mcopy -i "$ESP" "$WORK/guest.cpio.gz" ::/initrd.img
-printf 'echo -off\r\nfs0:\r\n\\vmlinuz.efi %s initrd=\\initrd.img\r\n' "$GUEST_CMDLINE" > "$WORK/startup.nsh"
-mcopy -i "$ESP" "$WORK/startup.nsh" ::/startup.nsh
+
+# A disk for the guest: a GPT with an EFI system partition which has the
+# kernel as a unified kernel image where the firmware looks for one, and, should
+# that not work, a script for the shell of the firmware.
+make_guest_disk() # <name> <kernel command line>
+{
+    local name=$1 cmdline=$2 esp=$WORK/$1-esp.img
+    rm -f "$esp" "$WORK/$name.raw" "$WORK/$name-BOOTX64.EFI"
+    truncate -s 200M "$esp"
+    mkfs.vfat -F 32 -n SIM "$esp" > /dev/null
+    mmd -i "$esp" ::/EFI ::/EFI/BOOT
+    mcopy -i "$esp" "$VMLINUZ" ::/vmlinuz.efi
+    mcopy -i "$esp" "$WORK/guest.cpio.gz" ::/initrd.img
+    printf 'echo -off\r\nfs0:\r\n\\vmlinuz.efi %s initrd=\\initrd.img\r\n' "$cmdline" > "$WORK/$name-startup.nsh"
+    mcopy -i "$esp" "$WORK/$name-startup.nsh" ::/startup.nsh
+    if [ -n "$UKIFY" ] && "$UKIFY" build --linux="$VMLINUZ" --initrd="$WORK/guest.cpio.gz" --cmdline="$cmdline" \
+           --output="$WORK/$name-BOOTX64.EFI" > "$WORK/$name-ukify.log" 2>&1; then
+        mcopy -i "$esp" "$WORK/$name-BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
+    else
+        echo "$name: no unified kernel image, the guest boots through the shell of the firmware"
+        tail -n 5 "$WORK/$name-ukify.log" 2> /dev/null
+    fi
+    truncate -s 204M "$WORK/$name.raw"
+    sgdisk -n 1:2048:+200M -t 1:ef00 "$WORK/$name.raw" > /dev/null
+    dd if="$esp" of="$WORK/$name.raw" bs=1M seek=1 conv=notrunc status=none
+    echo "$name.raw: $(mdir -i "$esp" -/ -b :: | tr '\n' ' ')"
+    rm -f "$esp"
+}
 UKIFY=$(command -v ukify || ls /usr/lib/systemd/ukify 2> /dev/null)
-if [ -n "$UKIFY" ] && "$UKIFY" build --linux="$VMLINUZ" --initrd="$WORK/guest.cpio.gz" --cmdline="$GUEST_CMDLINE" \
-       --output="$WORK/BOOTX64.EFI" > "$WORK/ukify.log" 2>&1; then
-    mcopy -i "$ESP" "$WORK/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
-    echo "unified kernel image: $(stat -c %s "$WORK/BOOTX64.EFI") bytes"
-else
-    echo "no unified kernel image, the guest boots through the shell of the firmware"
-    tail -n 5 "$WORK/ukify.log" 2> /dev/null
-fi
-mdir -i "$ESP" -/ :: | grep -v '^$' | head -n 20
-truncate -s 204M "$WORK/guest.raw"
-sgdisk -n 1:2048:+200M -t 1:ef00 "$WORK/guest.raw" > /dev/null
-dd if="$ESP" of="$WORK/guest.raw" bs=1M seek=1 conv=notrunc status=none
-sgdisk -p "$WORK/guest.raw" | tail -n 3
+# On the runner the kernel of the guest tells everything on the serial port.
+# Where virtualization is nested every character there is costly, so there it
+# keeps quiet and guest-init passes on what matters.
+make_guest_disk guest "console=ttyS0,115200 ignore_loglevel rdinit=/init panic=30 pciehp.dyndbg=+p"
+make_guest_disk guest-quiet "console=ttyS0,115200 quiet loglevel=3 mitigations=off rdinit=/init panic=30 pciehp.dyndbg=+p"
 
 # The drive: random data, so that the guest can only tell the checksum of
 # what it has read from it.
@@ -239,27 +261,51 @@ if ! grep -q '^9p\.ko$' "$WORK/l1-root/modules.list" \
     stage "the kernel can mount the file system of the runner" FAILED "no 9p"
     finish
 fi
-L1_CMDLINE="console=ttyS0 loglevel=6 intel_iommu=on rdinit=/init panic=-1 SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5"
-sudo timeout -k 30 2700 qemu-system-x86_64 \
-    -machine q35,accel=kvm,kernel-irqchip=split -cpu host -smp 4 -m 8G \
-    -nodefaults -display none -monitor none -serial stdio -no-reboot \
-    -kernel "$VMLINUZ" -initrd "$WORK/l1.cpio.gz" -append "$L1_CMDLINE" \
-    -device intel-iommu,intremap=on \
-    -virtfs "local,path=/,mount_tag=hostroot,security_model=none,readonly=on,multidevs=remap" \
-    -virtfs "local,path=$OUT,mount_tag=simout,security_model=none" \
-    -device pcie-root-port,id=rp1,chassis=1,slot=1 \
-    -drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw" \
-    -device nvme,drive=nvm0,serial=SIM0001,bus=rp1 \
-    < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/simulated-host-console.log"
-echo "the virtual machine ended with ${PIPESTATUS[0]}"
+# Runs the virtual machine which stands in for the host until its script is
+# done or the time is up.
+run_simhost() # <tcg|kvm> <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds>
+{
+    local accel=$1 where=$2 phases=$3 bootwait=$4 warp=$5 limit=$6 t0 rc
+    local cmdline="console=ttyS0 loglevel=4 mitigations=off intel_iommu=on rdinit=/init panic=-1"
+    cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
+    [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
+    local -a machine
+    if [ "$accel" = tcg ]; then
+        # All of it in software, with an AMD processor as QEMU emulates one, and
+        # the time of the machine counted in instructions: one nanosecond each.
+        machine=(-machine q35 -accel tcg -cpu max,la57=off -smp 2 -m 6G -icount shift=0,sleep=on)
+    else
+        machine=(-machine q35,kernel-irqchip=split -accel kvm -cpu host -smp 4 -m 8G)
+    fi
+    t0=$(date +%s)
+    sudo timeout -k 30 "$limit" qemu-system-x86_64 "${machine[@]}" \
+        -nodefaults -display none -monitor none -serial stdio -no-reboot \
+        -kernel "$VMLINUZ" -initrd "$WORK/l1.cpio.gz" -append "$cmdline" \
+        -device intel-iommu,intremap=on \
+        -virtfs "local,path=/,mount_tag=hostroot,security_model=none,readonly=on,multidevs=remap" \
+        -virtfs "local,path=$OUT,mount_tag=simout,security_model=none" \
+        -device pcie-root-port,id=rp1,chassis=1,slot=1 \
+        -drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw" \
+        -device nvme,drive=nvm0,serial=SIM0001,bus=rp1 \
+        < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/$where-console.log"
+    rc=${PIPESTATUS[0]}
+    echo "$where ($accel) ended with $rc after $(( $(date +%s) - t0 )) s"
+    if ! grep -q "^$where/setup: KVM is there" "$STAGES"; then
+        stage "$where: the virtual machine standing in for the host ran its script" FAILED
+    fi
+}
 
-if ! grep -q '^simulated host/setup: KVM is there' "$STAGES"; then
-    stage "the virtual machine standing in for the host ran its script" FAILED
+run_simhost tcg simhost plain,passthrough,hotplug,startempty,hostremove 150 "" 6000
+
+if ! grep -q '^simhost/passthrough: guest: reads from the drive which is passed through: ok' "$STAGES"; then
+    note "Part 2 once more, with KVM and time in the VM at a twentieth of its speed"
+    run_simhost kvm simhost-kvm plain,passthrough 900 5 2400
 fi
+
 if grep -q 'written by the guest' "$WORK/nvme.img"; then
     stage "what the guest wrote is on the drive of the simulated host" ok \
           "$(grep -a -o 'written by the guest, round [0-9]*' "$WORK/nvme.img" | tail -n 1)"
-elif grep -q '^simulated host/passthrough: guest: writes to the drive: ok' "$STAGES"; then
+elif grep -q '^simhost[^/]*/passthrough: guest: writes to the drive: ok' "$STAGES"; then
     stage "what the guest wrote is on the drive of the simulated host" FAILED
 fi
 

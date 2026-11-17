@@ -187,7 +187,7 @@ boot() # <what>
         diag
         return 1
     fi
-    if ! wait_serial 'GUEST: UP' "$BOOT_WAIT"; then
+    if ! wait_serial 'GUEST: READY' "$BOOT_WAIT"; then
         stage "$1" FAILED "the guest does not come up"
         diag
         return 1
@@ -214,13 +214,13 @@ check_pcistate() # <hotplug|fixed>,<present|absent>,<inuse|unused>
 # What the guest made of the hot-plug capable slot when it booted.
 guest_slot_checks()
 {
-    serial_show '_OSC|pciehp|PNP0A0' 12
-    if serial_has '_OSC: OS now controls \[[^]]*PCIeHotplug'; then
+    serial_show 'GUEST: k: .*(_OSC|pciehp|PNP0A0)' 12
+    if serial_has 'GUEST: k: .*_OSC: OS now controls \[[^]]*PCIeHotplug'; then
         stage "guest: the firmware hands PCIe hot-plug over to it" ok
     else
         stage "guest: the firmware hands PCIe hot-plug over to it" FAILED
     fi
-    if serial_has 'pciehp: Slot #[0-9]+ AttnBtn\+ PwrCtrl\+'; then
+    if serial_has 'GUEST: k: .*pciehp: Slot #[0-9]+ AttnBtn\+ PwrCtrl\+'; then
         stage "guest: its hot-plug driver has the slot" ok
     else
         stage "guest: its hot-plug driver has the slot" FAILED
@@ -338,15 +338,15 @@ setup()
         stage "the VM is created" FAILED
         return 1
     fi
-    run modifyvm "$VM" --memory 768 --cpus 1 --ioapic on
-    run modifyvm "$VM" --chipset ich9
-    run modifyvm "$VM" --firmware efi
-    run modifyvm "$VM" --vm-execution-engine native-api
-    run modifyvm "$VM" --nic1 none
-    run modifyvm "$VM" --audio-enabled off
-    run modifyvm "$VM" --graphicscontroller vmsvga --vram 16
-    run modifyvm "$VM" --uart1 0x3f8 4 --uartmode1 file "$SERIAL"
-    run modifyvm "$VM" --boot1 disk --boot2 none --boot3 none --boot4 none
+    run modifyvm "$VM" --memory 768 --cpus 1 --ioapic on --chipset ich9 --firmware efi \
+        --vm-execution-engine native-api --nic1 none --audio-enabled off \
+        --graphicscontroller vmsvga --vram 16 --uart1 0x3f8 4 --uartmode1 file "$SERIAL" \
+        --boot1 disk --boot2 none --boot3 none --boot4 none
+    # Where every exit from the guest is very slow, time in the VM can be made
+    # to pass more slowly than outside of it.
+    if [ -n "${SIM_WARP:-}" ]; then
+        run setextradata "$VM" VBoxInternal/TM/WarpDrivePercentage "$SIM_WARP"
+    fi
     run storagectl "$VM" --name sata --add sata --controller IntelAhci --portcount 1
     if ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"; then
         stage "the VM is created" FAILED "no disk"
@@ -366,7 +366,7 @@ phase_plain()
     reset_vm
     if boot "a VM without a device of the host boots the guest"; then
         serial_show 'GUEST: pci:' 20
-        serial_show '_OSC|PNP0A0' 6
+        serial_show 'GUEST: k: .*(_OSC|PNP0A0)' 8
         guest_goes_on "the guest keeps running"
     fi
     end_phase

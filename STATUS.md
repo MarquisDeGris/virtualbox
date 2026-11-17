@@ -57,10 +57,48 @@ guest (`sim/` on this branch):
    host asking for the device back, a start without the device, a saved
    state with the empty slot.
 
-The second part is a third level of virtualization on a runner which is a
-virtual machine itself; whether the runners allow it is not known yet. The
-first runs are for finding that out and do not fail on what they find
-(`sim_strict: no`). Nothing of this has run yet.
+The first runs are for setting this up and do not fail on what they find
+(`sim_strict: no`).
+
+**Run 220, the first one** (2026-11-16, head of the merge request):
+
+The first part did everything it was to do. This is the first time the
+code ran in a VM, and the first time Main and `VBoxManage` ran at all:
+
+| What | Result |
+|------|--------|
+| VirtualBox from the build directory, no kernel module of VirtualBox loaded | works; `VBoxManage`, `VBoxSVC`, `VBoxHeadless` |
+| A VM without anything of this work (ICH9, EFI, KVM) | boots the guest in 11 seconds; the root bridge is `PNP0A03` and the guest is not given PCIe hot-plug, as before |
+| A VM configured for a device which is not there, with hot-plug | starts with the layout from the extra data; the guest finds `PNP0A08`, `_OSC: OS now controls [PCIeHotplug SHPCHotplug PME AER PCIeCapability]`, and its driver takes the slot: `pciehp: Slot #1 AttnBtn+ PwrCtrl+ MRL- AttnInd+ PwrInd+ HotPlug+ Surprise+ Interlock- NoCompl- IbPresDis- LLActRep+`; the slot is empty; no complaint of the guest kernel about the port |
+| `showvminfo` for that VM | `hotplug,absent,unused` |
+| `controlvm plugpci` of a device which is not there | refused with a message, the VM runs on |
+| `controlvm savestate` with the empty slot, then starting the VM again | the state is saved and loaded, the guest goes on where it was |
+
+The second part got as far as the guest kernel starting:
+
+| What | Result |
+|------|--------|
+| The virtual machine standing in for the host | boots, has KVM (nested), `/dev/iommu`, the NVMe drive behind the emulated IOMMU in a group of its own, bound to `vfio-pci` |
+| A VM with the drive passed through | starts: the device opens the drive through VFIO and IOMMUFD of a real kernel, the host kernel resets the drive, regions, interrupts and capabilities are read as they are (MSI-X with 65 vectors is emulated, the PCI Express capability too, power management is left out); the firmware runs and loads the kernel |
+| The layout Main stores for a start without the device | stored, and it is what the drive has |
+| A VM started without the drive (unbound from `vfio-pci`) | starts |
+| The guest in these VMs | **does not get through its start**: every exit from this guest takes about a millisecond, 725000 of them in eleven minutes. The kernel switches on its timer tick of 1000 interrupts a second, each of which takes several exits while the interrupts still go through the PIC (115000 interrupts were delivered that way, 558000 were raised), and from there on it does nothing but serve them |
+
+That is a property of where this ran, not of the device: the runner is a
+virtual machine itself, so the guest of VirtualBox was at the third level
+of hardware virtualization at least, and the cost of an exit multiplies
+with each level. The same VM on the runner needs 200000 exits for a
+complete start, which is nothing there.
+
+So the machine standing in for the host is emulated in software now (QEMU
+without KVM, with an AMD processor whose virtualization extension QEMU
+emulates as well), and its time is counted in instructions. Everything
+slows down together then, the clocks included, and no level waits for
+another one. Should that not get a guest to read from the drive, the same
+run tries KVM once more with time in the VM slowed down to a twentieth,
+to learn whether that would be a way. The kernel of the guest keeps quiet
+on the serial port there, as each character costs three exits. Not run
+yet.
 
 ### The management and the review, 13 to 15 November
 
@@ -625,6 +663,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-15 | No build of the head from nothing | The `tests` flavor builds the tree on top of the cached build of `main` and compiles every file which differs; a build from nothing costs a long run and would tell the same |
 | 2026-11-15 | A failed build of the tree does not end a `tests` run at once: the device testcases are built and run with what was built, and the run fails at its end | One run tells about the tree and about the testcase, where it took two before |
 | 2026-11-16 | The system simulation (T4) is set up after all, which takes back the decision of 2026-11-15 for T4 | Everything else which was verified is compiled code and a testcase against a kernel interface written by the same hand; only the simulation shows the VMM, the kernel, a guest, Main and `VBoxManage` working together before hardware does. The cost in runs is kept down: the scripts are written in one go, a run which is for finding out succeeds whatever it finds, and each run is read completely before the next |
+| 2026-11-17 | The machine standing in for the host in the simulation is emulated in software, with its time counted in instructions, instead of running on KVM | Run 220: with KVM the guest of VirtualBox is at the third level of hardware virtualization at least, an exit from it takes a millisecond, and its kernel does not get past its timer tick. In one emulator all levels share one clock which goes as fast as the emulation does. It does not depend on what the runner offers for nesting either, which differs from run to run |
 | 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -635,7 +674,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 55 tests, ACPI table check | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | all pass with ASan, LSan and UBSan (run 218, this tree) and without them (run 217, a tree which differs in two comments) |
 | T2 fuzz | running in CI | `3d9ea801` (as `scratch/mgmt` @ `a69d5a89`) | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 218); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | being set up, not run yet | | It takes a virtual machine with an emulated IOMMU as the host, inside a runner which is a virtual machine itself, and VirtualBox in it running a third. See "Installation and the simulation" above |
+| T4 system simulation | being set up; the part without a device passes | `3d9ea801` | Run 220: on the runner a VM with an empty hot-plug capable slot, the guest taking the slot, the management commands and a saved state all work. With a device, in a virtual machine with an emulated IOMMU as the host, the VM starts and opens the device through the real kernel interface, but its guest did not get through its start there for reasons of the test setup. See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -778,5 +817,6 @@ interface, a real device.
 | 217 | `scratch/mgmt` @ `a8da0d19` | tests | passed | the tree builds, 55 tests and three random tests pass; no compiler warning in a file this work changes |
 | 218 | `scratch/mgmt` @ `a69d5a89` | sanitize | passed | the tree of the head of the merge request (`3d9ea801`); no reports from the sanitizers |
 | 219 | `scratch/red-evidence-18` | tests, testcase expected to fail | failed | the testcase against root port and device as they were before the review: eight tests fail as they are to, then the random test of the device ran into the time limit, which a run cannot expect. The reason is the defect the INTx change is about, see the evidence table |
+| 220 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | first run of the simulation, 53 minutes. On the runner: 14 checks, all pass (VM with an empty hot-plug capable slot, the guest takes the slot, `plugpci` refused for a device which is not there, saved state). In the virtual machine standing in for the host: set-up passes (nested KVM, IOMMU, drive bound to `vfio-pci`), VMs with the drive start, their guest does not get through its start in three attempts of ten minutes each; the test setup is too slow at that depth of nesting, see above |
 
 Run numbers are those GitHub shows for the `build` workflow.
