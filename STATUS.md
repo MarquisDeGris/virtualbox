@@ -286,6 +286,54 @@ nothing depends on the power button. All of this was tried beforehand
 against a made-up `VBoxManage` whose answers stand in for the guest, as
 far as that goes.
 
+**Run 227** (2026-11-18, the head of the merge request, 74 minutes): the
+part with the Linux guest passed with its new checks. The installation of
+Windows did not get through, so Windows with the drive in the slot was
+not reached.
+
+| What | Result |
+|------|--------|
+| The slot registers of the Linux guest, read from the outside (new) | passed: the hot-plug interrupt of the slot and its events are on |
+| The power button with the Linux guest (new) | the guest counts one more interrupt of the ACPI hardware after each press: in a VM without the slot, in one with the empty slot, and after a saved state was loaded. A press arrives; that Windows did not shut down in run 226 is about Windows |
+| The installation of Windows | setup wrote to the disk after 38 seconds (18 presses of the Enter key), showed "Searching for disks" and stayed there for 50 minutes, nothing on the serial port |
+
+Why: the VM stood still from 40 seconds after its start. Its log tells at
+power-off that each of the two CPU threads had been in one single call
+into KVM for the last 3002 seconds, that virtual time stood at 39.8
+seconds, at a timer of the HPET which was due, and that a timer of the
+real clock was 50 minutes overdue. The timers of VirtualBox are run by
+the thread of CPU 0, which has to be got out of KVM for that with a
+signal. A signal which arrives after that thread has looked for work and
+before it has entered KVM gets it out of nothing, and it is not sent a
+second time while the work waits. The next time the guest leaves for
+VirtualBox makes up for that. Windows, which has its tick from the HPET
+of VirtualBox here, had halted both CPUs for waiting for that tick: no
+tick, so nothing to leave for, so no tick. Until second 38 the presses of
+the Enter key had made the guest leave once a second.
+
+This is in VirtualBox as it is without this work (`tmR3TimerCallback` in
+`VMMR3/TMR3.cpp` and the loop around `KVM_RUN` in
+`NEMR3Native-linux-x86.cpp`), on a Linux host with KVM, for a guest which
+has its tick from a timer VirtualBox emulates. A VM with a network
+adapter or with somebody at its keyboard gets going again with the next
+interrupt, which makes it a hiccup there; this VM has neither. The one
+difference between this VM and that of run 226 is the guest type, Windows
+instead of Other, with which VirtualBox shows the guest that it runs
+under a hypervisor. Whether that made the difference or chance did is not
+known.
+
+What was done: one commit on the branch `scratch/timer-wakeup`, which is
+the head of the merge request plus that commit. The function which looks
+at the timers every 10 ms notifies the thread again when the work has
+been waiting at two of its calls in a row while the thread executes the
+guest, and says so in the log. Linux hosts only. This does not close the
+window; it bounds what a missed notification costs, to 20 ms. The Windows
+part of the simulation watches for a VM which stands still from now on:
+once a minute it looks whether the guest has left for VirtualBox at all.
+If not, that is a failed check, and the thread of CPU 0 is woken from the
+outside so that the run goes on. It also tells how often VirtualBox
+wrote the new line into its log.
+
 ### The management and the review, 13 to 15 November
 
 From 2026-11-13 to 2026-11-15 GitHub did not start workflow runs for this
@@ -782,9 +830,13 @@ harness since WP5, saved states since the fourth part of WP6.
    [INSTALL.md](INSTALL.md) says how to build and install.
 2. With every change to the code: the simulation with `sim_strict: yes`
    next to the tests and the sanitizers.
-3. Run 227 (`winsim`, for finding out: `sim_strict: no`): Windows in the
-   virtual machine standing in for a host, with the drive in the slot,
-   and what there is to the power button.
+3. Run 228 (`winsim`, for finding out: `sim_strict: no`) on
+   `scratch/timer-wakeup`: the installation of Windows again, then
+   Windows in the virtual machine standing in for a host, with the drive
+   in the slot, and what there is to the power button with Windows. If
+   the commit about the timer does what it is for there: the tests, the
+   strict simulation and the sanitizers for it, and then it goes into the
+   merge request as a commit of its own.
 4. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
@@ -858,6 +910,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow (taken back on 2026-11-17, see the next line) |
 | 2026-11-17 | A Windows guest in the workflow: Windows Server from the evaluation image Microsoft offers for download, installed unattended into a VM with the empty hot-plug capable slot (flavor `winsim`). The image is fetched for the run and not kept; the VM has no network adapter | Windows is the guest the work is for and the one guest nothing had been tried with. The slot, the root bridge and the firmware tables were made after what Windows is known to handle elsewhere, which is not the same as Windows having handled them. The evaluation image is for trying things out, and this is that |
 | 2026-11-17 | What a guest made of the slot is also read from the outside: the slot registers through the debug interface of the VM | It does not depend on what the guest tells, so it is the same check for Linux and Windows, and it is the one sign that the hot-plug driver of Windows runs the slot which can be had without a device |
+| 2026-11-18 | A VM which stands still because the thread of its CPU missed the notification of a timer is dealt with here: the timer callback notifies again (a commit of its own, Linux hosts only), and the Windows part of the simulation watches for it | It is not part of PCI passthrough. But a guest with a device of the host runs on KVM, where this is, the guest the work is for is Windows, which ran into it, and a person testing on hardware would take a guest which stops for one the device broke. The smallest change which bounds it was chosen. Closing the window in the KVM backend takes one of the two ways KVM has for it (`immediate_exit`, or the signal blocked outside `KVM_RUN`); both change the loop every exit of every guest goes through, and nothing but the simulation is there for trying that |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1022,5 +1075,6 @@ slot.
 | 224 | `scratch/quiet-reset` @ `dd43ddf3` | sim, strict | passed | the head of the merge request with the commit about the log of a device on its way out: the tree builds without a warning in a file this work changes, 56 tests and three random tests pass, the simulation passes with 79 checks, 20 minutes, AWS |
 | 225 | `scratch/quiet-reset` @ `dd43ddf3` | sanitize | passed | the same commit; no reports from the sanitizers |
 | 226 | `pci-passthrough-hotplug-v1` @ `dd43ddf3` | winsim, not strict | passed | 31 minutes. The first Windows guest: Windows Server 2025 installed unattended into a VM with the empty hot-plug capable slot, on the runner. 41 checks, 40 pass: the root bridge is `PNP0A08` to Windows, the firmware hands native hot-plug over, the PCI driver of Windows runs the port, the slot registers show its hot-plug driver running the slot (the same check for the Linux guest passes too), saved state, second start. One fails: Windows did not shut down when the power button was pressed; not yet known why. See "A Windows guest" above |
+| 227 | `pci-passthrough-hotplug-v1` @ `dd43ddf3` | winsim, not strict | passed | 74 minutes. The part with the Linux guest passes with its new checks: the slot registers read from the outside, and the power button, whose press arrives in the guest with and without the slot and after a saved state. The installation of Windows stood still 40 seconds after the VM was started and was given up after 50 minutes: the thread of the CPU had missed the notification of a timer, which is in VirtualBox as it is without this work (see run 227 under "Installation and the simulation"). Windows with the drive in the slot was not reached |
 
 Run numbers are those GitHub shows for the `build` workflow.

@@ -39,6 +39,10 @@ START_WAIT=${WIN_START_WAIT:-900}
 SHUTDOWN_WAIT=240
 SHOTS=0
 BUTTON_WORKS=unknown
+STALL_EVERY=${WIN_STALL_EVERY:-60}
+STALL_T=0
+STALL_N=
+STALLS=0
 MARKS='^WIN: (SETUP|SPECIALIZE|FIRSTLOGON|BUTTON-DEFAULT|UP|OS=|REPORT-END|SHUTDOWN)'
 # The drive behind the port with the slot, as the script in the guest tells
 # of it once the driver of Windows has it.
@@ -62,6 +66,56 @@ shot()
 serial_lines()
 {
     { wc -l < "$SERIAL"; } 2> /dev/null || echo 0
+}
+
+# How often the guest has left for VirtualBox so far, all its CPUs together.
+# Nothing when the VM cannot be asked.  Asking does not go through the threads
+# of the CPUs.
+exits_now()
+{
+    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/NEM/CPU*/Exit' 2> /dev/null \
+        | grep -a -o -E '<Counter c="[0-9]+"[^>]*name="/NEM/CPU[0-9]+/Exit"' \
+        | sed -E 's/^<Counter c="([0-9]+)".*$/\1/' \
+        | awk '{ s += $1; n++ } END { if (n) print s }'
+}
+
+# Run 227 had a VM which did nothing any more from 40 s after its start: the
+# thread of its CPU had missed being told that a timer was due, and Windows
+# waited for that timer with its CPUs halted (STATUS.md has it).  A Windows
+# which is alive leaves for VirtualBox many times a second.  So this looks,
+# at most once every $STALL_EVERY seconds, whether the count has moved since
+# the last look.  If it has not, that is told and counted, and the thread of
+# CPU 0 is made to come out by asking for a register, which lets the VM go on.
+stall_check()
+{
+    local now n rip
+    now=$(date +%s)
+    [ $((now - STALL_T)) -ge "$STALL_EVERY" ] || return 0
+    STALL_T=$now
+    n=$(exits_now)
+    if [ -n "$n" ] && [ "$n" = "$STALL_N" ]; then
+        STALLS=$((STALLS + 1))
+        rip=$(VBM_TIMEOUT=30 vbm debugvm "$VM" getregisters --cpu=0 rip 2>&1 | tr -d '\r' | grep -a -m 1 -E '^rip|rror' | cut -c1-80)
+        echo "    the guest has not left for VirtualBox once in the last $STALL_EVERY s or more ($n times in all): CPU 0 woken from the outside, $rip"
+        n=
+    fi
+    STALL_N=$n
+}
+
+stalls_reset()
+{
+    STALLS=0
+    STALL_N=
+}
+
+stalls_stage()
+{
+    if [ "$STALLS" = 0 ]; then
+        stage "the VM never stood still and had to be woken from the outside" ok
+    else
+        stage "the VM never stood still and had to be woken from the outside" FAILED "it did, $STALLS time(s)"
+    fi
+    stalls_reset
 }
 
 # Waits for a line of the guest.  Tells what the guest says about where it is
@@ -89,6 +143,7 @@ wait_win() # <regex> <seconds>
             echo "    [$now s] waiting, the VM is $st"
             shot
         fi
+        stall_check
         sleep 5
     done
 }
@@ -96,10 +151,12 @@ wait_win() # <regex> <seconds>
 # Waits until the VM is powered off, by the clock.
 wait_off() # <seconds>
 {
-    local t0
+    local t0 st
     t0=$(date +%s)
     while [ $(( $(date +%s) - t0 )) -lt "$1" ]; do
-        [ "$(vmstate)" = poweroff ] && return 0
+        st=$(vmstate)
+        [ "$st" = poweroff ] && return 0
+        [ "$st" = running ] && stall_check
         sleep 2
     done
     [ "$(vmstate)" = poweroff ]
@@ -114,6 +171,11 @@ show_exits() # <log>
     echo "    exits from the guest in $(basename "$1"): ${n:-0}"
     grep -a -E '^[0-9:.]+ /(NEM/CPU[0-9]+/Exit(/(Io|Mmio|Intr|RdMsr|WrMsr))?|Devices/hpet/ReadCounter32bit) +[0-9]+ times' "$1" 2> /dev/null \
         | sed -E 's/^[0-9:.]+ //; s/ +/ /g' | sed 's/^/    | /'
+    # VirtualBox tells in its log when it had to tell the thread of a CPU a
+    # second time that a timer was due, at most 64 times per VM.
+    n=$(grep -a -c 'TM: VMCPU_FF_TIMER pending for more than' "$1" 2> /dev/null)
+    echo "    times the thread of a CPU had to be told again that a timer was due, in $(basename "$1"): ${n:-0}"
+    grep -a 'TM: VMCPU_FF_TIMER pending for more than' "$1" 2> /dev/null | head -n 3 | cut -c1-160 | sed 's/^/    | /'
 }
 
 serial_value() # <regex with one group>: what the group matched in the first line which matches
@@ -351,6 +413,7 @@ phase_install()
     fi
     local t0 keys=0 size=0
     t0=$(date +%s)
+    stalls_reset
     if ! start_vm; then
         stage "Windows is installed in the VM with the empty hot-plug capable slot" FAILED "the VM does not start"
         diag
@@ -385,6 +448,7 @@ phase_install()
     if ! wait_win '^WIN: REPORT-END' "$INSTALL_WAIT"; then
         stage "Windows is installed in the VM with the empty hot-plug capable slot" FAILED \
               "after $(( $(date +%s) - t0 )) s the last from the guest is: $(serial_new | grep -a '^WIN: ' | tail -n 1 | cut -c1-60)"
+        stalls_stage
         shot
         diag
         return 1
@@ -401,6 +465,7 @@ phase_install()
         stage "plugpci of a device which is not there is refused" ok
     fi
     guest_goes_on "the VM runs on after that" 120
+    stalls_stage
 
     power_button "guest: shuts down when the power button is pressed" || guest_shutdown
     show_exits "$SIM_OUT/VBox-$PHASE.log"
@@ -413,7 +478,8 @@ phase_restart()
 {
     PHASE=win-restart
     settle
-    start_and_report "the installed Windows starts again" "$START_WAIT" || { end_phase; return 1; }
+    stalls_reset
+    start_and_report "the installed Windows starts again" "$START_WAIT" || { stalls_stage; end_phase; return 1; }
     report_checks "after the restart: " hotplug,absent,unused
     guest_goes_on "the guest keeps running" 120
     if saved_state_round; then
@@ -422,6 +488,7 @@ phase_restart()
             power_button "guest: shuts down when the power button is pressed after the state was loaded"
         fi
     fi
+    stalls_stage
     guest_shutdown
     show_exits "$SIM_OUT/VBox-$PHASE-saved.log"
     [ "$(vmstate)" = poweroff ]
@@ -533,6 +600,7 @@ win_drive_gone() # <what> [<seconds>]
 phase_hotplug()
 {
     PHASE=win-hotplug
+    stalls_reset
     bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
     start_and_report "Windows starts with the drive in the hot-plug capable slot" "$START_WAIT" || return
     shot
@@ -612,6 +680,7 @@ mode_nested()
 
     echo "==== phase win-hotplug on $WHERE"
     phase_hotplug
+    stalls_stage
     case "$(vmstate)" in
         running) guest_shutdown ;;
         *)       end_phase ;;

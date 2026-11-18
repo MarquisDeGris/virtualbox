@@ -97,6 +97,13 @@ serial_mark()
     SERIAL_FROM=$(( $( { wc -l < "$SERIAL"; } 2> /dev/null || echo 0) + 1 ))
 }
 
+# Called now and then while a wait goes on and the VM runs.  Nothing here;
+# win-phases.sh has its own, which looks whether the VM still gets anywhere.
+stall_check()
+{
+    :
+}
+
 wait_serial() # <regex> <seconds>
 {
     local i=0 st
@@ -105,7 +112,8 @@ wait_serial() # <regex> <seconds>
         if [ $((i % 10)) = 9 ]; then
             st=$(vmstate)
             case "$st" in
-                running|paused|starting|restoring) ;;
+                running) stall_check ;;
+                paused|starting|restoring) ;;
                 *) echo "    the VM is in state '$st', not waiting any longer"; return 1 ;;
             esac
         fi
