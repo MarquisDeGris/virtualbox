@@ -117,7 +117,9 @@ while :; do
     fi
     if [ $((tick % 10)) = 0 ]; then
         kmsg
-        say "ALIVE $tick"
+        # With the number of interrupts the ACPI hardware has raised so far:
+        # the power button is one of them.
+        say "ALIVE $tick sci=$(grep ' acpi$' /proc/interrupts | awk '{ print $2 }')"
     fi
     tick=$((tick + 1))
     sleep 1

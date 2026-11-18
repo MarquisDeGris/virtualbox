@@ -27,9 +27,12 @@
 #   3. With Windows as the guest (SIM_PARTS has "win"): on the runner, a VM
 #      with an empty hot-plug capable slot into which Windows Server is
 #      installed from its evaluation image, see win-phases.sh.
+#   4. That Windows in a virtual machine as in 2 (SIM_PARTS has "winhost"),
+#      with the drive in the hot-plug capable slot: the drive is taken out
+#      and put in while Windows runs.
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# win.  Without it: runner,simhost.
+# win, winhost.  Without it: runner,simhost.
 #
 # The guest is the same in both: a kernel with guest-init, which tells on its
 # serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox and
@@ -64,7 +67,7 @@ stage() # <what> <ok|FAILED|skipped> [<note>]
     echo "$line" >> "$STAGES"
 }
 
-has_part() # <runner|simhost|win>
+has_part() # <runner|simhost|win|winhost>
 {
     case "$PARTS" in *",$1,"*) return 0 ;; esac
     return 1
@@ -81,6 +84,9 @@ finish()
         missing=1
     fi
     if has_part win && ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES"; then
+        missing=1
+    fi
+    if has_part winhost && ! grep -q '^winhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES"; then
         missing=1
     fi
     echo
@@ -287,7 +293,7 @@ echo "part 1 ended with $?"
 
 part_simhost_prepare()
 {
-    make_initrd l1 "$SIM/l1-init" virtio_pci 9pnet_virtio 9p
+    make_initrd l1 "$SIM/l1-init" virtio_pci 9pnet_virtio 9p virtio_blk
     if ! grep -q '^9p\.ko$' "$WORK/l1-root/modules.list" \
        && ! grep -q -x 'CONFIG_9P_FS=y' "$WORK/kroot/boot/config-$KVER" "/boot/config-$KVER" 2> /dev/null; then
         stage "the kernel can mount the file system of the runner" FAILED "no 9p"
@@ -296,15 +302,25 @@ part_simhost_prepare()
 }
 # Runs the virtual machine which stands in for the host until its script is
 # done or the time is up.
-run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds>
+run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds> [<disk image of a Windows guest>]
 {
-    local where=$1 phases=$2 bootwait=$3 warp=$4 limit=$5 t0 rc
+    local where=$1 phases=$2 bootwait=$3 warp=$4 limit=$5 windisk=${6:-} t0 rc
     local cmdline="console=ttyS0 loglevel=4 mitigations=off intel_iommu=on rdinit=/init panic=-1"
     cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
     [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
+    local mem=8G
+    local -a extra=()
+    if [ -n "$windisk" ]; then
+        # The disk of the Windows which was installed on the runner, as a disk
+        # of this machine.  What is written to it goes to a temporary file,
+        # the image stays as it is.
+        cmdline="$cmdline SIM_GUEST=win"
+        mem=10G
+        extra=(-drive "file=$windisk,format=vdi,if=none,id=wdisk,snapshot=on" -device "virtio-blk-pci,drive=wdisk")
+    fi
     t0=$(date +%s)
     sudo timeout -k 30 "$limit" qemu-system-x86_64 \
-        -machine q35,kernel-irqchip=split -accel kvm -cpu host -smp 4 -m 8G \
+        -machine q35,kernel-irqchip=split -accel kvm -cpu host -smp 4 -m "$mem" \
         -nodefaults -display none -monitor none -serial stdio -no-reboot \
         -kernel "$VMLINUZ" -initrd "$WORK/l1.cpio.gz" -append "$cmdline" \
         -device intel-iommu,intremap=on \
@@ -313,6 +329,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         -device pcie-root-port,id=rp1,chassis=1,slot=1 \
         -drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw" \
         -device nvme,drive=nvm0,serial=SIM0001,bus=rp1 \
+        "${extra[@]}" \
         < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/$where-console.log"
     rc=${PIPESTATUS[0]}
     echo "$where ended with $rc after $(( $(date +%s) - t0 )) s"
@@ -370,6 +387,12 @@ make_unattend_image()
     command -v genisoimage > /dev/null || sudo apt-get install -y -q --no-install-recommends genisoimage > "$WORK/apt-genisoimage.log" 2>&1
     genisoimage -quiet -J -r -V SIMW1 -o "$WORK/unattend.iso" "$d" || return 1
     ls -l "$WORK/unattend.iso"
+    # A third one, which is put into the drive later: it tells the script in
+    # the guest to shut Windows down.
+    rm -rf "$WORK/cmd" "$WORK/cmd-shutdown.iso"
+    mkdir -p "$WORK/cmd/simcmd"
+    echo shutdown > "$WORK/cmd/simcmd/shutdown"
+    genisoimage -quiet -J -r -V SIMCMD -o "$WORK/cmd-shutdown.iso" "$WORK/cmd" || return 1
 }
 
 if has_part win; then
@@ -390,9 +413,19 @@ if has_part win; then
             i=$((i + 1))
         done
         sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-win SIM_OUT="$OUT/win" SIM_STAGES="$STAGES" SIM_WHERE=runner \
-                 WIN_ISO="$WORK/win.iso" WIN_UNATTEND_ISO="$WORK/unattend.iso" \
-            timeout -k 30 7800 bash "$SIM/win-phases.sh"
+                 WIN_ISO="$WORK/win.iso" WIN_UNATTEND_ISO="$WORK/unattend.iso" WIN_CMD_ISO="$WORK/cmd-shutdown.iso" \
+            timeout -k 30 4500 bash "$SIM/win-phases.sh" runner
         echo "part 3 ended with $?"
+    fi
+fi
+
+if has_part winhost; then
+    note "Part 4: Windows with the drive in the slot, in a virtual machine with an IOMMU and a PCIe device"
+    if ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES" || ! sudo test -s /tmp/sim-win/win.vdi; then
+        stage "Windows with the drive in the slot" skipped "there is no installed Windows"
+    elif part_simhost_prepare; then
+        sudo ls -l /tmp/sim-win/win.vdi
+        run_simhost winhost win-hotplug 3000 "" 6600 /tmp/sim-win/win.vdi
     fi
 fi
 

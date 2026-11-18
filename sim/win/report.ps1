@@ -157,10 +157,28 @@ foreach ($e in ($crash | Select-Object -First 3)) {
     Say ("BUGCHECK id={0} text={1}" -f $e.Id, $e.Message)
 }
 Say ("BUGCHECKS n={0}" -f $crash.Count)
+
+# The power button as Windows has it, and what Windows does when it is
+# pressed (0 nothing, 1 sleep, 2 hibernate, 3 shut down, 4 display off).
+foreach ($b in @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match '^ACPI\\(FixedButton|PNP0C0C|PNP0C0E)' })) {
+    Say ("BUTTON id={0} status={1} problem={2} name={3}" -f $b.InstanceId, $b.Status, (Problem-Code $b), $b.FriendlyName)
+}
+try {
+    $q = (& powercfg.exe /qh SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 2>&1 | Out-String)
+    $idx = [regex]::Matches($q, '0x[0-9a-fA-F]{8}')
+    if ($idx.Count -ge 2) {
+        Say ("BUTTON-ACTION ac={0} dc={1}" -f $idx[$idx.Count - 2].Value, $idx[$idx.Count - 1].Value)
+    } else {
+        Say 'BUTTON-ACTION unknown'
+    }
+} catch {
+    Say ("BUTTON-ACTION failed: {0}" -f $_.Exception.Message)
+}
 Say 'REPORT-END'
 
-# Keeps running: says that it is alive, and tells when a device behind a
-# bridge comes or goes.
+# Keeps running: says that it is alive, tells when a device behind a bridge
+# comes or goes, reads from an NVMe drive which came, and shuts Windows down
+# when the outside asks for it.
 function Behind-Bridges {
     $now = @{}
     foreach ($e in @(Pci-Devices)) {
@@ -171,15 +189,81 @@ function Behind-Bridges {
     return $now
 }
 
+# The MD5 checksum of the first bytes of a file or of a drive, read past any
+# cache: a megabyte at a time, which a drive takes as it is.
+function Md5-OfStart([string]$Path, [int]$Bytes) {
+    try {
+        $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1048576)
+        try {
+            $md5 = [System.Security.Cryptography.MD5]::Create()
+            $buf = New-Object byte[] 1048576
+            $left = $Bytes
+            while ($left -gt 0) {
+                $n = $fs.Read($buf, 0, [Math]::Min($buf.Length, $left))
+                if ($n -le 0) { break }
+                [void]$md5.TransformBlock($buf, 0, $n, $null, 0)
+                $left -= $n
+            }
+            [void]$md5.TransformFinalBlock($buf, 0, 0)
+            $sum = ($md5.Hash | ForEach-Object { $_.ToString('x2') }) -join ''
+            if ($left -gt 0) { return ("{0} short-by-{1}" -f $sum, $left) }
+            return $sum
+        } finally {
+            $fs.Close()
+        }
+    } catch {
+        return ("failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+# Reads from the NVMe drive once Windows has made a disk of it.
+function Read-Drive([int]$Round) {
+    $disk = $null
+    for ($t = 0; $t -lt 20 -and -not $disk; $t++) {
+        $disk = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
+                Where-Object { $_.PNPDeviceID -match 'VEN_NVME' -or $_.Model -match 'NVMe' } | Select-Object -First 1
+        if (-not $disk) { Start-Sleep -Seconds 3 }
+    }
+    if (-not $disk) {
+        Say ("NODRIVE {0}" -f $Round)
+        return
+    }
+    Say ("DRIVE {0} {1} model={2} size={3}" -f $Round, $disk.DeviceID, $disk.Model, $disk.Size)
+    Say ("READ {0} md5={1}" -f $Round, (Md5-OfStart $disk.DeviceID 8388608))
+}
+
+# What the outside asks for: a DVD with the directory simcmd in the drive.
+function Host-Command {
+    try {
+        foreach ($dr in [System.IO.DriveInfo]::GetDrives()) {
+            if ($dr.DriveType -eq [System.IO.DriveType]::CDRom -and $dr.IsReady) {
+                if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\shutdown')) { return 'shutdown' }
+            }
+        }
+    } catch { }
+    return ''
+}
+
 $seen = Behind-Bridges
-foreach ($k in $seen.Keys) { Say ("PRESENT 0 at={0} id={1}" -f $k, $seen[$k]) }
+foreach ($k in $seen.Keys) {
+    Say ("PRESENT 0 at={0} id={1}" -f $k, $seen[$k])
+    if ($seen[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive 0 }
+}
 $rounds = [int]($AliveSeconds / 5)
 for ($i = 1; $i -le $rounds; $i++) {
     Say ("ALIVE {0}" -f $i)
     Start-Sleep -Seconds 5
+    if ((Host-Command) -eq 'shutdown') {
+        Say 'SHUTDOWN'
+        & shutdown.exe /s /t 0 /f
+        break
+    }
     $now = Behind-Bridges
     foreach ($k in $now.Keys) {
-        if (-not $seen.ContainsKey($k) -or $seen[$k] -ne $now[$k]) { Say ("PRESENT {0} at={1} id={2}" -f $i, $k, $now[$k]) }
+        if (-not $seen.ContainsKey($k) -or $seen[$k] -ne $now[$k]) {
+            Say ("PRESENT {0} at={1} id={2}" -f $i, $k, $now[$k])
+            if ($now[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive $i }
+        }
     }
     foreach ($k in $seen.Keys) {
         if (-not $now.ContainsKey($k)) { Say ("GONE {0} at={1}" -f $i, $k) }

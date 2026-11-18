@@ -93,6 +93,32 @@ fi
 
 ulimit -l unlimited
 mkdir -p "$OUT/$WHERE"
+
+if [ "${SIM_GUEST:-linux}" = win ]; then
+    # Windows as the guest: its disk is the virtio disk of this machine, see
+    # run.sh and win-phases.sh.
+    lsblk 2> /dev/null || ls -l /dev/vd*
+    if [ ! -b /dev/vda ]; then
+        stage "the disk of Windows is there" FAILED
+        dmesg | grep -i -E 'virtio|vda' | tail -n 10
+        exit 1
+    fi
+    VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
+    SIM_WORK=/tmp/sim \
+    SIM_OUT=$OUT/$WHERE \
+    SIM_STAGES=$STAGES \
+    SIM_WHERE=$WHERE \
+    SIM_HOSTADDR=$addr \
+    WIN_DISK_DEV=/dev/vda \
+    WIN_CMD_ISO=$SIM_WS/sim-work/cmd-shutdown.iso \
+    WIN_START_WAIT=${SIM_BOOT_WAIT:-3000} \
+        bash "$SIM_DIR/win-phases.sh" nested
+    echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
+    dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40
+    dmesg > "$OUT/$WHERE/dmesg.log" 2> /dev/null
+    exit 0
+fi
+
 VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
 SIM_WORK=/tmp/sim \
 SIM_OUT=$OUT/$WHERE \

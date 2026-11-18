@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-17
+Updated: 2026-11-18
 
 ## Where things are
 
@@ -188,9 +188,9 @@ one function, a graphics card, Thunderbolt. What it could have and does
 not yet: a device which is pulled without the host being asked first, and
 an error of the device reported by the host.
 
-**A Windows guest: prepared on 2026-11-17, not run yet.** The guest the
-work is for is Windows, and no Windows has met the hot-plug capable slot
-so far. A workflow can have one after all: Microsoft offers Windows
+**A Windows guest** (prepared on 2026-11-17, first run on 2026-11-18, see
+run 226 below). The guest the work is for is Windows, and no Windows had
+met the hot-plug capable slot before. A workflow can have one after all: Microsoft offers Windows
 Server as an evaluation image for download, and it installs without
 anybody at the keyboard. The flavor `winsim` of the workflow does that
 (`sim/win-phases.sh`, `sim/win/`):
@@ -240,6 +240,51 @@ disk, and the boot loader is started by name should the shell be there
 after all. A second reader for these scripts was started and did not
 come back with anything (it hung), so they go into their first run with
 the author's own checks only.
+
+**Run 226** (2026-11-18, the head of the merge request, 31 minutes): the
+first Windows guest. 41 checks, 40 pass.
+
+| What | Result |
+|------|--------|
+| Windows Server 2025 (evaluation, without the desktop) installed without anybody at the keyboard into a VM with the empty hot-plug capable slot | installed and reporting after 411 seconds; setup wrote to the disk 25 seconds after the VM was started, and asked nothing |
+| The PCI root bridge | `ACPI\PNP0A08`, working, driver `pci` |
+| What the firmware hands over, by the properties Windows keeps of the root bridge | PCI Express native control: yes; native hot-plug: yes; PME: yes; AER: yes; the capability structure: yes; SHPC hot-plug: no (Windows did not ask); extended configuration space: available |
+| The port with the slot | `PCI Express Root Port`, status OK, no problem code, driver `pci` (`pci.inf` of Windows itself) |
+| The slot registers, read from the outside | slot control `0x17fb`: hot-plug interrupt on, with it the attention button, presence, power fault, link state and command completed; power of the slot off, both indicators off. That is a guest whose hot-plug driver runs the slot. (The Linux guest in the same run: `0x17f1`, the same without presence and power fault.) |
+| Devices with a problem | one, the device of the Guest Additions, which has no driver in a Windows without them |
+| Crashes, and errors or warnings in the system log from ACPI, PCI, WHEA | none |
+| `showvminfo`, `plugpci` of a device which is not there | `hotplug,absent,unused`; refused, Windows runs on |
+| A saved state with the empty slot | saved and loaded, Windows goes on where it was |
+| The installed Windows started a second time | its report is done after 32 seconds, everything as before |
+| The power button | **Windows did not shut down** within five minutes. Not yet known whether the press arrived: what Windows does on a press is a setting, and the editions differ in it. The next run has Windows tell the setting, sets it to shutting down, and has the Linux guest count the interrupts of the ACPI hardware around a press, in a VM with the slot and in one without |
+
+The VM had the guest type `Other` in this run, as the script did not
+find the Windows types in the list VirtualBox gives (a mistake in the
+script, corrected).
+
+What a start of Windows costs, which decides whether it can be started
+where the drive is: 524000 exits from the guest to VirtualBox for a
+start up to the report (the Linux guest: 200000). At the millisecond an
+exit took in the virtual machine standing in for a host, that is some ten
+minutes. In that second start Windows read the HPET of VirtualBox twice
+in all, so it keeps its time otherwise (the VM shows it a time stamp
+counter which is invariant). During setup and after a saved state was
+loaded it read the HPET constantly, 16000 times a second after the state
+was loaded, which would not do there; so no state is loaded there. The
+next step is what the first run was to decide about:
+
+**Windows with the drive in the slot** (written on 2026-11-18, run 227).
+The Windows which was installed on the runner is started in the virtual
+machine standing in for a host, its disk given to that machine as a
+disk, with the NVMe drive in the hot-plug capable slot. The script in
+the guest tells when a device behind the port comes and goes and which
+driver has it, and reads the first 8 MiB of the drive, whose checksum is
+known outside. From the outside: `unplugpci` with the guest being asked,
+`plugpci`, `unplugpci --force`, `plugpci`, as with the Linux guest. The
+guest is told to shut down by a DVD which is put into its drive, so
+nothing depends on the power button. All of this was tried beforehand
+against a made-up `VBoxManage` whose answers stand in for the guest, as
+far as that goes.
 
 ### The management and the review, 13 to 15 November
 
@@ -737,10 +782,9 @@ harness since WP5, saved states since the fourth part of WP6.
    [INSTALL.md](INSTALL.md) says how to build and install.
 2. With every change to the code: the simulation with `sim_strict: yes`
    next to the tests and the sanitizers.
-3. The first `winsim` run (Windows as the guest of a VM with the empty
-   slot), for finding out: `sim_strict: no`. Then, depending on what a
-   start of Windows costs: Windows in the virtual machine standing in for
-   a host, with the drive in the slot.
+3. Run 227 (`winsim`, for finding out: `sim_strict: no`): Windows in the
+   virtual machine standing in for a host, with the drive in the slot,
+   and what there is to the power button.
 4. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
@@ -823,7 +867,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 56 tests, ACPI table check | `dd43ddf3` | all pass with ASan, LSan and UBSan (run 225) and without them (run 224) |
 | T2 fuzz | running in CI | `dd43ddf3` | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 225); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | passes | `dd43ddf3` | Run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function, no Windows guest. See "Installation and the simulation" above |
+| T4 system simulation | passes | `dd43ddf3` | Run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -862,10 +906,12 @@ By the definition in PLAN.md, section 7:
 
 What the simulation has shown since this was written: a Linux guest
 using the slot, Main and `VBoxManage` doing what they were written to do,
-the kernel interface of a real kernel. What the hardware test is still
-the first to show: a Windows guest, a real device, a device with several
-functions, a graphics card, Thunderbolt, and what a host does which is
-not a virtual machine.
+the kernel interface of a real kernel. And since run 226: Windows taking the root bridge,
+the firmware tables and the empty slot. What the hardware test is still
+the first to show: a real device, a device with several functions, a
+graphics card, Thunderbolt, and what a host does which is not a virtual
+machine; and, unless run 227 shows it, Windows with a device in the
+slot.
 
 ## CI runs
 
@@ -975,5 +1021,6 @@ not a virtual machine.
 | 223 | `pci-passthrough-hotplug-v1` @ `3d9ea801` | sim, not strict | passed | 20 minutes, AWS. 77 checks, all pass, none skipped: everything of run 222 with the corrected check, a state loaded with and without the device, and the script of the checklist of INSTALL.md on the runner and in the simulated host |
 | 224 | `scratch/quiet-reset` @ `dd43ddf3` | sim, strict | passed | the head of the merge request with the commit about the log of a device on its way out: the tree builds without a warning in a file this work changes, 56 tests and three random tests pass, the simulation passes with 79 checks, 20 minutes, AWS |
 | 225 | `scratch/quiet-reset` @ `dd43ddf3` | sanitize | passed | the same commit; no reports from the sanitizers |
+| 226 | `pci-passthrough-hotplug-v1` @ `dd43ddf3` | winsim, not strict | passed | 31 minutes. The first Windows guest: Windows Server 2025 installed unattended into a VM with the empty hot-plug capable slot, on the runner. 41 checks, 40 pass: the root bridge is `PNP0A08` to Windows, the firmware hands native hot-plug over, the PCI driver of Windows runs the port, the slot registers show its hot-plug driver running the slot (the same check for the Linux guest passes too), saved state, second start. One fails: Windows did not shut down when the power button was pressed; not yet known why. See "A Windows guest" above |
 
 Run numbers are those GitHub shows for the `build` workflow.

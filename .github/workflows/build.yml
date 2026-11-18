@@ -13,8 +13,10 @@ name: build
 #   flavor=winsim    like tests, and then the VirtualBox which was built is
 #                    run on the runner with the small Linux guest and with
 #                    Windows Server, which is installed from its evaluation
-#                    image into a VM with an empty hot-plug capable slot
-#                    (sim/win-phases.sh on this branch)
+#                    image into a VM with an empty hot-plug capable slot;
+#                    that Windows is then started in the virtual machine
+#                    with the emulated IOMMU, with the emulated PCIe device
+#                    in the slot (sim/win-phases.sh on this branch)
 # Started through the API (workflow_dispatch) because the code branches do
 # not carry workflow files.
 
@@ -360,11 +362,11 @@ jobs:
         if: inputs.flavor == 'sim' || inputs.flavor == 'winsim'
         # Everything in the script has a time limit of its own which adds up to
         # less than this one.
-        timeout-minutes: 170
+        timeout-minutes: 200
         continue-on-error: ${{ inputs.sim_strict != 'yes' }}
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}
-          SIM_PARTS: ${{ inputs.flavor == 'winsim' && 'runner,win' || 'runner,simhost' }}
+          SIM_PARTS: ${{ inputs.flavor == 'winsim' && 'runner,win,winhost' || 'runner,simhost' }}
         run: bash ci-meta/sim/run.sh
 
       - name: Upload logs

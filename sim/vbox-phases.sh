@@ -271,6 +271,25 @@ guest_goes_on() # <what> [<seconds>]
     return 1
 }
 
+# The power button of the VM is pressed.  The Linux guest does nothing about
+# it, but its kernel counts the interrupts of the ACPI hardware, and the
+# button is one: the count the guest tells with "ALIVE" has to go up.
+power_button_check() # <what>
+{
+    local re='s/^GUEST: ALIVE [0-9]* sci=\([0-9][0-9]*\).*$/\1/p' before after
+    before=$(tr -d '\r' < "$SERIAL" 2> /dev/null | sed -n "$re" | tail -n 1)
+    run controlvm "$VM" acpipowerbutton
+    sleep 2
+    serial_mark
+    wait_serial 'GUEST: ALIVE [0-9]+ sci=[0-9]' 45
+    after=$(serial_new | sed -n "$re" | tail -n 1)
+    if [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+        stage "$1" ok "interrupts of the ACPI hardware: $before, then $after"
+    else
+        stage "$1" FAILED "interrupts of the ACPI hardware: ${before:-?}, then ${after:-?}"
+    fi
+}
+
 # A device which goes in the normal way must not leave lines in the log of the
 # VM which read like errors of the device.  The reset which the guest causes by
 # switching the slot off used to, when it met a function already out of
@@ -407,6 +426,9 @@ phase_plain()
         serial_show 'GUEST: pci:' 20
         serial_show 'GUEST: k: .*(_OSC|PNP0A0)' 8
         guest_goes_on "the guest keeps running"
+        if [ "$WHERE" = runner ]; then
+            power_button_check "guest: gets the interrupt of the power button"
+        fi
     fi
     end_phase
 }
@@ -440,7 +462,15 @@ phase_emptyslot()
             stage "plugpci of a device which is not there is refused" ok
         fi
         guest_goes_on "the VM runs on after that"
-        saved_state_round && guest_goes_on "the guest keeps running after the state was loaded"
+        if [ "$WHERE" = runner ]; then
+            power_button_check "guest: gets the interrupt of the power button"
+        fi
+        if saved_state_round; then
+            guest_goes_on "the guest keeps running after the state was loaded"
+            if [ "$WHERE" = runner ]; then
+                power_button_check "guest: gets the interrupt of the power button after the state was loaded"
+            fi
+        fi
     fi
     end_phase
 }
