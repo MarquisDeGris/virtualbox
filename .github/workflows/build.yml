@@ -10,6 +10,11 @@ name: build
 #                    run with a small Linux guest: on the runner, and in a
 #                    virtual machine with an emulated IOMMU and an emulated
 #                    PCIe device (sim/run.sh on this branch)
+#   flavor=winsim    like tests, and then the VirtualBox which was built is
+#                    run on the runner with the small Linux guest and with
+#                    Windows Server, which is installed from its evaluation
+#                    image into a VM with an empty hot-plug capable slot
+#                    (sim/win-phases.sh on this branch)
 # Started through the API (workflow_dispatch) because the code branches do
 # not carry workflow files.
 
@@ -21,7 +26,7 @@ on:
         required: true
         default: main
       flavor:
-        description: "baseline, tests, sanitize or sim"
+        description: "baseline, tests, sanitize, sim or winsim"
         required: true
         default: baseline
       kmk_args:
@@ -45,7 +50,7 @@ on:
         required: false
         default: pass
       sim_strict:
-        description: "no (default) or yes. With yes a sim run fails if a check of the simulation fails; with no it tells what it found and succeeds, for setting the simulation up"
+        description: "no (default) or yes. With yes a sim or winsim run fails if a check of the simulation fails; with no it tells what it found and succeeds, for setting the simulation up"
         required: false
         default: "no"
 
@@ -342,7 +347,7 @@ jobs:
           echo "The tree was built."
 
       - name: Check out the simulation scripts
-        if: inputs.flavor == 'sim'
+        if: inputs.flavor == 'sim' || inputs.flavor == 'winsim'
         uses: actions/checkout@v4
         with:
           ref: meta
@@ -352,13 +357,14 @@ jobs:
             tools
 
       - name: Simulation
-        if: inputs.flavor == 'sim'
+        if: inputs.flavor == 'sim' || inputs.flavor == 'winsim'
         # Everything in the script has a time limit of its own which adds up to
         # less than this one.
         timeout-minutes: 170
         continue-on-error: ${{ inputs.sim_strict != 'yes' }}
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}
+          SIM_PARTS: ${{ inputs.flavor == 'winsim' && 'runner,win' || 'runner,simhost' }}
         run: bash ci-meta/sim/run.sh
 
       - name: Upload logs

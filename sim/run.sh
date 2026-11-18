@@ -24,6 +24,12 @@
 #      whose virtualization extension QEMU emulates as well, was tried in run
 #      221: VirtualBox does not get a guest going on that, with or without a
 #      device.
+#   3. With Windows as the guest (SIM_PARTS has "win"): on the runner, a VM
+#      with an empty hot-plug capable slot into which Windows Server is
+#      installed from its evaluation image, see win-phases.sh.
+#
+# Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
+# win.  Without it: runner,simhost.
 #
 # The guest is the same in both: a kernel with guest-init, which tells on its
 # serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox and
@@ -31,8 +37,8 @@
 #
 # Results are lines "STAGE <where>/<phase>: <what>: ok|FAILED|skipped", on the
 # output and in sim-out/stages.txt.  The exit code is 0 unless SIM_STRICT is
-# "yes" and something failed or the second part did not get to run VirtualBox:
-# while this is being set up, a run is for finding out, not for failing.
+# "yes" and something failed or a part did not get as far as running its
+# guest: while this is being set up, a run is for finding out, not for failing.
 
 set -u
 WS=${GITHUB_WORKSPACE:?}
@@ -42,6 +48,7 @@ OUT=$WS/sim-out
 BIN=$WS/out/linux.amd64/release/bin
 STAGES=$OUT/stages.txt
 STRICT=${SIM_STRICT:-no}
+PARTS=,${SIM_PARTS:-runner,simhost},
 export MTOOLS_SKIP_CHECK=1
 
 rm -rf "$WORK" "$OUT"
@@ -57,16 +64,28 @@ stage() # <what> <ok|FAILED|skipped> [<note>]
     echo "$line" >> "$STAGES"
 }
 
+has_part() # <runner|simhost|win>
+{
+    case "$PARTS" in *",$1,"*) return 0 ;; esac
+    return 1
+}
+
 finish()
 {
     note "Result"
     cat "$STAGES"
-    local failed ran
+    local failed missing=0
     failed=$(grep -c ': FAILED' "$STAGES")
-    ran=$(grep -c '^simhost[^/]*/passthrough: ' "$STAGES")
+    # A part which was asked for and did not get to its work counts as failed.
+    if has_part simhost && ! grep -q '^simhost[^/]*/passthrough: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part win && ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES"; then
+        missing=1
+    fi
     echo
     echo "$(grep -c ': ok' "$STAGES") ok, $failed failed, $(grep -c ': skipped' "$STAGES") skipped"
-    if [ "$STRICT" = yes ] && { [ "$failed" != 0 ] || [ "$ran" = 0 ]; }; then
+    if [ "$STRICT" = yes ] && { [ "$failed" != 0 ] || [ "$missing" != 0 ]; }; then
         exit 1
     fi
     exit 0
@@ -266,13 +285,15 @@ sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAG
 echo "part 1 ended with $?"
 
 
-note "Part 2: VirtualBox in a virtual machine with an IOMMU and a PCIe device"
-make_initrd l1 "$SIM/l1-init" virtio_pci 9pnet_virtio 9p
-if ! grep -q '^9p\.ko$' "$WORK/l1-root/modules.list" \
-   && ! grep -q -x 'CONFIG_9P_FS=y' "$WORK/kroot/boot/config-$KVER" "/boot/config-$KVER" 2> /dev/null; then
-    stage "the kernel can mount the file system of the runner" FAILED "no 9p"
-    finish
-fi
+part_simhost_prepare()
+{
+    make_initrd l1 "$SIM/l1-init" virtio_pci 9pnet_virtio 9p
+    if ! grep -q '^9p\.ko$' "$WORK/l1-root/modules.list" \
+       && ! grep -q -x 'CONFIG_9P_FS=y' "$WORK/kroot/boot/config-$KVER" "/boot/config-$KVER" 2> /dev/null; then
+        stage "the kernel can mount the file system of the runner" FAILED "no 9p"
+        return 1
+    fi
+}
 # Runs the virtual machine which stands in for the host until its script is
 # done or the time is up.
 run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds>
@@ -300,13 +321,79 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     fi
 }
 
-run_simhost simhost plain,passthrough,hotplug,startempty,hostremove 600 5 4200
+if has_part simhost; then
+    note "Part 2: VirtualBox in a virtual machine with an IOMMU and a PCIe device"
+    if part_simhost_prepare; then
+        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove 600 5 4200
 
-if grep -q 'written by the guest' "$WORK/nvme.img"; then
-    stage "what the guest wrote is on the drive of the simulated host" ok \
-          "$(grep -a -o 'written by the guest, round [0-9]*' "$WORK/nvme.img" | tail -n 1)"
-elif grep -q '^simhost[^/]*/passthrough: guest: writes to the drive: ok' "$STAGES"; then
-    stage "what the guest wrote is on the drive of the simulated host" FAILED
+        if grep -q 'written by the guest' "$WORK/nvme.img"; then
+            stage "what the guest wrote is on the drive of the simulated host" ok \
+                  "$(grep -a -o 'written by the guest, round [0-9]*' "$WORK/nvme.img" | tail -n 1)"
+        elif grep -q '^simhost[^/]*/passthrough: guest: writes to the drive: ok' "$STAGES"; then
+            stage "what the guest wrote is on the drive of the simulated host" FAILED
+        fi
+    fi
+fi
+
+
+# Windows as the guest.  The image is the evaluation version of Windows Server
+# which Microsoft offers for download to everybody, for trying it out for 180
+# days; it is fetched for the run and gone with the runner.  The VM it is
+# installed into has no network adapter.
+get_windows_image()
+{
+    local url=${WIN_ISO_URL:-'https://go.microsoft.com/fwlink/?linkid=2293312&clcid=0x409&culture=en-us&country=us'}
+    local t0 final
+    t0=$(date +%s)
+    final=$(curl -f -L -sS --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 900 \
+                 -o "$WORK/win.iso" -w '%{url_effective}' "$url") || { echo "the download failed"; return 1; }
+    echo "downloaded in $(( $(date +%s) - t0 )) s: $(basename "${final%%\?*}"), $(stat -c %s "$WORK/win.iso") bytes"
+    # A DVD image (ISO 9660 or UDF), and large enough to be the one meant.
+    case "$(dd if="$WORK/win.iso" bs=1 skip=32769 count=5 status=none 2> /dev/null)" in
+        CD001|BEA01) ;;
+        *) echo "this is not a DVD image"; return 1 ;;
+    esac
+    [ "$(stat -c %s "$WORK/win.iso")" -gt 3000000000 ] || { echo "the image is too small"; return 1; }
+    echo "sha256: $(sha256sum "$WORK/win.iso" | cut -d' ' -f1)"
+}
+
+# The second DVD: the answers for setup, and what runs in the installed Windows.
+make_unattend_image()
+{
+    local d=$WORK/unattend
+    rm -rf "$d" "$WORK/unattend.iso"
+    mkdir -p "$d/w1"
+    cp "$SIM/win/Autounattend.xml" "$d/Autounattend.xml" || return 1
+    cp "$SIM/win/report.ps1" "$d/w1/report.ps1" || return 1
+    # A batch file is to have the line ends of DOS.
+    sed -e 's/\r$//' -e 's/$/\r/' "$SIM/win/first.cmd" > "$d/w1/first.cmd" || return 1
+    command -v genisoimage > /dev/null || sudo apt-get install -y -q --no-install-recommends genisoimage > "$WORK/apt-genisoimage.log" 2>&1
+    genisoimage -quiet -J -r -V SIMW1 -o "$WORK/unattend.iso" "$d" || return 1
+    ls -l "$WORK/unattend.iso"
+}
+
+if has_part win; then
+    note "Part 3: Windows as the guest, on the runner"
+    df -h "$WORK" | sed -n 2p
+    if ! get_windows_image; then
+        stage "the evaluation image of Windows Server is downloaded" FAILED
+    elif ! make_unattend_image; then
+        stage "the DVD with the answers for setup is made" FAILED
+    else
+        stage "the evaluation image of Windows Server is downloaded" ok
+        mkdir -p "$OUT/win"
+        # The VirtualBox of part 1 has to be gone, a new one starts with another
+        # directory for its settings.
+        i=0
+        while pgrep -x VBoxSVC > /dev/null && [ "$i" -lt 30 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-win SIM_OUT="$OUT/win" SIM_STAGES="$STAGES" SIM_WHERE=runner \
+                 WIN_ISO="$WORK/win.iso" WIN_UNATTEND_ISO="$WORK/unattend.iso" \
+            timeout -k 30 7800 bash "$SIM/win-phases.sh"
+        echo "part 3 ended with $?"
+    fi
 fi
 
 sudo chmod -R a+rX "$OUT" 2> /dev/null

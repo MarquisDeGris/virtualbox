@@ -183,10 +183,63 @@ The simulation has passed on both kinds of runner seen so far (AWS in
 runs 221, 223 and 224, Azure in run 222). With `sim_strict: yes` a run
 fails when a check fails; run 224 was made that way.
 
-What the simulation does not have, and cannot: a Windows guest, a device
-with more than one function, a graphics card, Thunderbolt. What it could
-have and does not yet: a device which is pulled without the host being
-asked first, and an error of the device reported by the host.
+What the simulation does not have, and cannot: a device with more than
+one function, a graphics card, Thunderbolt. What it could have and does
+not yet: a device which is pulled without the host being asked first, and
+an error of the device reported by the host.
+
+**A Windows guest: prepared on 2026-11-17, not run yet.** The guest the
+work is for is Windows, and no Windows has met the hot-plug capable slot
+so far. A workflow can have one after all: Microsoft offers Windows
+Server as an evaluation image for download, and it installs without
+anybody at the keyboard. The flavor `winsim` of the workflow does that
+(`sim/win-phases.sh`, `sim/win/`):
+
+1. The first part of the simulation as before, with the Linux guest on
+   the runner.
+2. Windows Server 2025 (the edition without the desktop) is installed
+   into a VM which is configured for a device of the host with hot-plug,
+   the device not being there. Setup and the installed Windows both meet
+   the PCI Express root bridge, what the firmware hands over, and the
+   port with the slot.
+3. A script in the guest tells on the serial port what Windows made of
+   them: which root bridge it found and whether it works, whether the
+   firmware handed PCIe hot-plug over (a property Windows keeps of the
+   root bridge), whether its PCI driver runs the port, devices with a
+   problem, crashes.
+4. From the outside: the registers of the slot as the guest left them
+   (`VBoxManage debugvm ... info pci verbose`, read by `sim/slotregs.pl`).
+   A guest whose hot-plug driver runs the slot has switched on the
+   hot-plug interrupt of the slot and the events it is for. The Linux
+   guest is checked the same way from now on, in the phases `emptyslot`
+   and `hotplug`.
+5. `plugpci` of the device which is not there, a saved state with the
+   empty slot, the power button, and the installed Windows started a
+   second time.
+
+What this can show: whether Windows takes the root bridge, the firmware
+tables and the empty slot as they are. What it cannot: Windows with a
+device in the slot, as the runner has no IOMMU. Whether Windows can be
+started in the virtual machine standing in for a host, where the drive
+is, depends on what a start of Windows costs there; the run counts the
+exits of a start for that.
+
+Tried before the first run, on a Windows 11 at hand: the script of the
+guest (it finds the root bridge `PNP0A03` there, hot-plug not handed
+over, as expected of a VM without this work), and the checks of
+`win-phases.sh` against what that script told and against made-up
+answers of `VBoxManage`. Not tried: the installation itself. The answer
+file for setup follows what public templates for unattended
+installations of Windows Server 2025 in virtual machines have. Two things
+reported about such installations are provided for: setup of this
+version is said to leave disks on some buses offline, not on SATA, which
+is what the VM has; and installations with EFI are said to end in the
+shell of the firmware when the boot loader of the DVD does not get the
+key it asks for, so the Enter key is pressed until setup writes to the
+disk, and the boot loader is started by name should the shell be there
+after all. A second reader for these scripts was started and did not
+come back with anything (it hung), so they go into their first run with
+the author's own checks only.
 
 ### The management and the review, 13 to 15 November
 
@@ -684,7 +737,11 @@ harness since WP5, saved states since the fourth part of WP6.
    [INSTALL.md](INSTALL.md) says how to build and install.
 2. With every change to the code: the simulation with `sim_strict: yes`
    next to the tests and the sanitizers.
-3. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
+3. The first `winsim` run (Windows as the guest of a VM with the empty
+   slot), for finding out: `sim_strict: no`. Then, depending on what a
+   start of Windows costs: Windows in the virtual machine standing in for
+   a host, with the drive in the slot.
+4. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
 
@@ -754,7 +811,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-16 | The system simulation (T4) is set up after all, which takes back the decision of 2026-11-15 for T4 | Everything else which was verified is compiled code and a testcase against a kernel interface written by the same hand; only the simulation shows the VMM, the kernel, a guest, Main and `VBoxManage` working together before hardware does. The cost in runs is kept down: the scripts are written in one go, a run which is for finding out succeeds whatever it finds, and each run is read completely before the next |
 | 2026-11-17 | A reset which the host refuses because it is busy with the device is not followed by a reset of the bus, and neither that nor a write to a function which has just gone out of service is logged as a failure of the device | Seen in the simulation with a real kernel: the host has a device locked while it waits to get it back, and the guest letting go of the device resets it at that very moment. The bus reset would be refused for the same reason; the host resets the device when it has it. The log is what a person testing on hardware reads |
 | 2026-11-17 | In the simulation the VM inside the virtual machine standing in for the host has the timers VirtualBox emulates at a twentieth of their speed, and its guest kernel keeps quiet on the serial port | Run 220: the guest of VirtualBox is at the third level of hardware virtualization at least there, an exit from it takes a millisecond, and its kernel does not get past its timer tick. Run 221: with the slow timers it does, and what follows runs at its normal speed. Emulating the host in software instead was tried in the same run and does not get VirtualBox to run a guest |
-| 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow |
+| 2026-11-16 | The simulated host has an NVMe drive as its device, the guest is a kernel with a script | A drive shows memory access by the device and interrupts in both directions with a checksum, and its driver is in every kernel. A Windows guest cannot be had in a workflow (taken back on 2026-11-17, see the next line) |
+| 2026-11-17 | A Windows guest in the workflow: Windows Server from the evaluation image Microsoft offers for download, installed unattended into a VM with the empty hot-plug capable slot (flavor `winsim`). The image is fetched for the run and not kept; the VM has no network adapter | Windows is the guest the work is for and the one guest nothing had been tried with. The slot, the root bridge and the firmware tables were made after what Windows is known to handle elsewhere, which is not the same as Windows having handled them. The evaluation image is for trying things out, and this is that |
+| 2026-11-17 | What a guest made of the slot is also read from the outside: the slot registers through the debug interface of the VM | It does not depend on what the guest tells, so it is the same check for Linux and Windows, and it is the one sign that the hot-plug driver of Windows runs the slot which can be had without a device |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)

@@ -21,12 +21,17 @@ export USER=root LOGNAME=root HOME="$SIM_WORK/home"
 export VBOX_USER_HOME="$SIM_WORK/vbox"
 mkdir -p "$SIM_WORK" "$SIM_OUT" "$HOME" "$VBOX_USER_HOME"
 
+SIMLIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 VM=sim
 SERIAL=$SIM_WORK/serial.log
 SERIAL_FROM=1
 PHASE=setup
 ATTACHED=
 VMDIR=
+# What the guest says on its serial port when it has booted and while it runs.
+UP_RE='GUEST: UP'
+ALIVE_RE='GUEST: ALIVE'
 
 # A host address nothing is at, and a layout as an NVMe drive has it, for the
 # VM which is started without a device where there is none to be had.
@@ -211,6 +216,21 @@ check_pcistate() # <hotplug|fixed>,<present|absent>,<inuse|unused>
     fi
 }
 
+# The registers of the slot as the guest left them, read from the outside
+# (the port with the slot is the one in front of bus 1).  This does not depend
+# on what the guest tells: a guest whose hot-plug driver runs the slot has
+# switched on the hot-plug interrupt of the slot and the events it is for.
+slot_registers_check()
+{
+    local line
+    line=$(vbm debugvm "$VM" info pci verbose 2> /dev/null | perl "$SIMLIB/slotregs.pl" 1 | head -n 1)
+    echo "    ${line:-nothing about a slot in what debugvm info pci verbose tells}" | cut -c1-400
+    case "$line" in
+        *" taken=1") stage "the registers of the slot show the guest running it (hot-plug interrupt and events on)" ok ;;
+        *)           stage "the registers of the slot show the guest running it (hot-plug interrupt and events on)" FAILED ;;
+    esac
+}
+
 # What the guest made of the hot-plug capable slot when it booted.
 guest_slot_checks()
 {
@@ -225,6 +245,7 @@ guest_slot_checks()
     else
         stage "guest: its hot-plug driver has the slot" FAILED
     fi
+    slot_registers_check
 }
 
 guest_reads() # <round> <what> [<seconds>]
@@ -241,7 +262,7 @@ guest_reads() # <round> <what> [<seconds>]
 guest_goes_on() # <what> [<seconds>]
 {
     serial_mark
-    if wait_serial 'GUEST: ALIVE' "${2:-45}"; then
+    if wait_serial "$ALIVE_RE" "${2:-45}"; then
         stage "$1" ok
         return 0
     fi
@@ -327,12 +348,12 @@ saved_state_round()
         diag
         return 1
     fi
-    if ! wait_serial 'GUEST: ALIVE' 120; then
+    if ! wait_serial "$ALIVE_RE" 120; then
         stage "the saved state is loaded and the guest goes on" FAILED "nothing from the guest"
         diag
         return 1
     fi
-    if serial_has 'GUEST: UP'; then
+    if serial_has "$UP_RE"; then
         stage "the saved state is loaded and the guest goes on" FAILED "the guest booted anew"
         return 1
     fi
@@ -698,6 +719,9 @@ phase_startempty()
     bind_dev
 }
 
+
+# win-phases.sh takes the functions above and has phases of its own.
+[ -n "${SIM_LIB_ONLY:-}" ] && return 0
 
 if setup; then
     for p in "$@"; do
