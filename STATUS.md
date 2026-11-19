@@ -9,6 +9,7 @@ Updated: 2026-11-19
 | Upstream base | `main` @ `b6bea721` |
 | Branch of the merge request | `pci-passthrough-hotplug-v1` @ `dd43ddf3`, 34 commits |
 | Branch the runs were made on | `scratch/quiet-reset` @ `dd43ddf3`, the commit which is the head of the merge request |
+| Branch with what comes next | `scratch/timer-wakeup` @ `f563e7f8`: the head of the merge request and two commits for hosts with KVM which are not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), see runs 227 to 230 |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
@@ -398,6 +399,36 @@ processor of run 226 a start took half a million exits, which would be
 some ten minutes there; the part runs when a run happens to get such a
 runner and is skipped otherwise. Until it has run, Windows with a device
 in the slot is for the hardware test alone.
+
+**Run 230** (2026-11-19, `scratch/timer-wakeup` @ `f563e7f8`, 106
+minutes): the commit about the I/O APIC, on a runner with an AMD
+processor.
+
+| What | Result |
+|------|--------|
+| The commit about the I/O APIC | builds without a warning, and Windows shuts down on the power button after a saved state was loaded. The entry of pin 9 has no remote IRR bit left before the press |
+| Everything else on the runner | passes: 47 checks with the Linux guest and with Windows, none fails. Setup of Windows in 414 seconds, a start in 37 with two reads of the HPET. VirtualBox made up for a missed notification of a timer in the VM of the setup and in that of the second start, 64 times each, which is as often as it writes the line |
+| Windows in the virtual machine standing in for a host, with the drive in the slot | ran for the first time on an AMD processor and did not get to its report in 50 minutes. The firmware of the VM talks to the drive in the slot (it looks for something to start on it, finds nothing, which is in order, and starts Windows from the disk). The kernel of Windows is loaded after a minute. From then on: 5.3 million reads of the HPET, no timer of the HPET set, the CPU never idle |
+
+Why Windows does not get on there: that machine did not tell of an
+invariant time stamp counter. The runner does, QEMU leaves it out of the
+processor it shows unless asked, VirtualBox tells its guest what its host
+tells it, and a Windows which is not told reads the time from the HPET,
+with an exit for every look at the clock. The log of VirtualBox has it:
+CPUID leaf 80000007 of the guest is 00000100 on the runner and 00000000
+in that machine. On the runner a start of Windows takes 430000 exits in
+all. This is about the machine the simulation builds, not about
+VirtualBox and not about a real host, whose processor tells of the
+counter. The machine for Windows asks QEMU for it from the next run on
+(`invtsc=on`); the machine for the Linux guest stays as it passed.
+
+What else changes with the next run: a Windows which did not get through
+its start is powered off instead of being asked to shut down, which took
+20 minutes of this run, and the start gets 40 minutes. The flavor
+`allsim` runs the Linux guest and Windows in one run, with one build;
+`sim_strict: linux` lets such a run fail for a check with the Linux guest
+and not for one with Windows, which is still being found out and has a
+download from Microsoft in it.
 
 ### The management and the review, 13 to 15 November
 
@@ -895,16 +926,16 @@ harness since WP5, saved states since the fourth part of WP6.
    [INSTALL.md](INSTALL.md) says how to build and install.
 2. With every change to the code: the simulation with `sim_strict: yes`
    next to the tests and the sanitizers.
-3. Run 230 (`winsim`, for finding out: `sim_strict: no`) on
-   `scratch/timer-wakeup` with the commit about the I/O APIC: Windows has
-   to shut down on the power button after a saved state was loaded.
-   Windows where the drive is, if the runner has an AMD processor.
-4. The two commits which are not about the device (the timer, the I/O
-   APIC after a state was loaded) go into the merge request as commits
-   of their own after the tests, the strict simulation and the
-   sanitizers have passed with them.
+3. Run 231 (`allsim`, `sim_strict: linux`) on `scratch/timer-wakeup` @
+   `f563e7f8`: the simulation with the Linux guest has to pass with the
+   two commits, as it did without them in run 224. Windows where the
+   drive is, with the time stamp counter told of, if the runner has an
+   AMD processor.
+4. After it the sanitizers on the same commit. Then the two commits
+   which are not about the device (the timer, the I/O APIC after a state
+   was loaded) go into the merge request as commits of their own.
 5. The hardware test gets told: `--paravirt-provider none` for a Windows
-   guest, and what the two commits are for.
+   guest (in HWTEST.md already), and what the two commits are for.
 6. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
@@ -982,6 +1013,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-19 | The Windows guest of the simulation gets no paravirtualization interface (`--paravirt-provider none`) | With KVM the default for a Windows guest type ends as the minimal interface, with which Windows keeps its time by the HPET and takes seven times as long (run 228 against run 226). In the virtual machine standing in for a host, where an exit costs a millisecond, Windows does not get through a start that way. Run 228 stays as what is known about the default |
 | 2026-11-19 | Level-triggered interrupts which stop after a saved state was loaded, with KVM, are dealt with here as well: the I/O APIC tells the APIC about the loaded entries (a commit of its own, Linux hosts with KVM only) | As with the timer: not part of PCI passthrough, but in the way of the guest the work is for, on the engine the work needs, and a check of the simulation fails because of it. A VM with an empty slot can be saved and loaded, which is part of this work, and its guest should have a power button afterwards |
 | 2026-11-19 | Windows where the drive is (the fourth part of the simulation) runs on runners with an AMD processor only | Two runs on Intel processors spent 70 minutes each on a Windows which did not get through its start at that depth, with either paravirtualization setting. What is known of AMD is one run on the runner itself (226) |
+| 2026-11-19 | The machine standing in for a host tells of an invariant time stamp counter when its guest is Windows; the one for the Linux guest stays as it is | Run 230: without it Windows keeps its time by the HPET and does not get through a start there. A real host tells of the counter, so the machine was the odd one out. The part with the Linux guest has passed as it is and is what a run fails for, so it is not changed along the way |
+| 2026-11-19 | One run for the Linux guest and Windows (flavor `allsim`); with `sim_strict: linux` it fails for a check with the Linux guest only | Fewer runs: one build instead of two. The parts with Windows are still for finding out, and one of them depends on a download and on the processor the runner happens to have; a run which fails for those would tell nothing about the code |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1149,5 +1182,6 @@ slot.
 | 227 | `pci-passthrough-hotplug-v1` @ `dd43ddf3` | winsim, not strict | passed | 74 minutes. The part with the Linux guest passes with its new checks: the slot registers read from the outside, and the power button, whose press arrives in the guest with and without the slot and after a saved state. The installation of Windows stood still 40 seconds after the VM was started and was given up after 50 minutes: the thread of the CPU had missed the notification of a timer, which is in VirtualBox as it is without this work (see run 227 under "Installation and the simulation"). Windows with the drive in the slot was not reached |
 | 228 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 161 minutes, AWS. The head of the merge request plus the commit about the timer: builds, the 56 tests pass, the part with the Linux guest passes. Windows installs with no VM standing still, VirtualBox making up for a missed notification every ten to twenty seconds. Windows is seven times as slow as in run 226 (the paravirtualization interface, see run 228 under "Installation and the simulation"). The power button: Windows does not shut down in the VM with the slot and does in one without. Windows in the virtual machine standing in for a host did not get to its report in 50 minutes |
 | 229 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 72 minutes, AWS. The Windows VM without a paravirtualization interface: setup in 569 seconds, a start in 63. The power button: Windows shuts down in the VM with the slot and in three VMs for comparison, and does not after a saved state was loaded, where the entry of the I/O APIC for the interrupt of the ACPI hardware has its remote IRR bit left set (see run 229 under "Installation and the simulation"). Windows in the virtual machine standing in for a host did not get to its report in 50 minutes again |
+| 230 | `scratch/timer-wakeup` @ `f563e7f8` | winsim, not strict | passed | 106 minutes, Azure, an AMD processor. The commit about the I/O APIC on top: builds without a warning, the 56 tests pass, and Windows shuts down on the power button after a saved state was loaded. All 47 checks on the runner pass, with the Linux guest and with Windows (setup in 414 seconds, a start in 37). Windows in the virtual machine standing in for a host ran on an AMD processor for the first time and did not get to its report in 50 minutes: that machine did not tell of an invariant time stamp counter, so Windows read the time from the HPET (see run 230 under "Installation and the simulation") |
 
 Run numbers are those GitHub shows for the `build` workflow.

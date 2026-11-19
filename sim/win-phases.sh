@@ -39,6 +39,8 @@ START_WAIT=${WIN_START_WAIT:-900}
 SHUTDOWN_WAIT=240
 SHOTS=0
 BUTTON_WORKS=unknown
+# Whether the Windows of the VM which was started last got as far as its report.
+WIN_UP=no
 PARAVIRT=${WIN_PARAVIRT:-none}
 STALL_EVERY=${WIN_STALL_EVERY:-60}
 STALL_T=0
@@ -172,6 +174,10 @@ show_exits() # <log>
     echo "    exits from the guest in $(basename "$1"): ${n:-0}"
     grep -a -E '^[0-9:.]+ /(NEM/CPU[0-9]+/Exit(/(Io|Mmio|Intr|RdMsr|WrMsr))?|Devices/hpet/ReadCounter32bit) +[0-9]+ times' "$1" 2> /dev/null \
         | sed -E 's/^[0-9:.]+ //; s/ +/ /g' | sed 's/^/    | /'
+    # A guest which is not told that the time stamp counter is invariant
+    # reads the time from the HPET, which is where the reads above come from:
+    # the last number of this line is 00000100 if it is told, 00000000 if not.
+    grep -a -m 1 -E '^[0-9:.]+ +Gst: 80000007/' "$1" 2> /dev/null | sed -E 's/^[0-9:.]+ +//; s/ +/ /g' | sed 's/^/    | CPUID /'
     # VirtualBox tells in its log when it had to tell the thread of a CPU a
     # second time that a timer was due, at most 64 times per VM.
     n=$(grep -a -c 'TM: VMCPU_FF_TIMER pending for more than' "$1" 2> /dev/null)
@@ -344,6 +350,7 @@ start_and_report() # <what> <seconds>
 {
     local t0
     t0=$(date +%s)
+    WIN_UP=no
     if ! start_vm; then
         stage "$1" FAILED "the VM does not start"
         diag
@@ -355,6 +362,7 @@ start_and_report() # <what> <seconds>
         diag
         return 1
     fi
+    WIN_UP=yes
     stage "$1" ok "$(( $(date +%s) - t0 )) s until its report was done"
 }
 
@@ -714,7 +722,7 @@ mode_nested()
 {
     : "${WIN_DISK_DEV:?}" "${SIM_HOSTADDR:?}"
     PHASE=win-setup
-    START_WAIT=${WIN_START_WAIT:-3000}
+    START_WAIT=${WIN_START_WAIT:-2400}
     SHUTDOWN_WAIT=600
     echo "==== VirtualBox on $WHERE, Windows as the guest: $("$VBOX_BIN/VBoxManage" --version 2>&1 | tail -n 1)"
     ls -l /dev/kvm /dev/iommu "$WIN_DISK_DEV" "$WIN_CMD_ISO" 2>&1 | sed 's/^/    /'
@@ -730,10 +738,14 @@ mode_nested()
     echo "==== phase win-hotplug on $WHERE"
     phase_hotplug
     stalls_stage
-    case "$(vmstate)" in
-        running) guest_shutdown ;;
-        *)       end_phase ;;
-    esac
+    # A Windows which did not get through its start is not asked to shut
+    # down: its script is not there yet for hearing it, and waiting for that
+    # took 20 minutes of run 230.
+    if [ "$(vmstate)" = running ] && [ "$WIN_UP" = yes ]; then
+        guest_shutdown
+    else
+        end_phase
+    fi
     show_exits "$SIM_OUT/VBox-$PHASE.log"
 }
 

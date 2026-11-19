@@ -27,6 +27,7 @@ stage() # <what> <ok|FAILED|skipped> [<note>]
 echo "==== $WHERE: Linux $(uname -r), up for $(cut -d' ' -f1 /proc/uptime) s"
 grep -m 1 'model name' /proc/cpuinfo
 echo "CPU flags for virtualization: $(grep -m 1 '^flags' /proc/cpuinfo | grep -o -w -E 'svm|vmx|npt|ept' | tr '\n' ' ')"
+echo "CPU flags for the time stamp counter: $(grep -m 1 '^flags' /proc/cpuinfo | grep -o -w -E 'constant_tsc|nonstop_tsc|tsc_reliable' | tr '\n' ' ')"
 free -m | sed -n '1,2p'
 dmesg | grep -i -E 'DMAR|iommu' | cut -c1-200 | head -n 25
 
@@ -111,7 +112,7 @@ if [ "${SIM_GUEST:-linux}" = win ]; then
     SIM_HOSTADDR=$addr \
     WIN_DISK_DEV=/dev/vda \
     WIN_CMD_ISO=$SIM_WS/sim-work/cmd-shutdown.iso \
-    WIN_START_WAIT=${SIM_BOOT_WAIT:-3000} \
+    WIN_START_WAIT=${SIM_BOOT_WAIT:-2400} \
         bash "$SIM_DIR/win-phases.sh" nested
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40

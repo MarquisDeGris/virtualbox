@@ -31,17 +31,28 @@
 #      with the drive in the hot-plug capable slot: the drive is taken out
 #      and put in while Windows runs.
 #
+#      That machine tells its processor to have an invariant time stamp
+#      counter, which QEMU leaves out unless asked.  Windows reads the time
+#      from the HPET of VirtualBox otherwise, with an exit for every look at
+#      the clock: five million of them in 70 minutes without getting through
+#      its start (run 230), where a start takes less than half a million exits
+#      in all when the counter is there.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
 # win, winhost.  Without it: runner,simhost.
 #
-# The guest is the same in both: a kernel with guest-init, which tells on its
-# serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox and
-# looks at what the guest tells.
+# The guest is the same in 1 and 2: a kernel with guest-init, which tells on
+# its serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox
+# and looks at what the guest tells.
 #
 # Results are lines "STAGE <where>/<phase>: <what>: ok|FAILED|skipped", on the
-# output and in sim-out/stages.txt.  The exit code is 0 unless SIM_STRICT is
-# "yes" and something failed or a part did not get as far as running its
-# guest: while this is being set up, a run is for finding out, not for failing.
+# output and in sim-out/stages.txt.  The exit code is 0 unless SIM_STRICT says
+# otherwise: while this is being set up, a run is for finding out, not for
+# failing.  With "yes" the exit code is 1 if something failed or a part did
+# not get as far as running its guest.  With "linux" that goes for parts 1
+# and 2 only, and parts 3 and 4 tell what they found: what Windows does with
+# the slot is still being found out, and a download from Microsoft is part of
+# it.
 
 set -u
 WS=${GITHUB_WORKSPACE:?}
@@ -52,6 +63,8 @@ BIN=$WS/out/linux.amd64/release/bin
 STAGES=$OUT/stages.txt
 STRICT=${SIM_STRICT:-no}
 PARTS=,${SIM_PARTS:-runner,simhost},
+# The number of lines in $STAGES when the parts with Windows begin.
+LINUX_STAGES=1000000
 export MTOOLS_SKIP_CHECK=1
 
 rm -rf "$WORK" "$OUT"
@@ -77,22 +90,33 @@ finish()
 {
     note "Result"
     cat "$STAGES"
-    local failed missing=0
+    local failed counted missing=0
     failed=$(grep -c ': FAILED' "$STAGES")
+    counted=$failed
     # A part which was asked for and did not get to its work counts as failed.
     if has_part simhost && ! grep -q '^simhost[^/]*/passthrough: ' "$STAGES"; then
         missing=1
     fi
-    if has_part win && ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES"; then
-        missing=1
-    fi
-    if    has_part winhost && ! grep -q '^winhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES" \
-       && ! grep -q '^runner/setup: Windows with the drive in the slot: skipped (no AMD processor' "$STAGES"; then
-        missing=1
+    if [ "$STRICT" = linux ]; then
+        # What came before the parts with Windows decides.
+        counted=$(head -n "$LINUX_STAGES" "$STAGES" | grep -c ': FAILED')
+    else
+        if has_part win && ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES"; then
+            missing=1
+        fi
+        if    has_part winhost && ! grep -q '^winhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES" \
+           && ! grep -q '^runner/setup: Windows with the drive in the slot: skipped (no AMD processor' "$STAGES"; then
+            missing=1
+        fi
     fi
     echo
     echo "$(grep -c ': ok' "$STAGES") ok, $failed failed, $(grep -c ': skipped' "$STAGES") skipped"
-    if [ "$STRICT" = yes ] && { [ "$failed" != 0 ] || [ "$missing" != 0 ]; }; then
+    case "$STRICT" in
+        linux) echo "failed in the parts with the Linux guest, which decide here: $counted" ;;
+        yes)   ;;
+        *)     exit 0 ;;
+    esac
+    if [ "$counted" != 0 ] || [ "$missing" != 0 ]; then
         exit 1
     fi
     exit 0
@@ -103,6 +127,7 @@ note "The runner"
 uname -r
 grep -m 1 'model name' /proc/cpuinfo
 echo "CPU flags for virtualization: $(grep -m 1 '^flags' /proc/cpuinfo | grep -o -w -E 'svm|vmx' | tr '\n' ' ')"
+echo "CPU flags for the time stamp counter: $(grep -m 1 '^flags' /proc/cpuinfo | grep -o -w -E 'constant_tsc|nonstop_tsc|tsc_reliable' | tr '\n' ' ')"
 for m in kvm_amd kvm_intel; do
     [ -e /sys/module/$m/parameters/nested ] && echo "$m nested=$(cat /sys/module/$m/parameters/nested)"
 done
@@ -309,7 +334,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     local cmdline="console=ttyS0 loglevel=4 mitigations=off intel_iommu=on rdinit=/init panic=-1"
     cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
     [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
-    local mem=8G
+    local mem=8G cpu=host
     local -a extra=()
     if [ -n "$windisk" ]; then
         # The disk of the Windows which was installed on the runner, as a disk
@@ -318,10 +343,16 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         cmdline="$cmdline SIM_GUEST=win"
         mem=10G
         extra=(-drive "file=$windisk,format=vdi,if=none,id=wdisk,snapshot=on" -device "virtio-blk-pci,drive=wdisk")
+        # The processor of the runner tells of an invariant time stamp
+        # counter, QEMU does not pass that on by itself, and VirtualBox tells
+        # its guest what its host tells it.  See the top of this file for
+        # what Windows does without.  The machine for the Linux guest stays as
+        # it has been.
+        cpu=host,invtsc=on
     fi
     t0=$(date +%s)
     sudo timeout -k 30 "$limit" qemu-system-x86_64 \
-        -machine q35,kernel-irqchip=split -accel kvm -cpu host -smp 4 -m "$mem" \
+        -machine q35,kernel-irqchip=split -accel kvm -cpu "$cpu" -smp 4 -m "$mem" \
         -nodefaults -display none -monitor none -serial stdio -no-reboot \
         -kernel "$VMLINUZ" -initrd "$WORK/l1.cpio.gz" -append "$cmdline" \
         -device intel-iommu,intremap=on \
@@ -396,6 +427,8 @@ make_unattend_image()
     genisoimage -quiet -J -r -V SIMCMD -o "$WORK/cmd-shutdown.iso" "$WORK/cmd" || return 1
 }
 
+LINUX_STAGES=$(wc -l < "$STAGES")
+
 if has_part win; then
     note "Part 3: Windows as the guest, on the runner"
     df -h "$WORK" | sed -n 2p
@@ -435,7 +468,9 @@ if has_part winhost; then
         stage "Windows with the drive in the slot" skipped "no AMD processor here, and Windows does not get through a start at this depth on others"
     elif part_simhost_prepare; then
         sudo ls -l /tmp/sim-win/win.vdi
-        run_simhost winhost win-hotplug 3000 "" 6600 /tmp/sim-win/win.vdi
+        # Half a million exits of a millisecond each make some ten minutes for
+        # the start; after 40 it is not going to come.
+        run_simhost winhost win-hotplug 2400 "" 6600 /tmp/sim-win/win.vdi
     fi
 fi
 

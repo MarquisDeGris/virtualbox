@@ -1,13 +1,17 @@
 # Hardware test
 
-Draft. Nothing in here has been run by anybody yet. It is the list of what a
+Nothing in here has been run on hardware yet. It is the list of what a
 person with the hardware has to try, what should happen, and what to look at
 when it does not. See [STATUS.md](STATUS.md) for what was verified without
 hardware and what was not.
 
-All of it is in the branch of the merge request. Main and `VBoxManage` were
-built and never run: no test without hardware gets to them, so parts F, G
-and I are the first time anybody uses them.
+All of it is in the branch of the merge request. A simulation has been
+through most of these steps with a Linux guest, an emulated NVMe drive and
+an emulated IOMMU of the Intel kind, with the kernel, Main and `VBoxManage`
+as they are, and a Windows guest has met the hot-plug capable slot while it
+was empty. No Windows has had a device in the slot yet, and nothing was
+tried with a graphics card, with Thunderbolt, with a device of several
+functions or with an IOMMU of AMD.
 
 ## 1. What is needed
 
@@ -32,6 +36,13 @@ and I are the first time anybody uses them.
   `VBoxManage modifyvm <vm> --vm-execution-engine native-api`.
 - A VM with the ICH9 chipset and EFI. Guests to try: a current Linux, and
   Windows 10 or 11.
+- For a Windows guest: `VBoxManage modifyvm <vm> --paravirt-provider none`.
+  With KVM VirtualBox cannot show a Windows guest the interface of Hyper-V,
+  which is what it shows such a guest otherwise. It shows a minimal one
+  instead (the log says `NEM: Adjusting GIM configuration from HyperV to
+  Minimal mode`), and Windows then keeps its time by the emulated HPET. In
+  the simulation setup of Windows took five times as long that way and a
+  start three times.
 
 For a graphics card switch the emulated graphics controller off and set
 `ExposeVga`, see the description in `DevPciVfio.cpp`.
