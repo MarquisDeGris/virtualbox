@@ -7,9 +7,9 @@ Updated: 2026-11-19
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `dd43ddf3`, 34 commits |
-| Branch the runs were made on | `scratch/quiet-reset` @ `dd43ddf3`, the commit which is the head of the merge request |
-| Branch with what comes next | `scratch/timer-wakeup` @ `f563e7f8`: the head of the merge request and two commits for hosts with KVM which are not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), see runs 227 to 230 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `f563e7f8`, 36 commits. The last two are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
+| Branch for the 7.2 maintenance line | `pci-passthrough-hotplug-7.2`, being made, see "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
@@ -26,13 +26,21 @@ can be put into the empty slot while the VM runs, the VM can start with an
 empty slot, its state can be saved and loaded while the slot is empty, and
 `VBoxManage controlvm` puts a device in and takes it out. The testcase has
 56 tests and three random tests and runs clean with AddressSanitizer,
-LeakSanitizer and UndefinedBehaviorSanitizer (runs 224 and 225). Main and
+LeakSanitizer and UndefinedBehaviorSanitizer (runs 232 and 233). Main and
 `VBoxManage` are built, and since 2026-11-17 a simulation runs all of it
-with a Linux guest and an emulated device behind an emulated IOMMU: 79
-checks, all pass (run 224, which fails if one does), see the next section.
-Next: the hardware test, which needs a person with the hardware. The
-merge request is marked ready for it, see "Ready for the hardware test"
-below.
+with a Linux guest and an emulated device behind an emulated IOMMU: 80
+checks, all pass (run 232; run 224, which fails if one does, for the head
+before the last two commits), see the next section. Windows Server has
+been through the hot-plug capable slot while it is empty: 27 checks, all
+pass (runs 230 to 232). The hardware test, which needs a person with the
+hardware, has not been done; the merge request is marked ready for it,
+see "Ready for the hardware test" below.
+
+Since 2026-11-19 the work goes on with what comes after the hardware
+test without waiting for it: there is time for development now and
+there will not be later. Nothing is written down as tested on hardware
+because of that. First of it: the same work on the maintenance branch
+7.2, see "The maintenance branches".
 
 ### Installation and the simulation, from 16 November
 
@@ -479,6 +487,29 @@ With this run the two commits have been through everything the head of
 the merge request has been through with the Linux guest, and through
 Windows on both kinds of processor. What is left before they go into the
 merge request is the run with the sanitizers.
+
+### The maintenance branches, from 19 November
+
+The merge request is on the development line of VirtualBox (`main`,
+which calls itself 7.2.97). Nobody runs that. Upstream has two
+maintenance branches in the same repository, `VBox-7.2` (7.2.22 is its
+last release) and `VBox-7.1` (7.1.18).
+
+| | `VBox-7.2` | `VBox-7.1` |
+|---|-----------|-----------|
+| The passthrough device (`DevPciVfio.cpp`) | there: upstream took it over from `main` in May 2026, with what it needs in PGM, PDM and the runtime | not there |
+| What it lacks of the device as on `main` | four commits of June and July 2026: the capability pointer which may point backwards, the quirk for one graphics card, guest memory mapped in two ranges, a fix for the legacy interface | everything |
+| The management of upstream (host PCI devices in the API, `--pci-attach` with a domain, Main configuring the device) | not there: the old PCI passthrough code is still in the tree, the device is configured through extra data only. On `main` this is some twenty commits of February and March 2026 | not there |
+| The other files the 36 commits touch | differ from `main` in their headers only, apart from the I/O APIC, the time manager, `VBoxManage` and Main | all differ; the files of the VMM have other names |
+| KVM as execution engine | there | there (`NEMR3Native-linux.cpp`), how far it goes for this is not looked at yet |
+| Building it with the workflow here | should work as it is: the same `configure`, kBuild as a submodule | not looked at yet |
+
+So for 7.2 it is: the commits of upstream which are missing, as they
+are, then the 36 commits, then what differs in the testcase and in
+Main. That is being done on `pci-passthrough-hotplug-7.2`. For 7.1 it
+would be the device itself and its footing in the VMM on top of that,
+across a year and a half of changes; whether that is worth it is decided
+when 7.2 is done and it is known what it took.
 
 ### The management and the review, 13 to 15 November
 
@@ -977,13 +1008,13 @@ harness since WP5, saved states since the fourth part of WP6.
 2. With every change to the code: the simulation next to the tests and
    the sanitizers, with `sim_strict: yes` or `linux` once its scripts
    have been through a run as they are.
-3. The sanitizers on `scratch/timer-wakeup` @ `f563e7f8` (the next run,
-   on 2026-11-20: four runs on the 19th were enough). Run 232 has every
-   check with the Linux guest passing with the two commits.
-4. Then the two commits which are not about the device (the timer, the
-   I/O APIC after a state was loaded) go into the merge request as
-   commits of their own, with its description and HWTEST.md saying what
-   they are for.
+3. Done on 2026-11-19: the sanitizers on `f563e7f8` (run 233), and the
+   two commits which are not about the device are in the merge request,
+   with its description and HWTEST.md saying what they are for.
+4. The work on the maintenance branch 7.2 (`pci-passthrough-hotplug-7.2`),
+   see "The maintenance branches": the changes of upstream which that
+   branch does not have, then the 36 commits, then the tests and the
+   simulation there.
 5. Windows where the drive is: what was changed after run 231 runs when
    a run for something else gets an AMD processor. No runs for it alone
    until then; it stays with the hardware test.
@@ -1070,16 +1101,18 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-19 | One run for the Linux guest and Windows (flavor `allsim`); with `sim_strict: linux` it fails for a check with the Linux guest only | Fewer runs: one build instead of two. The parts with Windows are still for finding out, and one of them depends on a download and on the processor the runner happens to have; a run which fails for those would tell nothing about the code |
 | 2026-11-19 | In the virtual machine standing in for a host the checks wait three times as long for the guest, and a VM which is slow is asked why instead of being failed for it | Run 231 failed for four waits in two VMs which were slow for a reason not yet known, with every check about what the code does passing. A check is about what happens, not how fast, at a depth of virtualization no user has. What made the VMs slow is still looked for: each VM reports its pace now |
 | 2026-11-19 | After a change to the scripts of the simulation the next run is for finding out (`sim_strict: no`), also when it is to show something about the code. What it shows is in its list of checks either way | Run 231 was the first to fail by the simulation itself, on the first run of changed scripts and a new flavor. A failed run tells GitHub and everybody looking at the fork that the code is broken, which was not what it found |
+| 2026-11-19 | The work goes on with what comes after the hardware test, without waiting for it. Nothing is recorded as tested on hardware. More runs than usual on days of such work, still one after the other and each read before the next | The person this is for has time for development now and will not have it later. What a positive hardware test would leave to do does not depend on its result: the code has to be had on a line of VirtualBox which is released and maintained, and the development line it was written on is neither |
+| 2026-11-19 | The maintenance branch 7.2 first, 7.1 after it if at all | 7.2 has the passthrough device already, 7.1 has not; what 7.2 lacks of upstream is a list of commits, what 7.1 lacks is the device and what it needs in the VMM. Everything done for 7.2 is on the way to 7.1 |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
 
 | Tier | State | Commit | Note |
 |------|-------|--------|------|
-| T1 unit | running in CI, 56 tests, ACPI table check | `dd43ddf3` | all pass with ASan, LSan and UBSan (run 225) and without them (run 224) |
-| T2 fuzz | running in CI | `dd43ddf3` | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 225); 200000 models with another seed and sanitizers (run 70, before WP3) |
+| T1 unit | running in CI, 56 tests, ACPI table check | `f563e7f8` | all pass with ASan, LSan and UBSan (run 233) and without them (run 232) |
+| T2 fuzz | running in CI | `f563e7f8` | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 233); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | passes | `dd43ddf3` | Run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above |
+| T4 system simulation | passes | `f563e7f8` | Run 232, 80 checks with the Linux guest and 27 with Windows on the runner, all pass (a run for finding out; run 231 before it failed for four waits of the simulation, see there). For the head before the last two commits: run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -1106,9 +1139,10 @@ By the definition in PLAN.md, section 7:
 
 1. WP0 to WP7 are done. WP8 (INTx) is not, as allowed there.
 2. T1 and T2 are green on the head of the merge request, with and without
-   the sanitizers (runs 224 and 225).
-3. T4 passes on the head of the merge request (run 224). T3 was not run;
-   the table above says why.
+   the sanitizers (runs 232 and 233).
+3. T4 passes on the head of the merge request (run 232; run 224 for the
+   head before the last two commits). T3 was not run; the table above
+   says why.
 4. The security requirements are mapped to tests, see above. S9 is a
    matter of the hardware test.
 5. The tree builds without a compiler warning in a file this work changes.
@@ -1240,5 +1274,6 @@ slot.
 | 230 | `scratch/timer-wakeup` @ `f563e7f8` | winsim, not strict | passed | 106 minutes, Azure, an AMD processor. The commit about the I/O APIC on top: builds without a warning, the 56 tests pass, and Windows shuts down on the power button after a saved state was loaded. All 47 checks on the runner pass, with the Linux guest and with Windows (setup in 414 seconds, a start in 37). Windows in the virtual machine standing in for a host ran on an AMD processor for the first time and did not get to its report in 50 minutes: that machine did not tell of an invariant time stamp counter, so Windows read the time from the HPET (see run 230 under "Installation and the simulation") |
 | 231 | `scratch/timer-wakeup` @ `f563e7f8` | allsim, strict for the Linux guest | **failed** | 93 minutes, Azure, an AMD processor. The first run of the flavor and of the changed scripts. Builds, the 56 tests pass, everything on the runner passes with the Linux guest and with Windows. Where the drive is, 60 of 64 checks with the Linux guest pass and four fail, all four waits which ended too early: two of the six VMs were three to eight times as slow as usual, with the emulated timers seconds behind, for a reason not yet known. Windows where the drive is no longer reads the HPET, shows its start screen and was not at its disk driver after 40 minutes (see run 231 under "Installation and the simulation") |
 | 232 | `scratch/timer-wakeup` @ `f563e7f8` | allsim, not strict | passed | 43 minutes, AWS, an Intel processor. The simulation as changed after run 231. All 112 checks pass: 80 with the Linux guest (16 on the runner, 64 where the drive is, in 690 seconds), 27 with Windows on the runner (setup in 560 seconds, a start in 72). Windows where the drive is was skipped for the processor. The tree builds, the 56 tests pass |
+| 233 | `scratch/timer-wakeup` @ `f563e7f8` | sanitize | passed | 9 minutes. The head with the two commits which are not about the device: the 56 tests and the random tests with 20000 device models, no reports from the sanitizers. The merge request was moved to this commit after it |
 
 Run numbers are those GitHub shows for the `build` workflow.

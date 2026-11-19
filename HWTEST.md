@@ -9,7 +9,9 @@ All of it is in the branch of the merge request. A simulation has been
 through most of these steps with a Linux guest, an emulated NVMe drive and
 an emulated IOMMU of the Intel kind, with the kernel, Main and `VBoxManage`
 as they are, and a Windows guest has met the hot-plug capable slot while it
-was empty. No Windows has had a device in the slot yet, and nothing was
+was empty: its PCI driver runs the port and the slot, a saved state is
+loaded, the power button works before and after. No Windows has had a
+device in the slot yet, and nothing was
 tried with a graphics card, with Thunderbolt, with a device of several
 functions or with an IOMMU of AMD.
 
@@ -43,6 +45,23 @@ functions or with an IOMMU of AMD.
   Minimal mode`), and Windows then keeps its time by the emulated HPET. In
   the simulation setup of Windows took five times as long that way and a
   start three times.
+
+The branch has two commits which are not about the device. Every VM with
+KVM as execution engine on a Linux host gets them, and a Windows guest in
+the simulation ran into what they are for:
+
+- A VM whose guest waited for a timer of VirtualBox with its CPUs halted
+  could stand still until something else woke it. VirtualBox now notices
+  within about 20 milliseconds and tells the thread of the CPU again. The
+  log has a line when it did, 64 times at most:
+
+      TM: VMCPU_FF_TIMER pending for more than 10 ms while EMT 0 executes the guest, notified it again
+
+  The line is in order. A VM which stops doing anything without being
+  paused is not: note it down, with the log.
+- After a saved state was loaded, a guest got a level-triggered interrupt
+  of an emulated device once and never again; the power button did nothing
+  for Windows then. Part J has a step for it.
 
 For a graphics card switch the emulated graphics controller off and set
 `ExposeVga`, see the description in `DevPciVfio.cpp`.
@@ -262,6 +281,10 @@ Steps 2 and 3 start the VM without the device, which needs part I to work.
    BAR. Note down how long saving and loading take.
 5. Taking a snapshot of the running VM with the slot empty works too; note
    down how long it takes with a big BAR, this is expected to be slow.
+6. After a state was loaded in step 2 or 3:
+   `VBoxManage controlvm <vm> acpipowerbutton`. The guest reacts as it
+   does in a VM whose state was not loaded: Windows shuts down or asks,
+   a Linux with a desktop asks.
 
 ### K. What must not work
 
