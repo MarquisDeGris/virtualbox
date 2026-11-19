@@ -36,7 +36,8 @@
 #      from the HPET of VirtualBox otherwise, with an exit for every look at
 #      the clock: five million of them in 70 minutes without getting through
 #      its start (run 230), where a start takes less than half a million exits
-#      in all when the counter is there.
+#      in all when the counter is there.  With the counter told of, Windows
+#      leaves the HPET alone (run 231).
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
 # win, winhost.  Without it: runner,simhost.
@@ -373,7 +374,8 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
 if has_part simhost; then
     note "Part 2: VirtualBox in a virtual machine with an IOMMU and a PCIe device"
     if part_simhost_prepare; then
-        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove 600 5 4200
+        # 12 minutes in run 224, 26 in run 231 with two VMs out of six slow.
+        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove 600 5 5400
 
         if grep -q 'written by the guest' "$WORK/nvme.img"; then
             stage "what the guest wrote is on the drive of the simulated host" ok \
@@ -469,8 +471,12 @@ if has_part winhost; then
     elif part_simhost_prepare; then
         sudo ls -l /tmp/sim-win/win.vdi
         # Half a million exits of a millisecond each make some ten minutes for
-        # the start; after 40 it is not going to come.
-        run_simhost winhost win-hotplug 2400 "" 6600 /tmp/sim-win/win.vdi
+        # the start, and that is not all of it: in run 231, with the clock out
+        # of the way, Windows was still not at its disk driver after 40
+        # minutes, with few exits.  It gets an hour, less memory to go through
+        # and that memory in huge pages (l1.sh), and tells every three minutes
+        # how far it is.
+        run_simhost winhost win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi
     fi
 fi
 

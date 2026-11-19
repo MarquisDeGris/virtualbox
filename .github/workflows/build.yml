@@ -68,7 +68,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 330
+    timeout-minutes: 350
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
@@ -365,7 +365,7 @@ jobs:
         # Everything in the script has a time limit of its own.  With sim and
         # with winsim they add up to less than this one; with allsim they do
         # if not every part takes all the time it may.
-        timeout-minutes: 270
+        timeout-minutes: 300
         continue-on-error: ${{ inputs.sim_strict != 'yes' && inputs.sim_strict != 'linux' }}
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}

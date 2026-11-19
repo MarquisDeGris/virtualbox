@@ -104,6 +104,16 @@ if [ "${SIM_GUEST:-linux}" = win ]; then
         dmesg | grep -i -E 'virtio|vda' | tail -n 10
         exit 1
     fi
+    # The memory of the VM in huge pages where the kernel can: Windows goes
+    # through all of its memory early in its start, and at this depth every
+    # page a guest touches for the first time is costly.  With huge pages
+    # there are 512 times fewer of them for the kernel to map.  Run 231:
+    # Windows shows its start screen and does not get to its disk driver in
+    # 40 minutes, with next to no exits to VirtualBox meanwhile.
+    for f in enabled defrag; do
+        echo always > /sys/kernel/mm/transparent_hugepage/$f 2> /dev/null
+        echo "transparent huge pages, $f: $(cat /sys/kernel/mm/transparent_hugepage/$f 2>&1)"
+    done
     VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
     SIM_WORK=/tmp/sim \
     SIM_OUT=$OUT/$WHERE \
@@ -112,7 +122,7 @@ if [ "${SIM_GUEST:-linux}" = win ]; then
     SIM_HOSTADDR=$addr \
     WIN_DISK_DEV=/dev/vda \
     WIN_CMD_ISO=$SIM_WS/sim-work/cmd-shutdown.iso \
-    WIN_START_WAIT=${SIM_BOOT_WAIT:-2400} \
+    WIN_START_WAIT=${SIM_BOOT_WAIT:-3600} \
         bash "$SIM_DIR/win-phases.sh" nested
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40
@@ -128,6 +138,7 @@ GUEST_RAW=$SIM_WS/sim-work/guest-quiet.raw \
 SIM_WHERE=$WHERE \
 SIM_HOSTADDR=$addr \
 SIM_BOOT_WAIT=${SIM_BOOT_WAIT:-300} \
+SIM_PATIENCE=${SIM_PATIENCE:-3} \
     bash "$SIM_DIR/vbox-phases.sh" $PHASES
 
 echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"

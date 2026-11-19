@@ -430,6 +430,41 @@ its start is powered off instead of being asked to shut down, which took
 and not for one with Windows, which is still being found out and has a
 download from Microsoft in it.
 
+**Run 231** (2026-11-19, `allsim` with `sim_strict: linux`, the same
+commit, 93 minutes, an AMD processor again): **failed**, for four checks
+with the Linux guest in the virtual machine standing in for a host. All
+four are waits which ended before the guest was done. Nothing in the run
+points at the code.
+
+| What | Result |
+|------|--------|
+| The tree, the 56 tests, everything on the runner | builds and passes, Windows included: setup in 370 seconds, a start in 32, the power button after a saved state was loaded |
+| The Linux guest where the drive is | 60 of 64 checks pass, among them all of hot-plug, the start without the device and the saved states. Two of the six VMs were slow from their first second: the one with the drive passed through without hot-plug ran 7 minutes and the one for the host taking the drive back 12, where 2 are usual. In them the guest took 15 seconds to the point in its start it reaches in 5 otherwise, and three to eight times as long for everything about the drive |
+| The four checks | the write to the drive (the check looked for it at once after the read instead of waiting for it; the guest wrote), the read after pause and resume (came after the 90 seconds it had), the guest running on after the refused saved state (its line came after the 60 seconds it had), and the drive after the host had taken it and given it back (the guest waits 40 seconds for the drive behind the controller and gave up; its driver had set the controller up and was not done with the drive in 90 seconds, without a message) |
+| What the slow VMs have in common | the same number of exits to VirtualBox as the fast ones, in three to six times the time. The timers VirtualBox emulates were 1.8 and 4.2 seconds behind when the VMs ended, against less than 0.1 seconds in the four others and in all VMs of run 222 on the same kind of processor: the thread of the CPU was two milliseconds late for each of them instead of a tenth of one. VirtualBox did not have to make up for a missed notification in them. Why those two VMs and not the others is not known; a VM set up the same way was fast |
+| Windows where the drive is | the time stamp counter told of does what it should: two reads of the HPET where run 230 had five million. Windows shows its start screen and is alive, and was not at its disk driver after 40 minutes: 1285 reads from the disk, which is what its loader reads, no interrupt of a device yet, 356000 exits in all |
+
+What changes with it, all in the simulation and nothing in the code:
+
+- The waits for a line of the guest are three times as long in the
+  virtual machine standing in for a host. A wait ends when the line is
+  there, so this costs time only where something is wrong. The check for
+  the write waits for it now.
+- The guest waits a minute for the drive behind its controller, then
+  tells everything its kernel has to say and which tasks wait for what,
+  and goes on looking instead of giving up.
+- Every VM tells at its end how it got on: the load and the processor
+  time of the machine it ran on, the busiest threads, how far the
+  emulated timers are behind. The next slow VM is to tell why.
+- Windows where the drive is: 2 GiB of memory instead of 3, the memory
+  of the VM in huge pages (Windows goes through all of its memory early,
+  and every page touched for the first time is costly at that depth,
+  which is a guess the next run tests), an hour for its start, and every
+  three minutes where it is, read from the outside.
+
+The next run is for finding out again (`sim_strict: no`): the scripts
+have changed too much for a run which fails by them.
+
 ### The management and the review, 13 to 15 November
 
 From 2026-11-13 to 2026-11-15 GitHub did not start workflow runs for this
@@ -926,14 +961,17 @@ harness since WP5, saved states since the fourth part of WP6.
    [INSTALL.md](INSTALL.md) says how to build and install.
 2. With every change to the code: the simulation with `sim_strict: yes`
    next to the tests and the sanitizers.
-3. Run 231 (`allsim`, `sim_strict: linux`) on `scratch/timer-wakeup` @
-   `f563e7f8`: the simulation with the Linux guest has to pass with the
-   two commits, as it did without them in run 224. Windows where the
-   drive is, with the time stamp counter told of, if the runner has an
-   AMD processor.
+3. Run 232 (`allsim`, for finding out: `sim_strict: no`) on
+   `scratch/timer-wakeup` @ `f563e7f8`, with the simulation as changed
+   after run 231: every check with the Linux guest has to pass with the
+   two commits, as it did without them in run 224; a slow VM tells why
+   it is slow. Windows where the drive is, if the runner has an AMD
+   processor.
 4. After it the sanitizers on the same commit. Then the two commits
    which are not about the device (the timer, the I/O APIC after a state
-   was loaded) go into the merge request as commits of their own.
+   was loaded) go into the merge request as commits of their own. They
+   do not go in before a run has all checks with the Linux guest
+   passing with them.
 5. The hardware test gets told: `--paravirt-provider none` for a Windows
    guest (in HWTEST.md already), and what the two commits are for.
 6. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
@@ -1015,6 +1053,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-19 | Windows where the drive is (the fourth part of the simulation) runs on runners with an AMD processor only | Two runs on Intel processors spent 70 minutes each on a Windows which did not get through its start at that depth, with either paravirtualization setting. What is known of AMD is one run on the runner itself (226) |
 | 2026-11-19 | The machine standing in for a host tells of an invariant time stamp counter when its guest is Windows; the one for the Linux guest stays as it is | Run 230: without it Windows keeps its time by the HPET and does not get through a start there. A real host tells of the counter, so the machine was the odd one out. The part with the Linux guest has passed as it is and is what a run fails for, so it is not changed along the way |
 | 2026-11-19 | One run for the Linux guest and Windows (flavor `allsim`); with `sim_strict: linux` it fails for a check with the Linux guest only | Fewer runs: one build instead of two. The parts with Windows are still for finding out, and one of them depends on a download and on the processor the runner happens to have; a run which fails for those would tell nothing about the code |
+| 2026-11-19 | In the virtual machine standing in for a host the checks wait three times as long for the guest, and a VM which is slow is asked why instead of being failed for it | Run 231 failed for four waits in two VMs which were slow for a reason not yet known, with every check about what the code does passing. A check is about what happens, not how fast, at a depth of virtualization no user has. What made the VMs slow is still looked for: each VM reports its pace now |
+| 2026-11-19 | After a change to the scripts of the simulation the next run is for finding out (`sim_strict: no`), also when it is to show something about the code. What it shows is in its list of checks either way | Run 231 was the first to fail by the simulation itself, on the first run of changed scripts and a new flavor. A failed run tells GitHub and everybody looking at the fork that the code is broken, which was not what it found |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1183,5 +1223,6 @@ slot.
 | 228 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 161 minutes, AWS. The head of the merge request plus the commit about the timer: builds, the 56 tests pass, the part with the Linux guest passes. Windows installs with no VM standing still, VirtualBox making up for a missed notification every ten to twenty seconds. Windows is seven times as slow as in run 226 (the paravirtualization interface, see run 228 under "Installation and the simulation"). The power button: Windows does not shut down in the VM with the slot and does in one without. Windows in the virtual machine standing in for a host did not get to its report in 50 minutes |
 | 229 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 72 minutes, AWS. The Windows VM without a paravirtualization interface: setup in 569 seconds, a start in 63. The power button: Windows shuts down in the VM with the slot and in three VMs for comparison, and does not after a saved state was loaded, where the entry of the I/O APIC for the interrupt of the ACPI hardware has its remote IRR bit left set (see run 229 under "Installation and the simulation"). Windows in the virtual machine standing in for a host did not get to its report in 50 minutes again |
 | 230 | `scratch/timer-wakeup` @ `f563e7f8` | winsim, not strict | passed | 106 minutes, Azure, an AMD processor. The commit about the I/O APIC on top: builds without a warning, the 56 tests pass, and Windows shuts down on the power button after a saved state was loaded. All 47 checks on the runner pass, with the Linux guest and with Windows (setup in 414 seconds, a start in 37). Windows in the virtual machine standing in for a host ran on an AMD processor for the first time and did not get to its report in 50 minutes: that machine did not tell of an invariant time stamp counter, so Windows read the time from the HPET (see run 230 under "Installation and the simulation") |
+| 231 | `scratch/timer-wakeup` @ `f563e7f8` | allsim, strict for the Linux guest | **failed** | 93 minutes, Azure, an AMD processor. The first run of the flavor and of the changed scripts. Builds, the 56 tests pass, everything on the runner passes with the Linux guest and with Windows. Where the drive is, 60 of 64 checks with the Linux guest pass and four fail, all four waits which ended too early: two of the six VMs were three to eight times as slow as usual, with the emulated timers seconds behind, for a reason not yet known. Windows where the drive is no longer reads the HPET, shows its start screen and was not at its disk driver after 40 minutes (see run 231 under "Installation and the simulation") |
 
 Run numbers are those GitHub shows for the `build` workflow.

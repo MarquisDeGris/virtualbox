@@ -82,6 +82,24 @@ exits_now()
         | awk '{ s += $1; n++ } END { if (n) print s }'
 }
 
+# Where a Windows which says nothing yet has got to, as far as that shows from
+# the outside: how often it has left for VirtualBox, how much it has read from
+# its disk (the loader reads some 1300 times, the disk driver of Windows after
+# it), how many interrupts the I/O APIC has passed on (none before Windows has
+# started its first driver with one), where CPU 0 is, and how much of the
+# memory of this machine is in huge pages.
+progress_note()
+{
+    local s
+    s=$(VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/NEM/CPU*/Exit|/Public/Storage/AHCI0/Port0/ReqsRead|/Devices/ioapic/Vectors/*' 2> /dev/null | tr -d '\r')
+    printf 'exits %s, disk reads %s, interrupts by the I/O APIC %s, %s, %s' \
+        "$(echo "$s" | grep -a -o -E '<Counter c="[0-9]+"[^>]*name="/NEM/CPU[0-9]+/Exit"' | sed -E 's/^<Counter c="([0-9]+)".*$/\1/' | awk '{ t += $1 } END { print t + 0 }')" \
+        "$(echo "$s" | grep -a -o -E '<Counter c="[0-9]+"[^>]*name="[^"]*ReqsRead"' | sed -E 's/^<Counter c="([0-9]+)".*$/\1/' | head -n 1)" \
+        "$(echo "$s" | grep -a -o -E '<Counter c="[0-9]+"[^>]*name="/Devices/ioapic/Vectors/[^"]*"' | sed -E 's/^<Counter c="([0-9]+)".*$/\1/' | awk '{ t += $1 } END { print t + 0 }')" \
+        "$(VBM_TIMEOUT=30 vbm debugvm "$VM" getregisters --cpu=0 rip 2>&1 | tr -d '\r' | grep -a -m 1 -E '^rip|rror' | tr -s ' ' | cut -c1-40)" \
+        "$(grep -E '^AnonHugePages' /proc/meminfo 2> /dev/null | tr -s ' ')"
+}
+
 # Run 227 had a VM which did nothing any more from 40 s after its start: the
 # thread of its CPU had missed being told that a timer was due, and Windows
 # waited for that timer with its CPUs halted (STATUS.md has it).  A Windows
@@ -143,7 +161,7 @@ wait_win() # <regex> <seconds>
                 running|starting|restoring) ;;
                 *) echo "    the VM is in state '$st', not waiting any longer"; return 1 ;;
             esac
-            echo "    [$now s] waiting, the VM is $st"
+            echo "    [$now s] waiting, the VM is $st; $(progress_note)"
             shot
         fi
         stall_check
@@ -722,7 +740,7 @@ mode_nested()
 {
     : "${WIN_DISK_DEV:?}" "${SIM_HOSTADDR:?}"
     PHASE=win-setup
-    START_WAIT=${WIN_START_WAIT:-2400}
+    START_WAIT=${WIN_START_WAIT:-3600}
     SHUTDOWN_WAIT=600
     echo "==== VirtualBox on $WHERE, Windows as the guest: $("$VBOX_BIN/VBoxManage" --version 2>&1 | tail -n 1)"
     ls -l /dev/kvm /dev/iommu "$WIN_DISK_DEV" "$WIN_CMD_ISO" 2>&1 | sed 's/^/    /'
@@ -732,7 +750,9 @@ mode_nested()
         stage "the VM for Windows is created" FAILED "no disk"
         return
     fi
-    create_vm 1 3072 "$SIM_WORK/win-raw.vmdk" emptydrive emptydrive "$HOSTADDR" "" || return
+    # 2 GiB, which is what Windows Server asks for at least: the less memory,
+    # the less there is for Windows to go through when it starts.
+    create_vm 1 2048 "$SIM_WORK/win-raw.vmdk" emptydrive emptydrive "$HOSTADDR" "" || return
     stage "the VM for Windows is created, with the drive in the hot-plug capable slot" ok
 
     echo "==== phase win-hotplug on $WHERE"

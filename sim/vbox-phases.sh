@@ -16,6 +16,13 @@ WHERE=${SIM_WHERE:-host}
 HOSTADDR=${SIM_HOSTADDR:-}
 EXPECT_MD5=${SIM_MD5:-none}
 BOOT_WAIT=${SIM_BOOT_WAIT:-240}
+# The waits for a line of the guest are this many times as long as written
+# down where they are made.  They are written down for the runner.  In the
+# virtual machine standing in for a host a guest was three to eight times as
+# slow as usual in two VMs out of six (run 231), and a wait which ends early is
+# a check which failed for the pace and not for what it is about.  A wait ends
+# when the line is there, so patience costs time only where something is wrong.
+PATIENCE=${SIM_PATIENCE:-1}
 
 export USER=root LOGNAME=root HOME="$SIM_WORK/home"
 export VBOX_USER_HOME="$SIM_WORK/vbox"
@@ -29,6 +36,7 @@ SERIAL_FROM=1
 PHASE=setup
 ATTACHED=
 VMDIR=
+VM_T0=$(date +%s)
 # What the guest says on its serial port when it has booted and while it runs.
 UP_RE='GUEST: UP'
 ALIVE_RE='GUEST: ALIVE'
@@ -104,10 +112,10 @@ stall_check()
     :
 }
 
-wait_serial() # <regex> <seconds>
+wait_serial() # <regex> <seconds> [<times as long, instead of $PATIENCE>]
 {
-    local i=0 st
-    while [ "$i" -lt "$2" ]; do
+    local i=0 st limit=$(( $2 * ${3:-$PATIENCE} ))
+    while [ "$i" -lt "$limit" ]; do
         serial_has "$1" && return 0
         if [ $((i % 10)) = 9 ]; then
             st=$(vmstate)
@@ -170,10 +178,29 @@ reset_vm()
     SERIAL_FROM=1
 }
 
+# How the VM and the machine it runs on are getting on, for telling a slow run
+# from a broken one: the load and the CPU time of the machine (the last number
+# of the cpu line is the time something else had its processors), the threads
+# which used most of a processor, and how far the timers VirtualBox emulates
+# are behind.  They fall behind when the thread of the CPU is late for them.
+pace_note()
+{
+    local lag
+    echo "    ---- pace: phase $PHASE, the VM was started $(( $(date +%s) - VM_T0 )) s ago; load $(cut -d' ' -f1-4 /proc/loadavg 2> /dev/null)"
+    echo "    | $(grep -m 1 '^cpu ' /proc/stat 2> /dev/null | cut -d' ' -f1-10)"
+    echo "    | $(grep -E '^(MemAvailable|AnonHugePages)' /proc/meminfo 2> /dev/null | tr -s ' ' | tr '\n' ' ')"
+    ps -eLo pcpu,comm --sort=-pcpu 2> /dev/null | head -n 6 | sed 's/^/    | /'
+    lag=$(VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/TM/VirtualSync/CurrentOffset' 2> /dev/null \
+          | grep -a -o -E '(c|val)="[0-9]+"' | head -n 1 | tr -dc 0-9)
+    [ -n "$lag" ] && echo "    | the timers of the VM are $(( lag / 1000000 )) ms behind"
+    return 0
+}
+
 end_phase()
 {
     case "$(vmstate)" in
         running|paused|stuck|gurumeditation)
+            pace_note
             run controlvm "$VM" poweroff
             wait_state poweroff 60 || echo "    the VM is in state '$(vmstate)'"
             ;;
@@ -186,6 +213,7 @@ start_vm()
     local rc
     rm -f "$SERIAL"
     SERIAL_FROM=1
+    VM_T0=$(date +%s)
     echo "+ VBoxManage startvm $VM --type headless"
     VBM_TIMEOUT=300 vbm startvm "$VM" --type headless > "$SIM_WORK/startvm.out" 2>&1
     rc=$?
@@ -200,7 +228,7 @@ boot() # <what>
         diag
         return 1
     fi
-    if ! wait_serial 'GUEST: READY' "$BOOT_WAIT"; then
+    if ! wait_serial 'GUEST: READY' "$BOOT_WAIT" 1; then
         stage "$1" FAILED "the guest does not come up"
         diag
         return 1
@@ -493,6 +521,9 @@ phase_passthrough()
     run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
     if boot "a VM with the device passed through boots the guest"; then
         guest_reads 1 "guest: reads from the drive which is passed through"
+        # The guest writes after it has read, and tells of its interrupts
+        # after that.
+        wait_serial 'GUEST: (IRQ|NODRIVE) 1' 60
         serial_show 'GUEST: (pci: 0000:01|PRESENT|READ|IRQ|WROTE|WRITE-FAILED|NODRIVE)' 10
         grep -a 'VFIO#' "$VMDIR/Logs/VBox.log" | cut -c1-200 | head -n 30 | sed 's/^/    | /'
         if serial_has 'GUEST: WROTE 1'; then
@@ -506,7 +537,7 @@ phase_passthrough()
         sleep 3
         run controlvm "$VM" resume
         serial_mark
-        if wait_serial "GUEST: REREAD [0-9]+ md5=$EXPECT_MD5" 90; then
+        if wait_serial "GUEST: REREAD [0-9]+ md5=$EXPECT_MD5" 150; then
             stage "guest: reads from the drive after pause and resume" ok
         else
             stage "guest: reads from the drive after pause and resume" FAILED

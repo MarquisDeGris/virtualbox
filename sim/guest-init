@@ -79,32 +79,66 @@ readsum()
     dd if="$1" bs=1M count=8 2> /dev/null | md5sum | cut -d' ' -f1
 }
 
+# Reads from the drive and writes to it, and tells of both.
+use_drive() # <block device>
+{
+    say "READ $n md5=$(readsum "$1")"
+    if echo "written by the guest, round $n" | dd of="$1" bs=1M seek=12 conv=fsync 2> /dev/null; then
+        say "WROTE $n"
+    else
+        say "WRITE-FAILED $n"
+    fi
+    say "IRQ $n $(grep -c nvme /proc/interrupts) lines: $(grep nvme /proc/interrupts | head -n 2 | tr -s ' ' | cut -c1-120 | tr '\n' '|')"
+}
+
+# The controller is there and its drive is not: what the kernel has to say
+# about that, whatever it is, and which of its tasks wait for what.
+nodrive_diag()
+{
+    say "D: nvme in /dev and /sys: $(ls /dev/nvme* /sys/class/nvme/ 2>&1 | tr '\n' ' ' | cut -c1-200)"
+    for s in /sys/class/nvme/nvme*/state; do
+        [ -e "$s" ] && say "D: $s $(cat "$s" 2>&1)"
+    done
+    say "D: interrupts: $(grep -c nvme /proc/interrupts) lines: $(grep nvme /proc/interrupts | head -n 3 | tr -s ' ' | cut -c1-120 | tr '\n' '|')"
+    echo w > /proc/sysrq-trigger 2> /dev/null
+    dmesg | tail -n 45 | cut -c1-160 | while read -r l; do say "D: $l"; done
+    kseen=$(dmesg | wc -l)
+}
+
 n=0
 rr=0
 tick=0
+late=
 state=absent
 while :; do
     if d=$(finddev); then
         if [ "$state" = absent ]; then
             state=present
+            late=
             n=$((n + 1))
             say "PRESENT $n ${d##*/} $(cat "$d/vendor"):$(cat "$d/device")"
             i=0
-            while [ "$i" -lt 40 ] && ! blk > /dev/null; do
+            while [ "$i" -lt 60 ] && ! blk > /dev/null; do
                 sleep 1
                 i=$((i + 1))
             done
             kmsg
             if b=$(blk); then
-                say "READ $n md5=$(readsum "$b")"
-                if echo "written by the guest, round $n" | dd of="$b" bs=1M seek=12 conv=fsync 2> /dev/null; then
-                    say "WROTE $n"
-                else
-                    say "WRITE-FAILED $n"
-                fi
-                say "IRQ $n $(grep -c nvme /proc/interrupts) lines: $(grep nvme /proc/interrupts | head -n 2 | tr -s ' ' | cut -c1-120 | tr '\n' '|')"
+                use_drive "$b"
             else
+                # Not giving up: where every exit from this guest is slow the
+                # drive has taken longer than this to show (run 231), and the
+                # loop below goes on looking for it.
                 say "NODRIVE $n"
+                nodrive_diag
+                late=$tick
+            fi
+        elif [ -n "$late" ]; then
+            if b=$(blk); then
+                say "LATE $n the drive is there $((tick - late)) rounds after it was given up on"
+                kmsg
+                late=
+                use_drive "$b"
             fi
         elif [ $((tick % 10)) = 0 ] && b=$(blk); then
             rr=$((rr + 1))
@@ -112,14 +146,16 @@ while :; do
         fi
     elif [ "$state" = present ]; then
         state=absent
+        late=
         kmsg
         say "GONE $n"
     fi
     if [ $((tick % 10)) = 0 ]; then
         kmsg
         # With the number of interrupts the ACPI hardware has raised so far:
-        # the power button is one of them.
-        say "ALIVE $tick sci=$(grep ' acpi$' /proc/interrupts | awk '{ print $2 }')"
+        # the power button is one of them.  And with the time the kernel has
+        # been up, which tells how long a round of this loop takes.
+        say "ALIVE $tick sci=$(grep ' acpi$' /proc/interrupts | awk '{ print $2 }') up=$(cut -d' ' -f1 /proc/uptime)"
     fi
     tick=$((tick + 1))
     sleep 1
