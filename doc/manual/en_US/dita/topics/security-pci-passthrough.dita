@@ -1,0 +1,72 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE topic PUBLIC "-//OASIS//DTD DITA Topic//EN" "topic.dtd">
+<topic xml:lang="en-us" id="security-pci-passthrough">
+  <title>PCI Passthrough</title>
+
+  <body>
+    <p>
+          Passing a PCI device of the host system to the guest gives
+          the guest full control over that device. This is
+          experimental and available on Linux host systems only, see
+          <xref href="../cli_topics/vboxmanage-modifyvm.dita"/>.
+          Consider the following before you use it:
+        </p>
+    <ul>
+      <li>
+        <p>
+              The guest can change everything the device keeps, such
+              as its firmware and its settings. Treat a device which
+              was in a VM as you treat the guest when you give the
+              device to the host system or to another VM afterwards.
+              To keep the host system from using the device, leave it
+              bound to the <codeph>vfio-pci</codeph> driver.
+            </p>
+      </li>
+      <li>
+        <p>
+              The IOMMU of the host system is what limits the device
+              to the memory of the VM. <ph conkeyref="vbox-conkeyref-phrases/product-name"/>
+              does not pass a device through without an IOMMU. Do not
+              enable the options of the host kernel which allow
+              passthrough without interrupt remapping.
+            </p>
+      </li>
+      <li>
+        <p>
+              Devices which the IOMMU cannot tell apart are in one
+              IOMMU group on the host system. They are not protected
+              from each other. Pass a device through only if the
+              other devices in its IOMMU group are not used by the
+              host system or by another VM.
+            </p>
+      </li>
+      <li>
+        <p>
+              Whoever can open the VFIO device node of a device and
+              the IOMMU device node of the host system controls the
+              device. Give access to them only to the user who runs
+              the VM.
+            </p>
+      </li>
+      <li>
+        <p>
+              A device which is put into a running VM has to be of
+              the kind the VM was started with before. <ph conkeyref="vbox-conkeyref-phrases/product-name"/>
+              refuses any other device. Whether a device may be
+              connected to the host system at all, for example the
+              authorization of a Thunderbolt device, is up to the
+              host system.
+            </p>
+      </li>
+      <li>
+        <p>
+              The state of the device is not part of a saved state or
+              a snapshot of the VM. Saving the state of the VM and
+              taking a snapshot of the running VM are refused while
+              the device is in the VM.
+            </p>
+      </li>
+    </ul>
+  </body>
+
+</topic>

@@ -508,6 +508,10 @@ Console::i_configConstructor(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, void *pvCon
  */
 int Console::i_configConstructorInner(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, AutoWriteLock *pAlock)
 {
+    /* Nothing is known yet about PCI devices of the host in this VM, see i_attachRawPCIDevices(). */
+    mfHostPciHotPlug = false;
+    mHostPciDevices.clear();
+
     ComPtr<IMachine> const pMachine = i_machine();
 
     ComPtr<IPlatform> pPlatform;

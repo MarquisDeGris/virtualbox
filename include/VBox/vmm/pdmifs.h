@@ -2497,6 +2497,107 @@ typedef struct PDMIPCIRAWCONNECTOR
 #define PDMIPCIRAWCONNECTOR_IID                 "14aa9c6c-8869-4782-9dfc-910071a6aebf"
 
 
+/**
+ * Callback of PDMIPCIPASSTHROUGHPORT::pfnQueryLayout, called once for each
+ * value of the layout.
+ *
+ * @returns VBox status code.  A failure ends the enumeration and is what
+ *          PDMIPCIPASSTHROUGHPORT::pfnQueryLayout returns.
+ * @param   pvUser      The user argument.
+ * @param   pszName     The name of the value, valid during the call only.
+ * @param   u64Value    The value.
+ */
+typedef DECLCALLBACKTYPE(int, FNPDMPCIPASSTHROUGHLAYOUTVALUE,(void *pvUser, const char *pszName, uint64_t u64Value));
+/** Pointer to a FNPDMPCIPASSTHROUGHLAYOUTVALUE() function. */
+typedef FNPDMPCIPASSTHROUGHLAYOUTVALUE *PFNPDMPCIPASSTHROUGHLAYOUTVALUE;
+
+/** Pointer to a PCI passthrough port interface. */
+typedef struct PDMIPCIPASSTHROUGHPORT *PPDMIPCIPASSTHROUGHPORT;
+/**
+ * PCI passthrough port interface (down).
+ *
+ * Implemented by a device which passes a PCI device of the host through to the
+ * guest, for whoever manages the VM.  If the device is in a hot-plug capable
+ * slot, the PCI device of the host can be taken out of the VM and put into it
+ * while the VM exists.
+ */
+typedef struct PDMIPCIPASSTHROUGHPORT
+{
+    /**
+     * Queries how things are with the PCI device of the host.
+     *
+     * @returns VBox status code.
+     * @param   pInterface  Pointer to the interface structure containing the called function pointer.
+     * @param   pfHotPlug   Where to return whether the device is in a hot-plug capable slot.
+     *                      pfnAttach and pfnDetach work only if it is.
+     * @param   pfPresent   Where to return whether the PCI device of the host is in the VM.
+     * @param   pfInUse     Where to return whether the guest can reach the PCI device of the
+     *                      host: it is in the VM, and in a hot-plug capable slot the guest has
+     *                      the slot switched on.
+     * @thread  Any.
+     */
+    DECLR3CALLBACKMEMBER(int, pfnQueryState,(PPDMIPCIPASSTHROUGHPORT pInterface, bool *pfHotPlug, bool *pfPresent, bool *pfInUse));
+
+    /**
+     * Puts the PCI device of the host which is configured for the device into the
+     * empty hot-plug capable slot.  The guest is told and does the rest.
+     *
+     * The PCI device has to be like the one the VM was started with, or like the
+     * one it was configured for if it was started without, as far as the VM is
+     * built around that.
+     *
+     * @returns VBox status code, the reason for a failure is in the release log.
+     * @retval  VERR_NOT_SUPPORTED if the device is not in a hot-plug capable slot.
+     * @retval  VERR_ALREADY_EXISTS if there is a PCI device in the slot.
+     * @retval  VERR_MISMATCH if the PCI device is not like the one the VM is built for.
+     * @retval  VERR_VM_INVALID_VM_STATE if the VM is neither running nor suspended, which
+     *          it isn't while its state is being saved or loaded.
+     * @param   pInterface  Pointer to the interface structure containing the called function pointer.
+     * @thread  Any.
+     */
+    DECLR3CALLBACKMEMBER(int, pfnAttach,(PPDMIPCIPASSTHROUGHPORT pInterface));
+
+    /**
+     * Takes the PCI device of the host out of the hot-plug capable slot.
+     *
+     * If the guest has the slot switched on it is asked to let go of the PCI
+     * device first, the way the attention button of a slot does it.  It shows
+     * that it did by switching the slot off, which guests take five seconds and
+     * more for.
+     *
+     * @returns VBox status code.
+     * @retval  VERR_NOT_SUPPORTED if the device is not in a hot-plug capable slot.
+     * @retval  VERR_TIMEOUT if the guest didn't let go of the PCI device in time and
+     *          fForce is clear.  The PCI device is where it was.  The guest was asked
+     *          and can still switch the slot off, which leaves the PCI device in the slot.
+     * @param   pInterface  Pointer to the interface structure containing the called function pointer.
+     * @param   cMsWait     How long to wait for the guest to let go of the PCI device.
+     * @param   fForce      Whether the PCI device is taken away from the guest if it didn't
+     *                      let go of it in time.
+     * @thread  Any but an EMT, which is needed for the guest to do its part.
+     */
+    DECLR3CALLBACKMEMBER(int, pfnDetach,(PPDMIPCIPASSTHROUGHPORT pInterface, RTMSINTERVAL cMsWait, bool fForce));
+
+    /**
+     * Queries what the VM is built from for a function of the PCI device of the
+     * host: the values which go into the configuration of the device for
+     * starting the VM without the PCI device, under the names they have there.
+     *
+     * @returns VBox status code.
+     * @retval  VERR_NOT_FOUND if the device has no such function.
+     * @param   pInterface  Pointer to the interface structure containing the called function pointer.
+     * @param   iFunction   The function.
+     * @param   pfnValue    The function to call for each value.
+     * @param   pvUser      The user argument for it.
+     * @thread  Any.
+     */
+    DECLR3CALLBACKMEMBER(int, pfnQueryLayout,(PPDMIPCIPASSTHROUGHPORT pInterface, uint32_t iFunction,
+                                              PFNPDMPCIPASSTHROUGHLAYOUTVALUE pfnValue, void *pvUser));
+} PDMIPCIPASSTHROUGHPORT;
+/** PDMIPCIPASSTHROUGHPORT interface ID. */
+#define PDMIPCIPASSTHROUGHPORT_IID              "417f6b17-2db1-4dce-87a2-f3555348b896"
+
+
 /** Pointer to a VFS connector interface. */
 typedef struct PDMIVFSCONNECTOR *PPDMIVFSCONNECTOR;
 /**

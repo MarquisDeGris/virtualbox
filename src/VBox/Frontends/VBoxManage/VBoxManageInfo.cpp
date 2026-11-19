@@ -2778,6 +2778,26 @@ HRESULT showVMInfo(ComPtr<IVirtualBox> pVirtualBox,
                      RTPrintf("AttachedHostPCI=%s,%s\n", szHostPCIAddress, szGuestPCIAddress);
                  else
                      RTPrintf(Info::tr("   Host device %ls at %s attached as %s\n"), DevName.raw(), szHostPCIAddress, szGuestPCIAddress);
+
+                 /* A running VM knows whether the device is in it right now. */
+                 if (pConsole)
+                 {
+                     BOOL fHotPluggable = FALSE;
+                     BOOL fPresent      = FALSE;
+                     BOOL fInUse        = FALSE;
+                     if (SUCCEEDED(pConsole->GetHostPCIDeviceState(uHostPCIAddress, &fHotPluggable, &fPresent, &fInUse)))
+                     {
+                         if (details == VMINFO_MACHINEREADABLE)
+                             RTPrintf("AttachedHostPCIState=%s,%s,%s,%s\n", szHostPCIAddress,
+                                      fHotPluggable ? "hotplug" : "fixed", fPresent ? "present" : "absent",
+                                      fInUse ? "inuse" : "unused");
+                         else
+                             RTPrintf(Info::tr("      Hot-pluggable: %s, in the VM: %s, reachable for the guest: %s\n"),
+                                      fHotPluggable ? Info::tr("yes") : Info::tr("no"),
+                                      fPresent      ? Info::tr("yes") : Info::tr("no"),
+                                      fInUse        ? Info::tr("yes") : Info::tr("no"));
+                     }
+                 }
              }
 
              if (assignments.size() > 0 && (details != VMINFO_MACHINEREADABLE))
