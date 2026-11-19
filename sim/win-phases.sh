@@ -39,6 +39,7 @@ START_WAIT=${WIN_START_WAIT:-900}
 SHUTDOWN_WAIT=240
 SHOTS=0
 BUTTON_WORKS=unknown
+PARAVIRT=${WIN_PARAVIRT:-none}
 STALL_EVERY=${WIN_STALL_EVERY:-60}
 STALL_T=0
 STALL_N=
@@ -261,6 +262,13 @@ create_vm() # <cpus> <MiB> <disk> <DVD or emptydrive> <DVD or emptydrive> <host 
         --vm-execution-engine native-api --nic1 none --audio-enabled off \
         --graphicscontroller vboxsvga --vram 64 --uart1 0x3f8 4 --uartmode1 file "$SERIAL" \
         --boot1 dvd --boot2 disk --boot3 none --boot4 none
+    # With KVM VirtualBox cannot give a Windows guest the Hyper-V interface its
+    # guest type asks for and gives it the minimal one.  Windows then knows
+    # of a hypervisor, does not trust the time stamp counter, keeps its time
+    # by the HPET of VirtualBox instead and takes several times as long for
+    # everything (run 228: 62 million reads of the HPET during setup).  With
+    # no such interface it takes the time stamp counter (run 226).
+    run modifyvm "$VM" --paravirt-provider "$PARAVIRT"
     run storagectl "$VM" --name sata --add sata --controller IntelAhci --portcount 3
     if    ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$3" \
        || ! run storageattach "$VM" --storagectl sata --port 1 --device 0 --type dvddrive --medium "$4" \
@@ -382,11 +390,27 @@ guest_shutdown()
     dvd emptydrive
 }
 
+# What the I/O APIC of the VM has for its pins, and how often it has passed
+# on which vector.  The interrupt of the ACPI hardware, which a press of the
+# power button raises, is pin 9: whether the guest has it masked, whether it
+# is waiting there (irr), whether the guest has still to say that it is done
+# with the one before (rirr).
+irq_state() # <when>
+{
+    echo "    ---- the I/O APIC of the VM, $1:"
+    VBM_TIMEOUT=60 vbm debugvm "$VM" info ioapic 2>&1 | tr -d '\r' | sed -n '/Redirection Table/,$p' | grep -a -v '^ *$' \
+        | head -n 30 | cut -c1-130 | sed 's/^/    | /'
+    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/Devices/ioapic/*' 2> /dev/null \
+        | grep -a -o -E '<Counter c="[1-9][0-9]*"[^>]*name="[^"]*"' \
+        | sed -E 's/^<Counter c="([0-9]+)".*name="([^"]*)"$/\2: \1/' | sed 's/^/    | /'
+}
+
 # The power button.  Windows is set to shut down when it is pressed
 # (win/first.cmd), so the VM powering off shows that the press arrived.
 power_button() # <what>
 {
     [ "$(vmstate)" = running ] || return 1
+    irq_state "before the power button is pressed"
     run controlvm "$VM" acpipowerbutton
     if wait_off 150; then
         stage "$1" ok
@@ -396,6 +420,7 @@ power_button() # <what>
     fi
     stage "$1" FAILED "the VM is in state '$(vmstate)' after 150 s"
     BUTTON_WORKS=no
+    irq_state "150 s after the power button was pressed"
     shot
     return 1
 }
@@ -494,33 +519,57 @@ phase_restart()
     [ "$(vmstate)" = poweroff ]
 }
 
-# For comparison, should Windows not have shut down when the power button was
-# pressed: the same Windows in a VM without the slot, as VMs are without this
-# work.  The disk goes back to what it was afterwards, so that Windows does
+# What Main sets for the ACPI device when a VM has a hot-plug capable slot:
+# the firmware tables hand native hot-plug to the guest.  Setting it here goes
+# on top of what Main does.
+ACPI_KEY=VBoxInternal/Devices/acpi/0/Config/PciExpressNativeHotPlug
+
+# One VM for comparison: the installed Windows in a VM which differs from the
+# one of this work in what is given, and the power button pressed there.  The
+# disk and the VM go back to what they were afterwards, so that Windows does
 # not carry what it made of that VM into what follows.
+control_vm() # <phase> <what the VM is> <the port with the slot: yes|no> <native hot-plug in the firmware tables: 0|1>
+{
+    local works=$BUTTON_WORKS
+    PHASE=$1
+    echo "---- for comparison: $2"
+    stalls_reset
+    if [ "$3" = no ]; then
+        run modifyvm "$VM" --pci-detach "$FAKE_ADDR"
+        run setextradata "$VM" VBoxInternal2/HostPCIHotPlug
+    fi
+    case "$3:$4" in
+        yes:1|no:0) ;;
+        *) run setextradata "$VM" "$ACPI_KEY" "$4" ;;
+    esac
+    if start_and_report "for comparison: Windows starts in $2" "$START_WAIT"; then
+        serial_show '^WIN: (ROOTBUS |ROOTBUS-PROP .*HotPlugControl|PORT |DEVS |PROBLEMS |BUGCHECKS |BUTTON)' 20
+        guest_goes_on "for comparison: Windows keeps running in $2" 120
+        power_button "for comparison: Windows shuts down when the power button is pressed in $2"
+    fi
+    BUTTON_WORKS=$works
+    guest_shutdown
+    settle
+    run setextradata "$VM" "$ACPI_KEY"
+    run snapshot "$VM" restore before-control
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+}
+
+# For comparison, should Windows not have shut down when the power button was
+# pressed: the same Windows in VMs which have one half of what the work adds,
+# the other half, and neither.
 phase_control()
 {
     PHASE=win-control
     settle
     if ! run snapshot "$VM" take before-control; then
-        stage "for comparison: the installed Windows in a VM without the slot" skipped "no snapshot"
+        stage "for comparison: the installed Windows in other VMs" skipped "no snapshot"
         return
     fi
-    run modifyvm "$VM" --pci-detach "$FAKE_ADDR"
-    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug
-    if start_and_report "for comparison: the installed Windows starts in a VM without the slot" "$START_WAIT"; then
-        serial_show '^WIN: (ROOTBUS |ROOTBUS-PROP .*HotPlugControl|PORT |DEVS |PROBLEMS |BUGCHECKS |BUTTON)' 20
-        guest_goes_on "for comparison: that guest keeps running" 120
-        local works=$BUTTON_WORKS
-        power_button "for comparison: that guest shuts down when the power button is pressed"
-        BUTTON_WORKS=$works
-    fi
-    guest_shutdown
-    settle
-    run snapshot "$VM" restore before-control
+    control_vm win-control-port "a VM with the port and its slot, native hot-plug not handed over" yes 0
+    control_vm win-control-acpi "a VM without the port, native hot-plug handed over" no 1
+    control_vm win-control "a VM without the slot, as VMs are without this work" no 0
     run snapshot "$VM" delete before-control
-    run modifyvm "$VM" --pci-attach "$FAKE_ADDR@0000:01:00.0"
-    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
 }
 
 mode_runner()
