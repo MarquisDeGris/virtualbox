@@ -365,6 +365,40 @@ after a press, and presses the button in three more VMs: one with the
 port and its slot where the firmware tables do not hand native hot-plug
 over, one without the port where they do, and one with neither.
 
+**Run 229** (2026-11-19, `scratch/timer-wakeup`, 72 minutes): the Windows
+VM without a paravirtualization interface.
+
+| What | Result |
+|------|--------|
+| The time Windows takes | setup 569 seconds, a start 63 seconds, on the same kind of runner as run 228 (an Intel processor). Run 226 was faster still and had an AMD processor: there Windows did not have its tick from the HPET of VirtualBox, here it has, 800 times a second |
+| The power button in the VM with the slot | Windows shuts down |
+| The power button after a saved state was loaded | Windows does not shut down. The I/O APIC of the VM, read from the outside: the entry of pin 9, which is the interrupt of the ACPI hardware, has its remote IRR bit set before the press already, and after the press the interrupt is waiting in addition |
+| The power button in the three VMs for comparison | Windows shuts down in each |
+| Windows in the virtual machine standing in for a host, with the drive in the slot | no report of the guest within 50 minutes again: 5.9 million exits, 880000 interrupts of the HPET |
+
+The power button, then, is not about the slot. With KVM the local APICs
+are those of the kernel, which passes the EOI of a level-triggered
+interrupt on to the I/O APIC of VirtualBox only for vectors it was told
+of, and it is told when the guest writes an entry of the redirection
+table. After a saved state was loaded the entries are there and the
+kernel was not told: the first interrupt of such a pin is delivered, the
+I/O APIC never learns that the guest is done with it, and it is the last
+one. A Linux guest does not depend on that for this pin. This is in
+VirtualBox as it is without this work (`ioapicR3LoadExec` in
+`DevIoApic.cpp`, `apicR3KvmIoApicRteChanged` in
+`APICR3Nem-linux-x86.cpp`). One more commit on `scratch/timer-wakeup`
+(`f563e7f8`) tells the APIC about the loaded entries, on Linux hosts
+with KVM only; the check which failed is what it has to turn. Why the
+press did nothing in run 228, in a VM whose state had not been loaded,
+is not known; the I/O APIC is shown before every press from now on.
+
+Windows where the drive is: given up on runners with an Intel processor,
+where it does not get through a start with either setting. On the AMD
+processor of run 226 a start took half a million exits, which would be
+some ten minutes there; the part runs when a run happens to get such a
+runner and is skipped otherwise. Until it has run, Windows with a device
+in the slot is for the hardware test alone.
+
 ### The management and the review, 13 to 15 November
 
 From 2026-11-13 to 2026-11-15 GitHub did not start workflow runs for this
@@ -861,16 +895,17 @@ harness since WP5, saved states since the fourth part of WP6.
    [INSTALL.md](INSTALL.md) says how to build and install.
 2. With every change to the code: the simulation with `sim_strict: yes`
    next to the tests and the sanitizers.
-3. Run 229 (`winsim`, for finding out: `sim_strict: no`) on
-   `scratch/timer-wakeup`, the Windows VM without a paravirtualization
-   interface: the power button looked at from the outside and in three
-   VMs for comparison, then Windows in the virtual machine standing in
-   for a host, with the drive in the slot.
-4. The commit about the timer did what it is for in run 228. Before it
-   goes into the merge request as a commit of its own: the tests, the
-   strict simulation and the sanitizers for it. The power button with
-   Windows comes first if it turns out to be about this work.
-5. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
+3. Run 230 (`winsim`, for finding out: `sim_strict: no`) on
+   `scratch/timer-wakeup` with the commit about the I/O APIC: Windows has
+   to shut down on the power button after a saved state was loaded.
+   Windows where the drive is, if the runner has an AMD processor.
+4. The two commits which are not about the device (the timer, the I/O
+   APIC after a state was loaded) go into the merge request as commits
+   of their own after the tests, the strict simulation and the
+   sanitizers have passed with them.
+5. The hardware test gets told: `--paravirt-provider none` for a Windows
+   guest, and what the two commits are for.
+6. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
 
@@ -945,6 +980,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-17 | What a guest made of the slot is also read from the outside: the slot registers through the debug interface of the VM | It does not depend on what the guest tells, so it is the same check for Linux and Windows, and it is the one sign that the hot-plug driver of Windows runs the slot which can be had without a device |
 | 2026-11-18 | A VM which stands still because the thread of its CPU missed the notification of a timer is dealt with here: the timer callback notifies again (a commit of its own, Linux hosts only), and the Windows part of the simulation watches for it | It is not part of PCI passthrough. But a guest with a device of the host runs on KVM, where this is, the guest the work is for is Windows, which ran into it, and a person testing on hardware would take a guest which stops for one the device broke. The smallest change which bounds it was chosen. Closing the window in the KVM backend takes one of the two ways KVM has for it (`immediate_exit`, or the signal blocked outside `KVM_RUN`); both change the loop every exit of every guest goes through, and nothing but the simulation is there for trying that |
 | 2026-11-19 | The Windows guest of the simulation gets no paravirtualization interface (`--paravirt-provider none`) | With KVM the default for a Windows guest type ends as the minimal interface, with which Windows keeps its time by the HPET and takes seven times as long (run 228 against run 226). In the virtual machine standing in for a host, where an exit costs a millisecond, Windows does not get through a start that way. Run 228 stays as what is known about the default |
+| 2026-11-19 | Level-triggered interrupts which stop after a saved state was loaded, with KVM, are dealt with here as well: the I/O APIC tells the APIC about the loaded entries (a commit of its own, Linux hosts with KVM only) | As with the timer: not part of PCI passthrough, but in the way of the guest the work is for, on the engine the work needs, and a check of the simulation fails because of it. A VM with an empty slot can be saved and loaded, which is part of this work, and its guest should have a power button afterwards |
+| 2026-11-19 | Windows where the drive is (the fourth part of the simulation) runs on runners with an AMD processor only | Two runs on Intel processors spent 70 minutes each on a Windows which did not get through its start at that depth, with either paravirtualization setting. What is known of AMD is one run on the runner itself (226) |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1111,5 +1148,6 @@ slot.
 | 226 | `pci-passthrough-hotplug-v1` @ `dd43ddf3` | winsim, not strict | passed | 31 minutes. The first Windows guest: Windows Server 2025 installed unattended into a VM with the empty hot-plug capable slot, on the runner. 41 checks, 40 pass: the root bridge is `PNP0A08` to Windows, the firmware hands native hot-plug over, the PCI driver of Windows runs the port, the slot registers show its hot-plug driver running the slot (the same check for the Linux guest passes too), saved state, second start. One fails: Windows did not shut down when the power button was pressed; not yet known why. See "A Windows guest" above |
 | 227 | `pci-passthrough-hotplug-v1` @ `dd43ddf3` | winsim, not strict | passed | 74 minutes. The part with the Linux guest passes with its new checks: the slot registers read from the outside, and the power button, whose press arrives in the guest with and without the slot and after a saved state. The installation of Windows stood still 40 seconds after the VM was started and was given up after 50 minutes: the thread of the CPU had missed the notification of a timer, which is in VirtualBox as it is without this work (see run 227 under "Installation and the simulation"). Windows with the drive in the slot was not reached |
 | 228 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 161 minutes, AWS. The head of the merge request plus the commit about the timer: builds, the 56 tests pass, the part with the Linux guest passes. Windows installs with no VM standing still, VirtualBox making up for a missed notification every ten to twenty seconds. Windows is seven times as slow as in run 226 (the paravirtualization interface, see run 228 under "Installation and the simulation"). The power button: Windows does not shut down in the VM with the slot and does in one without. Windows in the virtual machine standing in for a host did not get to its report in 50 minutes |
+| 229 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 72 minutes, AWS. The Windows VM without a paravirtualization interface: setup in 569 seconds, a start in 63. The power button: Windows shuts down in the VM with the slot and in three VMs for comparison, and does not after a saved state was loaded, where the entry of the I/O APIC for the interrupt of the ACPI hardware has its remote IRR bit left set (see run 229 under "Installation and the simulation"). Windows in the virtual machine standing in for a host did not get to its report in 50 minutes again |
 
 Run numbers are those GitHub shows for the `build` workflow.
