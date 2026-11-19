@@ -465,6 +465,21 @@ What changes with it, all in the simulation and nothing in the code:
 The next run is for finding out again (`sim_strict: no`): the scripts
 have changed too much for a run which fails by them.
 
+**Run 232** (2026-11-19, `allsim`, for finding out, the same commit, 43
+minutes, an Intel processor): all 112 checks pass, none fails.
+
+| What | Result |
+|------|--------|
+| The Linux guest, on the runner and where the drive is | all 80 checks pass with the two commits which are not about the device: 16 on the runner, 64 in the virtual machine standing in for a host, where the six VMs took two minutes each and the whole part 690 seconds, as in run 224 |
+| Windows on the runner | all 27 checks pass again, on an Intel processor this time: setup in 560 seconds, a start in 72, the power button also after a saved state was loaded |
+| Windows where the drive is | skipped, the runner had no AMD processor. What was changed for it after run 231 has not run yet |
+| How the VMs got on | every VM told. Nothing was slow, so the report has nothing to explain yet. One thing it corrects: how far the emulated timers are behind says little by itself. With the Linux guest on the runner they are behind by two thirds of the time the VM has run, in every run since 222 and before the commit about the timer, in VMs which are as fast as they get. With KVM VirtualBox looks at its timers every 10 milliseconds while the guest waits in the kernel, and a guest which keeps one of them set for less than that has it late every time. The two slow VMs of run 231 are still not explained |
+
+With this run the two commits have been through everything the head of
+the merge request has been through with the Linux guest, and through
+Windows on both kinds of processor. What is left before they go into the
+merge request is the run with the sanitizers.
+
 ### The management and the review, 13 to 15 November
 
 From 2026-11-13 to 2026-11-15 GitHub did not start workflow runs for this
@@ -959,22 +974,22 @@ harness since WP5, saved states since the fourth part of WP6.
 1. The hardware test ([HWTEST.md](HWTEST.md)), which needs a person with
    the hardware. The merge request is marked ready for it;
    [INSTALL.md](INSTALL.md) says how to build and install.
-2. With every change to the code: the simulation with `sim_strict: yes`
-   next to the tests and the sanitizers.
-3. Run 232 (`allsim`, for finding out: `sim_strict: no`) on
-   `scratch/timer-wakeup` @ `f563e7f8`, with the simulation as changed
-   after run 231: every check with the Linux guest has to pass with the
-   two commits, as it did without them in run 224; a slow VM tells why
-   it is slow. Windows where the drive is, if the runner has an AMD
-   processor.
-4. After it the sanitizers on the same commit. Then the two commits
-   which are not about the device (the timer, the I/O APIC after a state
-   was loaded) go into the merge request as commits of their own. They
-   do not go in before a run has all checks with the Linux guest
-   passing with them.
-5. The hardware test gets told: `--paravirt-provider none` for a Windows
-   guest (in HWTEST.md already), and what the two commits are for.
-6. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
+2. With every change to the code: the simulation next to the tests and
+   the sanitizers, with `sim_strict: yes` or `linux` once its scripts
+   have been through a run as they are.
+3. The sanitizers on `scratch/timer-wakeup` @ `f563e7f8` (the next run,
+   on 2026-11-20: four runs on the 19th were enough). Run 232 has every
+   check with the Linux guest passing with the two commits.
+4. Then the two commits which are not about the device (the timer, the
+   I/O APIC after a state was loaded) go into the merge request as
+   commits of their own, with its description and HWTEST.md saying what
+   they are for.
+5. Windows where the drive is: what was changed after run 231 runs when
+   a run for something else gets an AMD processor. No runs for it alone
+   until then; it stays with the hardware test.
+6. The two slow VMs of run 231: every VM reports its pace now; the next
+   slow one is looked at.
+7. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
    first interrupt), events in the API for a device coming and going, a
    device pulled without notice and a device error in the simulation.
 
@@ -1224,5 +1239,6 @@ slot.
 | 229 | `scratch/timer-wakeup` @ `20fd927d` | winsim, not strict | passed | 72 minutes, AWS. The Windows VM without a paravirtualization interface: setup in 569 seconds, a start in 63. The power button: Windows shuts down in the VM with the slot and in three VMs for comparison, and does not after a saved state was loaded, where the entry of the I/O APIC for the interrupt of the ACPI hardware has its remote IRR bit left set (see run 229 under "Installation and the simulation"). Windows in the virtual machine standing in for a host did not get to its report in 50 minutes again |
 | 230 | `scratch/timer-wakeup` @ `f563e7f8` | winsim, not strict | passed | 106 minutes, Azure, an AMD processor. The commit about the I/O APIC on top: builds without a warning, the 56 tests pass, and Windows shuts down on the power button after a saved state was loaded. All 47 checks on the runner pass, with the Linux guest and with Windows (setup in 414 seconds, a start in 37). Windows in the virtual machine standing in for a host ran on an AMD processor for the first time and did not get to its report in 50 minutes: that machine did not tell of an invariant time stamp counter, so Windows read the time from the HPET (see run 230 under "Installation and the simulation") |
 | 231 | `scratch/timer-wakeup` @ `f563e7f8` | allsim, strict for the Linux guest | **failed** | 93 minutes, Azure, an AMD processor. The first run of the flavor and of the changed scripts. Builds, the 56 tests pass, everything on the runner passes with the Linux guest and with Windows. Where the drive is, 60 of 64 checks with the Linux guest pass and four fail, all four waits which ended too early: two of the six VMs were three to eight times as slow as usual, with the emulated timers seconds behind, for a reason not yet known. Windows where the drive is no longer reads the HPET, shows its start screen and was not at its disk driver after 40 minutes (see run 231 under "Installation and the simulation") |
+| 232 | `scratch/timer-wakeup` @ `f563e7f8` | allsim, not strict | passed | 43 minutes, AWS, an Intel processor. The simulation as changed after run 231. All 112 checks pass: 80 with the Linux guest (16 on the runner, 64 where the drive is, in 690 seconds), 27 with Windows on the runner (setup in 560 seconds, a start in 72). Windows where the drive is was skipped for the processor. The tree builds, the 56 tests pass |
 
 Run numbers are those GitHub shows for the `build` workflow.
