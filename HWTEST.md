@@ -86,7 +86,10 @@ there:
   the kernel does not have; the lines are in order.
 - The readme of the backend calls AMD processors experimental and has a
   note about split lock detection on Intel processors; the log of the VM
-  says when the second applies to the host.
+  says when the second applies to the host. In the simulation the VMs
+  with the device, Linux and Windows, have run on an AMD processor on
+  the branch for 7.2 (run 261); the IOMMU there was an emulated one of
+  Intel, so a host with an IOMMU of AMD is new ground all the same.
 
 The branch has two commits which are not about the device. Every VM with
 KVM as execution engine on a Linux host gets them, and a Windows guest in

@@ -44,7 +44,7 @@ because of that. First of it: the same work on the maintenance lines 7.2
 and 7.1, see "The maintenance branches". On those lines the simulation
 runs with the KVM backend of Cyberus Technology, and every check of it
 passes on both (runs 253 and 254, 150 checks each, and on 7.1 run 258
-with 155 and run 259 with 172): the Linux guest
+with 155 and run 259 with 172, on 7.2 run 261 with 172): the Linux guest
 with the device, and Windows, which takes a drive of the host in the
 hot-plug capable slot, lets go of it and takes it again. In one earlier
 run Windows stopped after letting go of the drive, which is not
@@ -979,12 +979,51 @@ the device testcase with its 56 tests.
 - This run happened to have an AMD processor and no simulation in it;
   the VMs with a device have still not had one on these branches.
 
+**Run 261** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f`, 38 minutes, AMD EPYC
+9V45): the branch for 7.2 with the checks which came since its last run
+(a VM behind NAT, an appliance exported and imported, Windows in a VM
+with a TPM 2.0, the testcases of the tree), and the first run of a
+branch with this backend on an AMD processor since the two changes about
+the register. **172 passed, none failed, none skipped.**
+
+- It builds (5 minutes 30 seconds on top of the cached build of
+  upstream's 7.2 branch), and the 15 testcases of the tree which this
+  branch can run pass. The one of the guest control service is as
+  upstream has it here and is not run.
+- **The VMs inside the virtual machine standing in for a host run on an
+  AMD processor.** In runs 247 and 249, on such a processor, every VM
+  there stopped at its first step, for a register the backend handed to
+  a kernel which does not take it. Each of the seven VMs has the line
+  now which the second change about the register writes (`NEM: The
+  kernel does not take IA32_SPEC_CTRL for the guest (0), the register is
+  left to it`) and runs: all 67 checks with the Linux guest and the
+  device pass, and **all 35 with Windows and the drive in the slot**
+  (Windows starts in 521 seconds, lets go of the drive 7 seconds after
+  being asked, takes it again, has it taken by force and takes it once
+  more). The IOMMU there is an emulated one of Intel on this processor
+  too; an IOMMU of AMD has still not been part of anything.
+- New on this branch and passing: the VM behind NAT, the appliance (the
+  import warns about the serial port, the imported VM has no file for
+  it, no shared folder and none of the extra data, has the extra data
+  with `--options KeepExtraData`, and boots the guest), and Windows with
+  the TPM 2.0 (starts in 25 seconds, uses the TPM with its own driver,
+  goes on after a saved state is loaded). This is the TPM device with
+  the command buffer interface as 7.2 has reworked it.
+- Windows on the runner: installed in 260 seconds, started in 26. When
+  its state is saved and loaded the log has the eleven lines about
+  registers of the Hyper-V interface which the kernel does not have, as
+  before; no VM of the run ended with a guru meditation.
+- Windows letting go of a device has now passed in six runs out of
+  seven on the two branches, on Intel processors and on this one.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
 message), two commits about the register, and one about the Hyper-V
 registers in a saved state. It is built with `configure --with-kvm`.
-Every check of the simulation passes on it since run 253.
+Every check of the simulation passes on it since run 253; run 261 went
+through all 172 there are now, on an AMD processor.
 
 State of `pci-passthrough-hotplug-7.1-kvm` (pushed): the 7.1 branch as
 above, the backend in its last version for the 7.1 line (2025-11-03, two
@@ -1668,13 +1707,15 @@ harness since WP5, saved states since the fourth part of WP6.
    the testcases of the host services, with an appliance exported and
    imported, and with Windows in a VM with a TPM 2.0: all 172 checks
    pass, and run 260 built the rewritten testcase of the guest control
-   service and ran 16 testcases of the tree, which all pass. Left, in
-   this order: the same checks once on the branch for 7.2; the
-   sanitizers on the branches without the backend; a run on an AMD
-   processor, which no VM with a device has had on these branches yet.
-5. Windows where the drive is: passed in runs 250, 253, 254, 258 and 259
-   and stopped after the first removal in run 251, on the branches with the
-   backend of Cyberus Technology, Intel processors. Every run on such a
+   service and ran 16 testcases of the tree, which all pass. Run 261 had
+   the same checks on the branch for 7.2, on an AMD processor, which the
+   VMs with a device had not run on since the changes about the
+   register: all 172 pass. Left: the sanitizers on the branches without
+   the backend.
+5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259
+   and 261 and stopped after the first removal in run 251, on the
+   branches with the backend of Cyberus Technology; run 261 had an AMD
+   processor, the others Intel ones. Every run on such a
    branch goes through it again and tells what the VM shows of the guest
    when it stops; until it is understood, the hardware test is where a
    Windows guest letting go of a device counts.
@@ -1980,5 +2021,6 @@ slot.
 | 258 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed | 42 minutes, Intel Xeon Platinum 8573C. The same head as run 257. Every check passes, 155 of them: the five new ones with a VM behind NAT (address, ping, a file fetched through the NAT library with the fixes taken over from 7.2), the Linux guest with the device, Windows with the empty slot, and Windows where the drive is, which passes for the fourth time in five runs. See "Run 258" |
 | 259 | `pci-passthrough-hotplug-7.1-kvm` @ `9e858a53` | allsim, exploring | passed; one testcase outside of the simulation did not run | 57 minutes, Intel Xeon 6975P-C. With the size check in the ACPI device. Every check of the simulation passes, 172 of them: new are an appliance exported and imported (8) and Windows in a VM with a TPM 2.0 (9); Windows where the drive is passes for the fifth time in six runs. Seven of the eight testcases of the host services pass; `tstGuestControlSvc` ends in its first connect, as it does on every branch of upstream, and was rewritten after the run. See "Run 259" |
 | 260 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | tests, exploring | passed | 15 minutes, AMD EPYC 7763. The build and the testcases, no simulation. The first build of the rewritten `tstGuestControlSvc`: it passes. All 16 testcases of the tree which the workflow runs since this run pass (host services, image formats, the audio mixing buffer, the USB mouse, the switch of the internal network), and the device testcase. See "Run 260" |
+| 261 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 38 minutes, AMD EPYC 9V45. Every check passes, 172 of them, the first time for this branch with the VM behind NAT, the appliance, the TPM 2.0 and the testcases of the tree (15 pass). The first run on an AMD processor in which the VMs inside the virtual machine standing in for a host run on this backend: the second change about the register does what it is for, and Windows where the drive is passes there too, for the sixth time in seven runs. See "Run 261" |
 
 Run numbers are those GitHub shows for the `build` workflow.
