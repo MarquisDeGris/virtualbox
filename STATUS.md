@@ -1542,12 +1542,17 @@ harness since WP5, saved states since the fourth part of WP6.
    checks of the Linux guest (run 251). On both every check passes with
    the change to the backend about the Hyper-V registers in a saved
    state (runs 253 and 254), on 7.1 with what was taken over from 7.2.
-   Left, in this order: the build of `backports-7.1`; a run of the 7.1
-   one with the NAT library, the import change and the VM with a
-   network; merge requests in the fork for the three branches; the
+   Done since: `backports-7.1` builds (run 256), the 7.1 one has run
+   with the NAT library and a VM with a network (run 258), and the
+   three branches have their merge requests in the fork (#2, #3, #4).
+   Left, in this order: the run which is under way since 18:10 UTC on
+   2026-11-20 (the first with the size check in the ACPI device, without
+   the 2D video acceleration, with the testcases of the host services,
+   with an appliance exported and imported, and with Windows in a VM
+   with a TPM 2.0); the same checks once on the branch for 7.2; the
    sanitizers on the branches without the backend; a run on an AMD
    processor, which no VM with a device has had on these branches yet.
-5. Windows where the drive is: passed in runs 250, 253 and 254 and
+5. Windows where the drive is: passed in runs 250, 253, 254 and 258 and
    stopped after the first removal in run 251, on the branches with the
    backend of Cyberus Technology, Intel processors. Every run on such a
    branch goes through it again and tells what the VM shows of the guest
@@ -1652,6 +1657,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | The work goes on under the assumption that the hosts it is meant for can run VMs with KVM. Running the device on the VirtualBox kernel driver stays unstarted, and the branches with the KVM backend of Cyberus Technology are the ones the next steps are for | Who this is for has no answer to that question yet and said to assume it. It is an assumption: should the answer be the other one, what was done for these branches stays right for hosts with KVM, and the decision of the same day about the kernel driver is taken up again |
 | 2026-11-20 | The Windows guest which does not go on after a saved state is loaded, on the KVM backend of Cyberus Technology, is looked into after all, which takes back the decision of the same day | Reading the backend showed where it comes from in a few lines: it saves and loads the registers of the Hyper-V interface as the first virtual CPU has them, and the reference time starts anew in the VM a state is loaded into. A VM with an empty slot can be saved and loaded, which is part of this work, and Windows is the guest it is for |
 | 2026-11-20 | The branches for 7.1 take over from the 7.2 branch what upstream put there and not on 7.1, as far as it is about code a Linux host runs, applies, and can be built here; what was not taken is listed with the reason | 7.1 is the line this was asked for, upstream has ended its support, and its security updates since April 2026 are for 7.2 only. Nobody outside upstream can make 7.1 the equal of 7.2 in that, and the notes say so; what can be had by taking over single changes is had |
+| 2026-11-20 | The reworks which 7.2 has from 2025 and 7.1 never got (the buffers of USB requests, the command buffer interface of the TPM with the change to the VMM it needs, the E1000, the 3D graphics) are not ported to the branches for 7.1 | They are hundreds of lines each, depend on each other and on the VMM of 7.2, upstream itself did not take them to 7.1 while it supported it, and nothing here could show that a port of them is right. The notes name them as what separates 7.1 from 7.2, and who can choose takes 7.2 |
+| 2026-11-20 | The branches for 7.1 are built without the 2D video acceleration for guests (`VBOX_WITH_VIDEOHWACCEL` empty in `LocalConfig.kmk`) | The lines after 7.1 no longer have that code at all, a guest with a current Windows does not use it, and leaving it out is a switch of the build and no change to the source |
+| 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
