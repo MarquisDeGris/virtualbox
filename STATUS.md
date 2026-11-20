@@ -871,16 +871,44 @@ which is about code a Linux host runs was then tried on 7.1:
     with a conflict, and nothing here runs that engine, so it could not
     be tried. They are for VMs on the kernel driver of VirtualBox, on
     which the device of this work does not run.
-  - The NAT library. 7.2 went from libslirp 4.8.0 to 4.9.5 and has
-    changes of its own in it (r175239 is about code 7.1 does not have);
-    7.1 has 4.8.0. The simulation has no VM with a network, so the move
-    could not be tried either.
+  - The move of the NAT library to the version of 7.2. 7.2 went from
+    libslirp 4.8.0 to 4.9.5 and has changes of its own in it (r175239 is
+    about code 7.1 does not have); the code around it differs between
+    the lines by tens of thousands of lines, so the library cannot be
+    exchanged. What its changelog lists under "Security" between the two
+    versions was taken instead, see below.
   - What the source tree of 7.1 does not have: the remote desktop
     server and the USB webcam, card reader and network devices, which
     were in the extension pack then.
   - Windows hosts, the Guest Additions, the user interface, and the
     other libraries the tree carries, which a Linux build takes from the
     distribution.
+- From the NAT library (added later on 2026-11-20): the four entries its
+  changelog has under "Security" between 4.8.0 and 4.9.5, one of them
+  with a CVE number of the library's own, and one fix which belongs with
+  them, put into the copy of 4.8.0 as 7.2 has them in its copy of 4.9.5
+  (urgent data of TCP, the header length of reassembled IP fragments,
+  the length of IPv6 packets, OEM commands of NC-SI, the DHCPv6 reply).
+  Not built yet.
+- One more from Main, found on a second pass through what had been set
+  aside by its subject line: r175077, with which the extra data of an
+  appliance is imported only when the new import option `KeepExtraData`
+  asks for it. Taken without its part for the user interface, which
+  does not apply to 7.1 as it is and is not built here. The rest of
+  that second pass was on 7.1 already under another revision, or about
+  nothing but compiler warnings, or new features.
+- The same without the passthrough work: branch `backports-7.1`, five
+  commits on upstream's 7.1 branch (the 25 changes, r175241, the result
+  of `Console::i_saveState`, the NAT library, r175077), for a merge
+  request of its own in the fork. Who is on 7.1 and does not want the passthrough
+  work can take these alone.
+- For trying it: the simulation has a VM with a virtio network adapter
+  behind NAT since then (an address by DHCP, a ping to the gateway, a
+  file fetched from the runner and compared), which goes through the
+  NAT library and the VirtIO network device. A branch without an
+  execution engine cannot run VMs in the workflow, so what is on
+  `backports-7.1` is run as part of `pci-passthrough-hotplug-7.1-kvm`,
+  which has the same commits.
 - What this does not make of 7.1: the line which has what 7.2.22 has.
   Upstream does not say which change belongs to which of its advisories,
   the comparison goes by commit messages, and a change can depend on
