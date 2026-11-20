@@ -22,8 +22,9 @@ What of this was done by somebody or something, and what was not:
 | `pci-passthrough-hotplug-v1` | the development line of VirtualBox (`main`) | **The one to build and try.** Everything in this file and in HWTEST.md is about it |
 | `pci-passthrough-hotplug-7.2` | the maintenance branch of 7.2 (7.2.22) | The same work on that base. It builds and its tests pass. **No VM with a passed through device runs on it**, see below |
 | `pci-passthrough-hotplug-7.1` | the maintenance branch of 7.1 (7.1.18) | As for 7.2: it builds and its tests pass, no VM with a device runs on it |
-| `pci-passthrough-hotplug-7.2-kvm` | the branch for 7.2 with the KVM backend Cyberus Technology publishes for VirtualBox | The released line 7.2 with an engine the device runs on. The simulation ran on it with a device and a Linux guest. Not what Oracle ships: see below |
-| `pci-passthrough-hotplug-7.1-kvm` | the branch for 7.1 with that backend in its last version for 7.1 | The same for 7.1. The simulation ran on it with a device and a Linux guest, all checks passing, and twice with Windows and the drive in the hot-plug capable slot: once Windows let go of it and took it again, once it stopped after letting go. See [STATUS.md](STATUS.md) for how far it has been built and run |
+| `pci-passthrough-hotplug-7.2-kvm` | the branch for 7.2 with the KVM backend Cyberus Technology publishes for VirtualBox | **The one to take on a released line.** 7.2 with an engine the device runs on, on the newest state of upstream's branch. Every check of the simulation passes on it, with a Linux guest and with Windows taking the drive in the hot-plug capable slot, letting go of it and taking it again (run 253). Not what Oracle ships: see below |
+| `pci-passthrough-hotplug-7.1-kvm` | the branch for 7.1 with that backend in its last version for 7.1 | The same for 7.1, with what the 7.2 line received after upstream ended its support for 7.1. Every check of the simulation passes on it (run 254); in an earlier run Windows stopped after letting go of the drive, which is not understood. See [STATUS.md](STATUS.md) for how far it has been built and run |
+| `backports-7.1` | the maintenance branch of 7.1, without the passthrough work | For who stays on 7.1 for other reasons: changes which the 7.2 line received and 7.1 did not. Built like upstream's 7.1; see [STATUS.md](STATUS.md), "The 7.1 line and what the 7.2 line received after it". The branches for 7.1 above have the same changes |
 
 Why the two branches for the released lines do not run a VM with a
 device: the work takes KVM as execution engine, so that the memory of the
@@ -70,10 +71,11 @@ hand. Three things differ on them from what is said for the development
 line: a Windows guest is left at its default paravirtualization
 interface ([HWTEST.md](HWTEST.md) says `--paravirt-provider none`, which
 is for the backend of the development line; STATUS.md says what has run
-which way); a Windows guest at that default did not go on after its
-saved state was loaded, in the simulation on the branch for 7.1, so do
-not count on saved states of Windows guests there; and the readme of the
-backend calls AMD processors experimental.
+which way); the backend has a change of this work about saved states of
+guests with the Hyper-V interface, without which a Windows guest with
+two CPUs did not go on after its state was loaded ([HWTEST.md](HWTEST.md)
+asks to try that); and the readme of the backend calls AMD processors
+experimental.
 
 The branches for 7.1 have one change to Main which is not about the
 device: saving the state of a VM tells its caller when it did not work

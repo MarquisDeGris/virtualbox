@@ -41,11 +41,15 @@ test without waiting for it: there is time for development now and
 there will not be later. Nothing is written down as tested on hardware
 because of that. First of it: the same work on the maintenance lines 7.2
 and 7.1, see "The maintenance branches". On those lines the simulation
-runs with the KVM backend of Cyberus Technology: all checks with the
-Linux guest pass on both (runs 248 and 251), and Windows has taken a
-drive of the host in the hot-plug capable slot, let go of it and taken
-it again (run 250, on 7.1). In the run after that one Windows stopped
-after letting go of the drive, which is not understood yet (run 251).
+runs with the KVM backend of Cyberus Technology, and every check of it
+passes on both (runs 253 and 254, 150 checks each): the Linux guest
+with the device, and Windows, which takes a drive of the host in the
+hot-plug capable slot, lets go of it and takes it again. In one earlier
+run Windows stopped after letting go of the drive, which is not
+understood yet (run 251). The branches for 7.1 also have what the 7.2
+line received after upstream ended its support for 7.1, see "The 7.1
+line and what the 7.2 line received after it"; that is on a branch of
+its own as well, `backports-7.1`.
 
 ### Installation and the simulation, from 16 November
 
@@ -824,6 +828,26 @@ skipped**: the first run in which every check of all four parts passes.
   was waiting when Windows stopped in run 251 is what the next stop will
   show.
 
+**Run 254** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.1-kvm` @ `65feb364`, 63 minutes of which 24
+went into downloading the image of Windows, Intel Xeon 6975P-C): the 7.1
+branch with the same change to the backend and with the 26 changes taken
+over from the 7.2 branch. **150 passed, none failed, none skipped**, as
+on 7.2 in the run before.
+
+- It builds (7 minutes 42 seconds for all of the tree).
+- **What was taken over from 7.2 has run in VMs**: all 20 checks on the
+  runner and all 67 inside the virtual machine standing in for a host
+  pass with it (677 seconds), with the change to the VMM about a device
+  and its own MMIO region in every access of a device to guest memory.
+- **Windows goes on after its saved state is loaded and shuts down on
+  the power button on this version of the backend too** (4 seconds after
+  the press), which is where it went wrong in runs 249 to 251.
+- **Windows where the drive is passes**, all 35 checks (488 seconds;
+  Windows starts in 414, lets go of the drive 7 seconds after being
+  asked). That part has now passed in three runs out of four, on both
+  branches; the stop of run 251 has not come again and is not explained.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -835,10 +859,12 @@ State of `pci-passthrough-hotplug-7.1-kvm` (pushed): the 7.1 branch as
 above, the backend in its last version for the 7.1 line (2025-11-03, two
 places merged by hand), the same two commits about the register, and the
 7.1 branch merged in again for the change to `Console::i_saveState`. It
-builds since run 249. A device of the host runs in a VM on it and all 67
-checks with the Linux guest pass (run 251). Windows has had the drive in
-the slot, out and in again in run 250 and stopped after the first
-removal in run 251, which is not understood yet.
+builds since run 249. Since run 254 it also has the change to the
+backend about the Hyper-V registers in a saved state and what was taken
+over from the 7.2 branch, and every check of the simulation passes on
+it. Windows has had the drive in the slot, out and in again in runs 250
+and 254 and stopped after the first removal in run 251, which is not
+understood yet.
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -856,9 +882,9 @@ which is about code a Linux host runs was then tried on 7.1:
 - Taken over to the 7.1 branch (`pci-passthrough-hotplug-7.1` @
   `ec8bcc46`; built in run 252, every changed file compiled for ring 3
   and for the kernel driver without a warning, the tests of the device
-  pass; nothing of it has run in a VM before the next run on the branch
-  with the KVM backend): 25 changes as they are, to devices (VirtIO, USB,
-  audio),
+  pass; run in VMs on the branch with the KVM backend in run 254, where
+  every check of the simulation passes with it): 25 changes as they are,
+  to devices (VirtIO, USB, audio),
   the host services a guest talks to, the image formats (VMDK, VDI, GPT,
   ISO), the import of appliances and the console, two of them adapted in
   one place each; and r175241, with which the VMM keeps a device from
@@ -1429,18 +1455,20 @@ harness since WP5, saved states since the fourth part of WP6.
    KVM backend are what it goes on with then.
 4b. The branches with the KVM backend of Cyberus Technology: 7.2 runs the
    simulation with the device (run 248), and so does 7.1, with all
-   checks of the Linux guest (run 251). On 7.2 every check passes with
+   checks of the Linux guest (run 251). On both every check passes with
    the change to the backend about the Hyper-V registers in a saved
-   state (run 253). Left, in this order: the same change and what was
-   taken over from 7.2 on the branch for 7.1 (the run after 253); a run
-   on an AMD processor with the second change about the register; the
-   sanitizers on both; then merge requests in the fork for them.
-5. Windows where the drive is: passed in run 250 and stopped after the
-   first removal in run 251, same code, on the 7.1 branch with the
-   backend of Cyberus Technology, Intel processors. Every run on a
-   branch with that backend goes through it again and tells what the VM
-   shows of the guest when it stops; until it is understood, the
-   hardware test is where a Windows guest letting go of a device counts.
+   state (runs 253 and 254), on 7.1 with what was taken over from 7.2.
+   Left, in this order: the build of `backports-7.1`; a run of the 7.1
+   one with the NAT library, the import change and the VM with a
+   network; merge requests in the fork for the three branches; the
+   sanitizers on the branches without the backend; a run on an AMD
+   processor, which no VM with a device has had on these branches yet.
+5. Windows where the drive is: passed in runs 250, 253 and 254 and
+   stopped after the first removal in run 251, on the branches with the
+   backend of Cyberus Technology, Intel processors. Every run on such a
+   branch goes through it again and tells what the VM shows of the guest
+   when it stops; until it is understood, the hardware test is where a
+   Windows guest letting go of a device counts.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
 7. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
@@ -1732,5 +1760,7 @@ slot.
 | 251 | `pci-passthrough-hotplug-7.1-kvm` @ `3b085eca` | allsim, exploring | passed (twelve checks of the simulation fail) | 124 minutes, Intel Xeon Platinum 8573C. With `Console::i_saveState` returning its result: all 67 checks with the Linux guest inside the virtual machine standing in for a host pass on the 7.1 line, the three new ones about a snapshot among them. Windows on the runner goes on after its saved state is loaded and does not shut down (two checks). Windows where the drive is starts, reads from the drive, lets go of it when asked and then says nothing any more (ten checks, 70 minutes of waiting); not understood. 148 passed, 12 failed; see "Run 251" |
 | 252 | `scratch/71-hardening` @ `ec8bcc46` | tests, exploring | passed | 8 minutes. The 7.1 branch with what was taken over from the 7.2 branch (26 changes, see "The 7.1 line and what the 7.2 line received after it"): it builds, every file the changes touch is compiled for ring 3 and for the kernel driver, without a warning in one of them; the tests of the device pass, the ACPI table check passes. The 7.1 branch was moved to this commit after it |
 | 253 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 39 minutes, Intel Xeon 6975P-C. With the change to the KVM backend of Cyberus Technology about the Hyper-V registers in a saved state. Every check passes, 150 of them: the Linux guest on the runner and inside the virtual machine standing in for a host (67 there), Windows on the runner, which now goes on after its saved state is loaded and shuts down on the power button, and Windows where the drive is (35), which takes the drive, lets go of it, takes it again, has it taken by force and takes it once more. See "Run 253" |
+| 254 | `pci-passthrough-hotplug-7.1-kvm` @ `65feb364` | allsim, exploring | passed | 63 minutes, Intel Xeon 6975P-C. The 7.1 branch with the same change to the backend and with the 26 changes taken over from the 7.2 branch. Every check passes here too, 150 of them: what was taken over has run in VMs, Windows goes on after a loaded state and shuts down, Windows where the drive is passes. See "Run 254" |
+| 255 | `backports-7.1` @ `0bf9d4e6` | baseline, exploring | cancelled in its first minute | By mistake: the new way of reading the processor of the runner through the API was tried on this run with the option which cancels a run on the wrong kind of processor. Nothing was built. It showed that the reading and the cancelling work |
 
 Run numbers are those GitHub shows for the `build` workflow.
