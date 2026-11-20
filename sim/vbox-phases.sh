@@ -587,6 +587,99 @@ phase_nat()
     run modifyvm "$VM" --nic1 none
 }
 
+# The VM as an appliance: exported, imported again, and the guest booted from
+# what was imported.  Nothing of the passthrough work is in this.  It is here
+# for what the branches for 7.1 took over from 7.2 in the import: a serial
+# port which writes to a file and the shared folders of the machine are not
+# taken from an appliance, its extra data only when that is asked for; and
+# the disk goes through the VMDK code on its way out and back in, which the
+# guest booting from it tells about.  A build which does not have one of these
+# is told from what the import says of the appliance before it does anything,
+# and the checks about it are left out there.
+phase_import()
+{
+    PHASE=import
+    reset_vm
+    local ova="$SIM_WORK/sim.ova" dry="$SIM_WORK/import-dry.out" imp=sim-imported kept=sim-kept
+    local info="$SIM_WORK/import-info.out" has_san=no has_opt=no val orig_vm=$VM orig_dir=$VMDIR
+    rm -f "$ova"
+    mkdir -p "$SIM_WORK/share"
+    run setextradata "$VM" SimNote kept
+    run sharedfolder add "$VM" --name simshare --hostpath "$SIM_WORK/share"
+    if ! VBM_TIMEOUT=900 run export "$VM" --output "$ova"; then
+        stage "the VM is exported to an appliance" FAILED
+    else
+        stage "the VM is exported to an appliance" ok
+        ls -s "$ova" 2>&1 | sed 's/^/    /'
+        VBM_TIMEOUT=300 vbm import "$ova" -n > "$dry" 2>&1
+        grep -a -i -E 'warning|error' "$dry" | cut -c1-300 | sed 's/^/    | /'
+        grep -a -q 'raw file' "$dry" && has_san=yes
+        VBM_TIMEOUT=300 vbm import "$ova" -n --options KeepExtraData > /dev/null 2>&1 && has_opt=yes
+        echo "    this build leaves the serial port and the shared folders out: $has_san; it has the option for the extra data: $has_opt"
+
+        if ! VBM_TIMEOUT=900 run import "$ova" --vsys 0 --vmname "$imp"; then
+            stage "the appliance is imported" FAILED
+            tail -n 30 "$VBOX_USER_HOME/VBoxSVC.log" 2> /dev/null | cut -c1-300 | sed 's/^/    | /'
+        else
+            stage "the appliance is imported" ok
+            vbm showvminfo "$imp" --machinereadable > "$info" 2>&1
+            grep -a -i -E '^(uart1|uartmode1|SharedFolder|firmware|VMExecutionEngine|"?sata)' "$info" | cut -c1-200 | sed 's/^/    /'
+            val=$(vbm getextradata "$imp" SimNote 2>&1 | tail -n 1)
+            echo "    extra data of the imported VM: $val"
+            if [ "$has_san" = yes ]; then
+                if grep -a -q '^uartmode1="file' "$info"; then
+                    stage "the serial port of the imported VM does not write to a file" FAILED
+                else
+                    stage "the serial port of the imported VM does not write to a file" ok
+                fi
+                if grep -a -q '^SharedFolderNameMachineMapping' "$info"; then
+                    stage "the imported VM has no shared folder" FAILED
+                else
+                    stage "the imported VM has no shared folder" ok
+                fi
+            else
+                stage "the serial port of the imported VM does not write to a file" skipped "this build takes the port and the folders over"
+            fi
+            if [ "$has_opt" = yes ]; then
+                if [ "$val" = "No value set!" ]; then
+                    stage "the imported VM has none of the extra data" ok
+                else
+                    stage "the imported VM has none of the extra data" FAILED "$val"
+                fi
+                if VBM_TIMEOUT=900 run import "$ova" --vsys 0 --vmname "$kept" --options KeepExtraData; then
+                    val=$(vbm getextradata "$kept" SimNote 2>&1 | tail -n 1)
+                    if [ "$val" = "Value: kept" ]; then
+                        stage "an import which is asked to keeps the extra data" ok
+                    else
+                        stage "an import which is asked to keeps the extra data" FAILED "$val"
+                    fi
+                else
+                    stage "an import which is asked to keeps the extra data" FAILED "the import fails"
+                fi
+                run unregistervm "$kept" --delete
+            else
+                stage "the imported VM has none of the extra data" skipped "this build has no option for it"
+            fi
+
+            # The guest from the imported disk, with the serial port the checks read.
+            VM=$imp
+            VMDIR=$(dirname "$(vbm showvminfo "$VM" --machinereadable | sed -n 's/^CfgFile="\(.*\)"$/\1/p')")
+            run modifyvm "$VM" --uartmode1 file "$SERIAL"
+            if boot "the imported VM boots the guest"; then
+                guest_goes_on "the guest keeps running"
+            fi
+            end_phase
+            settle
+            run unregistervm "$VM" --delete
+            VM=$orig_vm
+            VMDIR=$orig_dir
+        fi
+    fi
+    run sharedfolder remove "$VM" --name simshare
+    vbm setextradata "$VM" SimNote > /dev/null 2>&1
+    rm -f "$ova"
+}
+
 # The device as upstream passes it through: there when the VM starts, no
 # hot-plug.
 phase_passthrough()
@@ -904,6 +997,7 @@ if setup; then
             plain)       phase_plain ;;
             emptyslot)   phase_emptyslot ;;
             nat)         phase_nat ;;
+            import)      phase_import ;;
             passthrough) phase_passthrough ;;
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;

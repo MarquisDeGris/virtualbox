@@ -434,6 +434,41 @@ jobs:
           grep -E 'Name \(_CID, EisaId \("PNP0A03"\)' dsdt.dsl
           echo "ACPI table check passed"
 
+      - name: Testcases of the host services
+        if: inputs.flavor != 'baseline'
+        run: |
+          . ./env.sh
+          # The testcases the tree has for the services a guest talks to and for
+          # the code they share.  The branches for 7.1 took changes to these
+          # services over from 7.2, and changes to two of the tests with them.
+          # A testcase which fails does not end the run here, what comes after
+          # this step is to run whatever these tell; the last step of the run
+          # fails for it.
+          ( time kmk -C src/VBox/HostServices -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 ) > build-hostsvc-tests.log 2>&1 \
+            || { echo "NOT EVERYTHING WAS BUILT"; grep -n -E 'error:|undefined reference|multiple definition|ld returned|[*][*][*] ' build-hostsvc-tests.log | head -80; }
+          tail -4 build-hostsvc-tests.log
+          for t in tstHGCMSvc tstGuestPropSvc tstGuestControlSvc tstClipboardServiceHost tstClipboardServiceImpl tstSharedFolderService tstShflCase tstShflSizes; do
+            log="$GITHUB_WORKSPACE/test-hostsvc-$t.log"
+            if ! ls src/VBox/HostServices/testcase/$t.cpp src/VBox/HostServices/*/testcase/$t.cpp > /dev/null 2>&1; then
+              echo "HOSTSVC $t: this tree does not have it"
+              continue
+            fi
+            if [ ! -x "out/linux.amd64/release/bin/testcase/$t" ]; then
+              echo "HOSTSVC $t: NOT BUILT"
+              echo "$t (not built)" >> hostsvc-failed
+              continue
+            fi
+            rc=0
+            ( cd out/linux.amd64/release/bin/testcase && timeout -k 5 300 "./$t" ) > "$log" 2>&1 || rc=$?
+            if [ "$rc" = 0 ]; then
+              echo "HOSTSVC $t: passed: $(grep -v '^$' "$log" | tail -n 1 | cut -c1-120)"
+            else
+              echo "HOSTSVC $t: FAILED with exit code $rc"
+              tail -n 40 "$log"
+              echo "$t (exit code $rc)" >> hostsvc-failed
+            fi
+          done
+
       - name: Result of the build of the tree
         if: inputs.flavor != 'baseline'
         run: |
@@ -473,7 +508,9 @@ jobs:
           path: |
             build.log
             build-tests.log
+            build-hostsvc-tests.log
             test-tstDevPciVfio.log
+            test-hostsvc-*.log
             configure.log
             configure-run.log
             configure-help.log
@@ -483,3 +520,13 @@ jobs:
             sim-out/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Result of the testcases of the host services
+        if: inputs.flavor != 'baseline'
+        run: |
+          if [ -e hostsvc-failed ]; then
+            echo "Testcases of the host services which failed or were not built:"
+            cat hostsvc-failed
+            exit 1
+          fi
+          echo "No testcase of the host services failed."

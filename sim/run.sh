@@ -322,7 +322,7 @@ HTTP_MD5=$(md5sum < "$WORK/http/sim.bin" | cut -d' ' -f1)
 HTTP_PID=$!
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
          GUEST_RAW="$WORK/guest.raw" SIM_WHERE=runner SIM_BOOT_WAIT=240 SIM_HTTP_MD5="$HTTP_MD5" \
-    timeout -k 30 1800 bash "$SIM/vbox-phases.sh" plain emptyslot nat
+    timeout -k 30 1800 bash "$SIM/vbox-phases.sh" plain emptyslot nat import
 echo "part 1 ended with $?"
 kill "$HTTP_PID" 2> /dev/null
 echo "requests to the file server: $(grep -c 'GET /sim.bin' "$WORK/http.log" 2> /dev/null)"
