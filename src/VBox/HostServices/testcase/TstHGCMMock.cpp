@@ -476,8 +476,8 @@ int TstHgcmMockSvcDestroy(PTSTHGCMMOCKSVC pSvc)
  */
 int TstHgcmMockSvcStart(PTSTHGCMMOCKSVC pSvc)
 {
-    int rc = RTThreadCreate(&pSvc->hThread, tstHgcmMockSvcThread, pSvc, 0, RTTHREADTYPE_DEFAULT, RTTHREADFLAGS_WAITABLE,
-                            "MockSvc");
+    int rc = RTThreadCreate(&pSvc->hThread, tstHgcmMockSvcThread, pSvc, 0, RTTHREADTYPE_DEFAULT,
+                            RTTHREADFLAGS_WAITABLE | RTTHREADFLAGS_COM_MTA, "MockSvc");
     if (RT_SUCCESS(rc))
         rc = RTThreadUserWait(pSvc->hThread, RT_MS_30SEC);
 

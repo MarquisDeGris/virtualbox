@@ -1214,6 +1214,11 @@ DECLHIDDEN(int) virtioCoreR3VirtqAvailBufGet(PPDMDEVINS pDevIns, PVIRTIOCORE pVi
         STAM_REL_COUNTER_ADD(&pVirtio->StatDescChainsSegsIn, cSegsIn);
 #endif
     }
+    else
+    {
+        pVirtqBuf->pSgPhysReturn = NULL;
+        pVirtqBuf->cbPhysReturn  = 0;
+    }
 
     if (cSegsOut)
     {
@@ -1223,6 +1228,11 @@ DECLHIDDEN(int) virtioCoreR3VirtqAvailBufGet(PPDMDEVINS pDevIns, PVIRTIOCORE pVi
 #ifdef VBOX_WITH_STATISTICS
         STAM_REL_COUNTER_ADD(&pVirtio->StatDescChainsSegsOut, cSegsOut);
 #endif
+    }
+    else
+    {
+        pVirtqBuf->pSgPhysSend   = NULL;
+        pVirtqBuf->cbPhysSend    = 0;
     }
 
 #ifdef VBOX_WITH_STATISTICS
@@ -2880,10 +2890,9 @@ DECLHIDDEN(int) virtioCoreR3LegacyDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
         AssertRCReturn(rc, rc);
     }
 
-    AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("%#x\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
-    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (cQueues == 0 && pVirtio->uVirtqSelect),
-                          ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues),
-                          VERR_SSM_LOAD_CONFIG_MISMATCH);
+    AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("cQueues=%u!\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
+    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (!cQueues && !pVirtio->uVirtqSelect),
+                          ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
 
     Log(("\nRestoring %d  legacy-only virtio-net device queues from saved state:\n", cQueues));
     for (unsigned uVirtq = 0; uVirtq < cQueues; uVirtq++)
@@ -2947,7 +2956,7 @@ DECLHIDDEN(int) virtioCoreR3LegacyDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
 DECLHIDDEN(int) virtioCoreR3ModernDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHLPR3 pHlp, PSSMHANDLE pSSM,
                                                  uint32_t uVersion, uint32_t uTestVersion, uint32_t cQueues)
 {
-    RT_NOREF2(cQueues, uVersion);
+    RT_NOREF(uVersion);
     LogFunc(("\n"));
     /*
      * Check the marker and (embedded) version number.
@@ -2990,6 +2999,10 @@ DECLHIDDEN(int) virtioCoreR3ModernDeviceLoadExec(PVIRTIOCORE pVirtio, PCPDMDEVHL
     AssertRCReturn(rc, rc);
     rc = pHlp->pfnSSMGetU64(  pSSM, &pVirtio->uDriverFeatures);
     AssertRCReturn(rc, rc);
+
+    AssertLogRelMsgReturn(cQueues <= VIRTQ_MAX_COUNT, ("cQueues=%u!\n", cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
+    AssertLogRelMsgReturn(pVirtio->uVirtqSelect < cQueues || (!cQueues && !pVirtio->uVirtqSelect),
+                          ("uVirtqSelect=%u cQueues=%u\n", pVirtio->uVirtqSelect, cQueues), VERR_SSM_LOAD_CONFIG_MISMATCH);
 
     /** @todo Adapt this loop use cQueues argument instead of static queue count (safely with SSM versioning) */
     for (uint32_t i = 0; i < VIRTQ_MAX_COUNT; i++)
