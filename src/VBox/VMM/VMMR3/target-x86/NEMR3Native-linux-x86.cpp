@@ -528,8 +528,35 @@ DECLHIDDEN(int) nemR3NativeInitCompletedRing3(PVM pVM)
         NEMR3KvmGetMsr(pVM->apCpusR3[idCpu], MSR_IA32_ARCH_CAPABILITIES, &val);
         pCtxMsrs->msr.ArchCaps = val;
 
-        NEMR3KvmGetMsr(pVM->apCpusR3[idCpu], MSR_IA32_SPEC_CTRL, &val);
+        int const rcSpecCtrl = NEMR3KvmGetMsr(pVM->apCpusR3[idCpu], MSR_IA32_SPEC_CTRL, &val);
         pCtxMsrs->msr.SpecCtrl = val;
+
+        /*
+         * The kernel tries a value for this register on the CPU of the host
+         * before it takes it.  A host can be without the register while its
+         * kernel offers guests a feature which is in it (seen with a virtual
+         * machine as the host), and handing the register over then fails,
+         * with everything which is handed over after it.  So the kernel is
+         * asked once, with what was just read: when it does not take that,
+         * nemHCLnxExportState leaves the register out.
+         */
+        if (idCpu == 0)
+        {
+            int rcLnx = -1;
+            if (RT_SUCCESS(rcSpecCtrl))
+            {
+                alignas(struct kvm_msrs) char achReq[sizeof(struct kvm_msrs) + sizeof(struct kvm_msr_entry)];
+                struct kvm_msrs *pReq = reinterpret_cast<struct kvm_msrs *>(&achReq[0]);
+                RT_ZERO(achReq);
+                pReq->nmsrs            = 1;
+                pReq->entries[0].index = MSR_IA32_SPEC_CTRL;
+                pReq->entries[0].data  = val;
+                rcLnx = ioctl(pVM->apCpusR3[idCpu]->nem.s.fdVCpu, KVM_SET_MSRS, pReq);
+            }
+            pVM->nem.s.fSpecCtrlRefused = rcLnx != 1;
+            if (pVM->nem.s.fSpecCtrlRefused)
+                LogRel(("NEM: The kernel does not take IA32_SPEC_CTRL for the guest (%d), the register is left to it\n", rcLnx));
+        }
     }
 
     int rcLnxGI = nemR3LnxInitGuestInterface(pVM);
@@ -1732,11 +1759,9 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
         {
             ADD_MSR(MSR_IA32_CR_PAT, pCtx->msrPAT);
             ADD_MSR(MSR_IA32_ARCH_CAPABILITIES, pCtxMsrs->msr.ArchCaps);
-            /* Only for a guest CPU which has the register.  There is nothing
-               to hand over otherwise, and the kernel tries the value on the
-               CPU of the host before it takes it, which does not work on a
-               host whose own CPU is without the register (a virtual one). */
-            if (pVM->cpum.s.GuestFeatures.fSpecCtrlMsr)
+            /* Not when the kernel does not take the register on this host, see
+               nemR3NativeInitCompletedRing3. */
+            if (!pVM->nem.s.fSpecCtrlRefused)
                 ADD_MSR(MSR_IA32_SPEC_CTRL, pCtxMsrs->msr.SpecCtrl);
             /** @todo What do we _have_ to add here?
              * We also have: Mttr*, MiscEnable, FeatureControl. */
