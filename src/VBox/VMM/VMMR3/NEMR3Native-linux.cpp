@@ -1649,7 +1649,7 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
         {
             /* Partial debug state, we must get DbgRegs first so we can merge: */
             int rc = ioctl(pVCpu->nem.s.fdVCpu, KVM_GET_DEBUGREGS, &DbgRegs);
-            AssertMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
+            AssertLogRelMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
         }
 
         if (fExtrn & CPUMCTX_EXTRN_DR0_DR3)
@@ -1665,7 +1665,7 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
             DbgRegs.dr7 = pCtx->dr[7];
 
         int rc = ioctl(pVCpu->nem.s.fdVCpu, KVM_SET_DEBUGREGS, &DbgRegs);
-        AssertMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
+        AssertLogRelMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
     }
 
     /*
@@ -1681,7 +1681,7 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
 
             AssertCompile(sizeof(pCtx->XState) >= sizeof(struct kvm_xsave));
             int rc = ioctl(pVCpu->nem.s.fdVCpu, KVM_SET_XSAVE, &pCtx->XState);
-            AssertMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
+            AssertLogRelMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
         }
 
         if (fExtrn & CPUMCTX_EXTRN_XCRx)
@@ -1696,7 +1696,7 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
             };
 
             int rc = ioctl(pVCpu->nem.s.fdVCpu, KVM_SET_XCRS, &Xcrs);
-            AssertMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
+            AssertLogRelMsgReturn(rc == 0, ("rc=%d errno=%d\n", rc, errno), VERR_NEM_IPE_3);
         }
     }
 
@@ -1743,7 +1743,12 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
         {
             ADD_MSR(MSR_IA32_CR_PAT, pCtx->msrPAT);
             ADD_MSR(MSR_IA32_ARCH_CAPABILITIES, pCtxMsrs->msr.ArchCaps);
-            ADD_MSR(MSR_IA32_SPEC_CTRL, pCtxMsrs->msr.SpecCtrl);
+            /* Only for a guest CPU which has the register.  There is nothing
+               to hand over otherwise, and the kernel tries the value on the
+               CPU of the host before it takes it, which does not work on a
+               host whose own CPU is without the register (a virtual one). */
+            if (pVM->cpum.s.GuestFeatures.fSpecCtrlMsr)
+                ADD_MSR(MSR_IA32_SPEC_CTRL, pCtxMsrs->msr.SpecCtrl);
             /** @todo What do we _have_ to add here?
              * We also have: Mttr*, MiscEnable, FeatureControl. */
         }
@@ -1751,10 +1756,10 @@ static int nemHCLnxExportState(PVM pVM, PVMCPU pVCpu, PCPUMCTX pCtx, struct kvm_
         uBuf.Core.pad   = 0;
         uBuf.Core.nmsrs = iMsr;
         int rc = ioctl(pVCpu->nem.s.fdVCpu, KVM_SET_MSRS, &uBuf);
-        AssertMsgReturn(rc == (int)iMsr,
-                        ("rc=%d iMsr=%d (->%#x) errno=%d\n",
-                         rc, iMsr, (uint32_t)rc < iMsr ? uBuf.Core.entries[rc].index : 0, errno),
-                        VERR_NEM_IPE_3);
+        AssertLogRelMsgReturn(rc == (int)iMsr,
+                              ("rc=%d iMsr=%d (->%#x) errno=%d\n",
+                               rc, iMsr, (uint32_t)rc < iMsr ? uBuf.Core.entries[rc].index : 0, errno),
+                              VERR_NEM_IPE_3);
     }
 
     /*
