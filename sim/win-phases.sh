@@ -629,6 +629,57 @@ phase_control()
     run snapshot "$VM" delete before-control
 }
 
+# The installed Windows in the same VM with a TPM 2.0 added, as a VM for
+# Windows 11 has one: Windows has the TPM and its driver runs it, and a state
+# is saved and loaded with it.  The TPM is not part of this work.  It is here
+# because the guests the work is meant for need one, and because nothing else
+# in this VM has its registers read and written the way a TPM has.  The disk
+# and the VM go back to what they were afterwards, as after the VMs for
+# comparison: what follows is to have the Windows which never saw a TPM.
+phase_tpm()
+{
+    PHASE=win-tpm
+    settle
+    if ! run snapshot "$VM" take before-tpm; then
+        stage "Windows starts in the VM with a TPM 2.0 added" skipped "no snapshot"
+        return
+    fi
+    if ! run modifyvm "$VM" --tpm-type 2.0; then
+        stage "Windows starts in the VM with a TPM 2.0 added" skipped "the VM takes no TPM"
+        run snapshot "$VM" delete before-tpm
+        return
+    fi
+    vbm showvminfo "$VM" --machinereadable | grep -a -i -E '^"?tpm' | cut -c1-200 | sed 's/^/    /'
+    stalls_reset
+    if start_and_report "Windows starts in the VM with a TPM 2.0 added" "$START_WAIT"; then
+        serial_show '^WIN: (TPM |TPMDEV |PROBLEM |PROBLEMS |BUGCHECKS )' 12
+        if serial_has '^WIN: TPM present=1 spec=2\.0'; then
+            stage "guest: has the TPM, as one of version 2.0" ok
+        else
+            stage "guest: has the TPM, as one of version 2.0" FAILED "$(serial_value 'WIN: (TPM present=[^ ]* [^ ]*)')"
+        fi
+        if serial_has '^WIN: TPMDEV id=[^ ]* status=OK problem=0 '; then
+            stage "guest: its driver runs the TPM without a problem" ok
+        else
+            stage "guest: its driver runs the TPM without a problem" FAILED \
+                  "$(serial_value 'WIN: (TPMDEV id=[^ ]* status=[^ ]* problem=[^ ]*)')"
+        fi
+        guest_goes_on "the guest keeps running" 120
+        if saved_state_round; then
+            guest_goes_on "the guest keeps running after the state was loaded" 120
+        fi
+    fi
+    stalls_stage
+    case "$(vmstate)" in
+        running)  guest_shutdown ;;
+        poweroff) keep_logs ;;
+        *)        end_phase ;;
+    esac
+    settle
+    run snapshot "$VM" restore before-tpm
+    run snapshot "$VM" delete before-tpm
+}
+
 mode_runner()
 {
     : "${WIN_ISO:?}" "${WIN_UNATTEND_ISO:?}"
@@ -659,6 +710,10 @@ mode_runner()
     if [ "$BUTTON_WORKS" = no ]; then
         echo "==== phase win-control on $WHERE"
         phase_control
+    fi
+    if [ "$(vmstate)" = poweroff ]; then
+        echo "==== phase win-tpm on $WHERE"
+        phase_tpm
     fi
     end_phase
     ls -l "$SIM_WORK/win.vdi" 2>&1 | sed 's/^/    /'

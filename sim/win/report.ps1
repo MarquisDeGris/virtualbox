@@ -174,6 +174,33 @@ try {
 } catch {
     Say ("BUTTON-ACTION failed: {0}" -f $_.Exception.Message)
 }
+
+# The TPM, where the VM has one: what Windows has made of it.  Asking for
+# it has Windows send commands to the TPM.
+# A TPM which Windows sees for the first time takes a moment until its
+# driver has it, so where the firmware tables have one, this waits for it.
+$tpmRe = '^ACPI\\(MSFT0101|PNP0C31)'
+$tpmNodes = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match $tpmRe })
+$tpm = @()
+$tpmErr = ''
+for ($try = 0; $try -lt 18; $try++) {
+    try {
+        $tpm = @(Get-CimInstance -Namespace 'root/cimv2/Security/MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop)
+        $tpmErr = ''
+    } catch {
+        $tpmErr = $_.Exception.Message
+    }
+    if ($tpm.Count -gt 0 -or $tpmNodes.Count -eq 0) { break }
+    Start-Sleep -Seconds 5
+}
+if ($tpm.Count -gt 0) {
+    Say ("TPM present=1 spec={0} manufacturer={1} version={2} enabled={3} activated={4}" -f $tpm[0].SpecVersion, $tpm[0].ManufacturerIdTxt, $tpm[0].ManufacturerVersion, $tpm[0].IsEnabled_InitialValue, $tpm[0].IsActivated_InitialValue)
+} else {
+    Say ("TPM present=0 nodes={0} {1}" -f $tpmNodes.Count, $tpmErr)
+}
+foreach ($t in @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match $tpmRe })) {
+    Say ("TPMDEV id={0} status={1} problem={2} service={3}" -f $t.InstanceId, $t.Status, (Problem-Code $t), (Prop $t.InstanceId 'DEVPKEY_Device_Service'))
+}
 Say 'REPORT-END'
 
 # Keeps running: says that it is alive, tells when a device behind a bridge
