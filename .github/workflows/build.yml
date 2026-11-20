@@ -449,7 +449,8 @@ jobs:
           tail -4 build-hostsvc-tests.log
           for t in tstHGCMSvc tstGuestPropSvc tstGuestControlSvc tstClipboardServiceHost tstClipboardServiceImpl tstSharedFolderService tstShflCase tstShflSizes; do
             log="$GITHUB_WORKSPACE/test-hostsvc-$t.log"
-            if ! ls src/VBox/HostServices/testcase/$t.cpp src/VBox/HostServices/*/testcase/$t.cpp > /dev/null 2>&1; then
+            src=$(ls src/VBox/HostServices/testcase/$t.cpp src/VBox/HostServices/*/testcase/$t.cpp 2> /dev/null | head -n 1 || true)
+            if [ -z "$src" ]; then
               echo "HOSTSVC $t: this tree does not have it"
               continue
             fi
