@@ -119,7 +119,10 @@ jobs:
           # base this makes the build incremental.
           find . '(' -path ./out -o -name .git ')' -prune -o -type f -print0 | xargs -0 touch -h -d @1577836800
           if [ "$base" != "$(git rev-parse HEAD)" ]; then
-            git diff --name-only "$base" HEAD | tee changed-files.log | xargs -r touch
+            # Without the files the branch has deleted (run 237): there is nothing
+            # to mark, and what was built from them is left behind by the makefiles
+            # which no longer name them.
+            git diff --name-only --diff-filter=d "$base" HEAD | tee changed-files.log | xargs -r touch -c
           fi
           git log -1 --format='%H %s'
           ls kBuild/kBuild/bin/linux.amd64 | head -5
