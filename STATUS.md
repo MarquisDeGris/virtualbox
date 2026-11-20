@@ -509,10 +509,37 @@ last release) and `VBox-7.1` (7.1.18).
 What this means for the work, which takes KVM as execution engine and a
 VM process without the support driver (security requirement S11: the
 memory of the guest has to stay where it is while a device can reach
-it): on the maintenance branches it does not run as they are built. It
-takes the change which builds the KVM backend there, and that backend is
-an older one which upstream did not build for anybody on x86. Whether it
-carries the simulation is what run 240 is for.
+it): on the maintenance branches it does not run as they are built. Run
+240 tried the change which builds the KVM backend there: the backend of
+7.2 for x86 does not compile. It is the backend as it was before upstream
+made it build and work, with a build fix on 2026-01-25 and some forty
+changes after it (the APIC of KVM, interrupt injection, the MSRs a guest
+gets intercepted, the state of the CPUs, timekeeping). Taking those to a
+maintenance branch is a change to its VMM far beyond PCI passthrough, and
+it is not done here.
+
+So there are three ways from here, and which one it is depends on what
+the hosts this is meant for can run:
+
+1. The development line, which becomes the next release of VirtualBox
+   with KVM on Linux. The merge request is that. Nothing more to do but
+   to follow upstream until the release.
+2. The engine of the maintenance branches, which is the VirtualBox kernel
+   driver. The device of upstream runs on it on 7.2. The work would have
+   to give up S11 as it stands and make sure another way that no page of
+   guest memory changes its place or is given back while a device can
+   reach it (all memory allocated when the VM starts, no ballooning, no
+   page sharing, no replacing of pages by large ones, and the kernel
+   holding on to every page it has mapped for the device). That is a
+   piece of work of its own, in PGM and in the device, with a simulation
+   which loads the kernel driver, and it is not started. On 7.1 it also
+   takes the changes to the kernel module which upstream made for the
+   device on 7.2.
+3. KVM on a maintenance branch, with the backend of the development line
+   taken over. Not recommended, see above.
+
+The branches for 7.2 and 7.1 stay as what they are: the work and its
+tests on those bases, building, for whoever takes way 2 or 3.
 
 State of `pci-passthrough-hotplug-7.2` (pushed): the 7.2 branch of
 upstream, then one commit with 24 revisions of upstream (the management
@@ -522,20 +549,20 @@ the list of PCI IDs, a data file this fork does not copy, so that Main
 has no names for the PCI devices of the host), then 35 of the 36 commits
 (all but the one about the I/O APIC, which is about the KVM backend of
 the development line and does not fit this one), then r172508, which
-builds the KVM backend. The device, its testcase and the configuration
+builds the KVM backend, and the commit which takes r172508 back after run
+240. The device, its testcase and the configuration
 of the VM in Main are line for line what the merge request has. It
 builds without a warning in a file the work changes and the 56 tests
 pass (run 238). `IConsole` keeps its UUID there: the three new methods
 take the place of three of its reserved ones.
 
-State of `pci-passthrough-hotplug-7.1` (local, not built yet): the 7.1
+State of `pci-passthrough-hotplug-7.1` (pushed, being built): the 7.1
 branch of upstream, the device as upstream took it to 7.2 (without what
 that changed in the kernel module and its runtime: on 7.1 an MMIO2
 region with an existing backing is refused in a VM which runs on the
-ring-0 hypervisor), and the management of upstream (without the removal
-of the old passthrough code, which is switched off there as it is). The
-35 commits are next, if run 240 says that the older KVM backend is worth
-building on.
+ring-0 hypervisor), the management of upstream (without the removal of
+the old passthrough code, which is switched off there as it is), and the
+same 35 commits, which went on with one conflict of a line.
 
 ### The management and the review, 13 to 15 November
 
@@ -1037,10 +1064,13 @@ harness since WP5, saved states since the fourth part of WP6.
 3. Done on 2026-11-19: the sanitizers on `f563e7f8` (run 233), and the
    two commits which are not about the device are in the merge request,
    with its description and HWTEST.md saying what they are for.
-4. The work on the maintenance branch 7.2 (`pci-passthrough-hotplug-7.2`),
-   see "The maintenance branches": the changes of upstream which that
-   branch does not have, then the 36 commits, then the tests and the
-   simulation there.
+4. The maintenance branches, see "The maintenance branches": the work is
+   on 7.2 and 7.1 as far as it goes there without KVM. Left: the build
+   and the tests of the branch for 7.1, the sanitizers on both, and
+   INSTALL.md saying what the branches are and are not.
+4a. To be answered by who this is for: whether the hosts it is meant for
+   can run VMs with KVM, or only with the VirtualBox kernel driver. The
+   three ways in "The maintenance branches" hang on that.
 5. Windows where the drive is: what was changed after run 231 runs when
    a run for something else gets an AMD processor. No runs for it alone
    until then; it stays with the hardware test.
@@ -1130,6 +1160,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-19 | The work goes on with what comes after the hardware test, without waiting for it. Nothing is recorded as tested on hardware. More runs than usual on days of such work, still one after the other and each read before the next | The person this is for has time for development now and will not have it later. What a positive hardware test would leave to do does not depend on its result: the code has to be had on a line of VirtualBox which is released and maintained, and the development line it was written on is neither |
 | 2026-11-19 | The maintenance branch 7.2 first, 7.1 after it if at all | 7.2 has the passthrough device already, 7.1 has not; what 7.2 lacks of upstream is a list of commits, what 7.1 lacks is the device and what it needs in the VMM. Everything done for 7.2 is on the way to 7.1 |
 | 2026-11-20 | The first build of a branch or a base nothing is known about yet is started with `explore: yes`: the run counts as passed whatever happens in it, and what happened is read from its log and written down here | Run 234, the first build of the 7.2 branch, failed in `configure` for options of the workflow. That is a finding about the workflow, and a failed run says the code is broken. The same thought as `sim_strict: no` for the simulation, one level up |
+| 2026-11-20 | The KVM backend of the development line is not taken to the maintenance branches. The branches for 7.2 and 7.1 are kept as the work and its tests on those bases, building, and are not given an execution engine | What made that backend build and work is some forty changes to the VMM which upstream has not released. A maintenance branch with them is no longer the released line somebody chose it for, and nothing here can stand in for the testing upstream gives its VMM |
+| 2026-11-20 | Running the device on the VirtualBox kernel driver, which is what the maintenance branches offer, is not started before it is known that it is wanted | It gives up a security requirement as it stands (S11) for another way of meeting what it is for, in the memory management of VirtualBox, and it takes a simulation with the kernel driver loaded. That is weeks of the kind of work the last ones were, and the right thing only if the hosts this is for cannot have KVM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1308,5 +1340,6 @@ slot.
 | 237 | `pci-passthrough-hotplug-7.2` @ `7374d28c` | tests, exploring | passed (stopped before the build) | 1 minute. The workflow marks the files which differ from the base as new and stumbled over the ones the branch deletes. Fixed in the workflow |
 | 238 | `pci-passthrough-hotplug-7.2` @ `7374d28c` | tests, exploring | passed | 12 minutes. The first build of the work on the maintenance branch 7.2: the tree builds without a compiler warning in a file the work changes, the 56 tests and the three random tests pass, the ACPI table check passes |
 | 239 | `pci-passthrough-hotplug-7.2` @ `7374d28c` | allsim, exploring | passed (no VM started) | 12 minutes. Builds, the tests pass. No VM of the simulation starts, on the runner or in the virtual machine standing in for a host: VirtualBox asks for its kernel driver. The 7.2 branch does not build its KVM backend for Linux on x86 and does not let a VM start without the support driver there; the development line does both since February 2026 (see "The maintenance branches") |
+| 240 | `pci-passthrough-hotplug-7.2` @ `4b35fd22` | allsim, exploring | passed (the build failed) | 5 minutes. The same with the change of the development line which builds the KVM backend for Linux on x86: the backend of the 7.2 branch does not compile. It is the backend as it was before upstream made it build and work in January and February 2026. The change is taken back on the branch |
 
 Run numbers are those GitHub shows for the `build` workflow.
