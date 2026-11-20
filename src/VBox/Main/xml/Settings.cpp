@@ -9442,6 +9442,36 @@ bool MachineConfigFile::isAudioDriverAllowedOnThisHost(AudioDriverType_T enmDrvT
     return false;
 }
 
+void MachineConfigFile::sanitizeImportedSerialPorts()
+{
+    for (SerialPortsList::iterator it = hardwareMachine.llSerialPorts.begin();
+            it != hardwareMachine.llSerialPorts.end();
+            ++it)
+    {
+        SerialPort &port = *it;
+        if (port.portMode == PortMode_RawFile)
+        {
+            port.portMode = PortMode_Disconnected;
+            port.strPath.setNull();
+        }
+    }
+}
+
+void MachineConfigFile::sanitizeSharedFolderSettings()
+{
+    hardwareMachine.llSharedFolders.clear();
+}
+
+void MachineConfigFile::sanitizeImportedNvramSettings()
+{
+    hardwareMachine.nvramSettings.strNvramPath.setNull();
+}
+
+void MachineConfigFile::sanitizeImportedExtraData()
+{
+    mapExtraDataItems.clear();
+}
+
 /**
  * Called from write() before calling ConfigFileBase::createStubDocument().
  * This adjusts the settings version in m->sv if incompatible settings require

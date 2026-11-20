@@ -1415,7 +1415,7 @@ flushPage:
  */
 DECLCALLBACK(VBOXSTRICTRC)
 pgmPoolAccessHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhys, void *pvBuf, size_t cbBuf,
-                     PGMACCESSTYPE enmAccessType, PGMACCESSORIGIN enmOrigin, uint64_t uUser)
+                     PGMACCESSTYPE enmAccessType, PGMACCESSORIGIN fOrigin, uint64_t uUser)
 {
     PPGMPOOL const      pPool = pVM->pgm.s.CTX_SUFF(pPool);
     STAM_PROFILE_START(&pPool->CTX_SUFF_Z(StatMonitor), a);
@@ -1486,7 +1486,7 @@ pgmPoolAccessHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhys, v
          */
         if (   (   pPage->cModifications < cMaxModifications
                 || pgmPoolIsPageLocked(pPage) )
-            && enmOrigin != PGMACCESSORIGIN_DEVICE
+            && (fOrigin & PGMACCESSORIGIN_MAIN_MASK) != PGMACCESSORIGIN_DEVICE
             && cbBuf <= 16)
         {
             /* Clear the shadow entry. */

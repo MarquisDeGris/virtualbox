@@ -163,9 +163,9 @@ typedef struct PDMPCIDEVINT
      * This also works as the internal sub-device ordinal with MMIOEx.
      * @note Same value as idxSubDev, can therefore be removed later. */
     uint8_t                         idxDevCfg;
-    /** Set if the it can be reassigned to a different PCI device number. */
+    /** Set if it can be reassigned to a different PCI device number. */
     bool                            fReassignableDevNo;
-    /** Set if the it can be reassigned to a different PCI function number. */
+    /** Set if it can be reassigned to a different PCI function number. */
     bool                            fReassignableFunNo;
     /** Alignment padding - used by ICH9 for region swapping (DevVGA hack).   */
     uint8_t                         bPadding0;

@@ -489,6 +489,7 @@ typedef struct IOM
     STAMCOUNTER                     StatMmioStaleMappings;
     STAMCOUNTER                     StatMmioDevLockContentionR0;
     STAMCOUNTER                     StatMmioTooDeepRecursion;
+    STAMCOUNTER                     StatMmioWithSelf;
     /** @} */
 } IOM;
 #ifdef IOM_WITH_CRIT_SECT_RW
