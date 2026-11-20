@@ -302,7 +302,13 @@ static DECLCALLBACK(int) rtDvmFmtGptOpen(PCRTDVMDISK pDisk, PRTDVMFMT phVolMgrFm
             pThis->HdrRev1.cbPartitionEntry       = RT_LE2H_U32(pThis->HdrRev1.cbPartitionEntry);
             pThis->HdrRev1.u32CrcPartitionEntries = RT_LE2H_U32(pThis->HdrRev1.u32CrcPartitionEntries);
 
-            if (pThis->HdrRev1.cbPartitionEntry == sizeof(GPTENTRY))
+            /* We limit the partition entry size to what is currently defined by the UEFI spec. We also
+             * limit the number of partition entries to prevent potential overflows. Note that Windows
+             * and Linux have much lower partition count limits (128 and 256, respectively); in practice,
+             * any drive with more than about a dozen partitions will be very difficult to manage for
+             * human users.
+             */
+            if ((pThis->HdrRev1.cbPartitionEntry == sizeof(GPTENTRY)) && (pThis->HdrRev1.cPartitionEntries <= 1024))
             {
                 size_t cbAlignedGptEntries = RT_ALIGN_Z(pThis->HdrRev1.cPartitionEntries * pThis->HdrRev1.cbPartitionEntry, pDisk->cbSector);
                 pThis->paGptEntries = (PGPTENTRY)RTMemAllocZ(cbAlignedGptEntries);

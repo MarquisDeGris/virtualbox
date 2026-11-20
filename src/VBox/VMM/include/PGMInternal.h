@@ -3918,9 +3918,13 @@ DECLCALLBACK(FNPGMRZPHYSPFHANDLER)  pgmPhysRomWritePfHandler;
 DECLCALLBACK(FNPGMRZPHYSPFHANDLER)  pgmPhysMmio2WritePfHandler;
 #endif
 DECLHIDDEN(uint16_t) pgmPhysMmio2CalcChunkCount(RTGCPHYS cb, uint32_t *pcPagesPerChunk);
-DECLHIDDEN(int) pgmPhysMmio2RegisterWorker(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
-                                           const uint8_t cChunks, PPDMDEVINSR3 const pDevIns, uint8_t
-                                           const iSubDev, uint8_t const iRegion, uint32_t const fFlags);
+DECLHIDDEN(int) pgmPhysMmio2RegisterWorkerAlloc(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
+                                                const uint8_t cChunks, PPDMDEVINSR3 const pDevIns, uint8_t
+                                                const iSubDev, uint8_t const iRegion, uint32_t const fFlags);
+DECLHIDDEN(int) pgmPhysMmio2RegisterWorkerExisting(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
+                                                   const uint8_t cChunks, PPDMDEVINSR3 const pDevIns, uint8_t
+                                                   const iSubDev, uint8_t const iRegion, uint32_t const fFlags,
+                                                   R3PTRTYPE(uint8_t *)pbR3);
 DECLHIDDEN(int) pgmPhysMmio2DeregisterWorker(PVMCC pVM, uint8_t idMmio2, uint8_t cChunks, PPDMDEVINSR3 pDevIns);
 int             pgmPhysFreePage(PVM pVM, PGMMFREEPAGESREQ pReq, uint32_t *pcPendingPages, PPGMPAGE pPage, RTGCPHYS GCPhys,
                                 PGMPAGETYPE enmNewType);

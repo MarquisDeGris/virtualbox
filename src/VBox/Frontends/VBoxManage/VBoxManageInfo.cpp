@@ -38,9 +38,7 @@
 
 #include <VBox/com/VirtualBox.h>
 
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
 #include <VBox/pci.h>
-#endif
 
 #include <VBox/log.h>
 #include <VBox/version.h>
@@ -2725,7 +2723,6 @@ HRESULT showVMInfo(ComPtr<IVirtualBox> pVirtualBox,
         }
     } /* USB */
 
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
     /* Host PCI passthrough devices */
     {
          SafeIfaceArray <IPCIDeviceAttachment> assignments;
@@ -2741,19 +2738,39 @@ HRESULT showVMInfo(ComPtr<IVirtualBox> pVirtualBox,
              {
                  ComPtr<IPCIDeviceAttachment> Assignment = assignments[index];
                  char szHostPCIAddress[32], szGuestPCIAddress[32];
-                 LONG iHostPCIAddress = -1, iGuestPCIAddress = -1;
+                 ULONG uHostPCIAddress = UINT32_MAX, uGuestPCIAddress = UINT32_MAX;
                  Bstr DevName;
 
                  Assignment->COMGETTER(Name)(DevName.asOutParam());
-                 Assignment->COMGETTER(HostAddress)(&iHostPCIAddress);
-                 Assignment->COMGETTER(GuestAddress)(&iGuestPCIAddress);
-                 PCIBusAddress().fromLong(iHostPCIAddress).format(szHostPCIAddress, sizeof(szHostPCIAddress));
-                 PCIBusAddress().fromLong(iGuestPCIAddress).format(szGuestPCIAddress, sizeof(szGuestPCIAddress));
+                 Assignment->COMGETTER(HostAddress)(&uHostPCIAddress);
+                 Assignment->COMGETTER(GuestAddress)(&uGuestPCIAddress);
+                 PCIBusAddress().fromLong(uHostPCIAddress).format(szHostPCIAddress, sizeof(szHostPCIAddress));
+                 PCIBusAddress().fromLong(uGuestPCIAddress).format(szGuestPCIAddress, sizeof(szGuestPCIAddress));
 
                  if (details == VMINFO_MACHINEREADABLE)
                      RTPrintf("AttachedHostPCI=%s,%s\n", szHostPCIAddress, szGuestPCIAddress);
                  else
                      RTPrintf(Info::tr("   Host device %ls at %s attached as %s\n"), DevName.raw(), szHostPCIAddress, szGuestPCIAddress);
+
+                 /* A running VM knows whether the device is in it right now. */
+                 if (pConsole)
+                 {
+                     BOOL fHotPluggable = FALSE;
+                     BOOL fPresent      = FALSE;
+                     BOOL fInUse        = FALSE;
+                     if (SUCCEEDED(pConsole->GetHostPCIDeviceState(uHostPCIAddress, &fHotPluggable, &fPresent, &fInUse)))
+                     {
+                         if (details == VMINFO_MACHINEREADABLE)
+                             RTPrintf("AttachedHostPCIState=%s,%s,%s,%s\n", szHostPCIAddress,
+                                      fHotPluggable ? "hotplug" : "fixed", fPresent ? "present" : "absent",
+                                      fInUse ? "inuse" : "unused");
+                         else
+                             RTPrintf(Info::tr("      Hot-pluggable: %s, in the VM: %s, reachable for the guest: %s\n"),
+                                      fHotPluggable ? Info::tr("yes") : Info::tr("no"),
+                                      fPresent      ? Info::tr("yes") : Info::tr("no"),
+                                      fInUse        ? Info::tr("yes") : Info::tr("no"));
+                     }
+                 }
              }
 
              if (assignments.size() > 0 && (details != VMINFO_MACHINEREADABLE))
@@ -2763,7 +2780,6 @@ HRESULT showVMInfo(ComPtr<IVirtualBox> pVirtualBox,
          }
     }
     /* Host PCI passthrough devices */
-#endif
 
     /*
      * Bandwidth groups

@@ -277,7 +277,7 @@ DECLCALLBACK(VBOXSTRICTRC) pgmPhysRomWritePfHandler(PVMCC pVM, PVMCPUCC pVCpu, R
  */
 DECLCALLBACK(VBOXSTRICTRC)
 pgmPhysRomWriteHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhys, void *pvBuf, size_t cbBuf,
-                       PGMACCESSTYPE enmAccessType, PGMACCESSORIGIN enmOrigin, uint64_t uUser)
+                       PGMACCESSTYPE enmAccessType, PGMACCESSORIGIN fOrigin, uint64_t uUser)
 {
     AssertReturn(uUser < RT_ELEMENTS(pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apRomRanges), VERR_INTERNAL_ERROR_3);
     PPGMROMRANGE const  pRom  = pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apRomRanges[uUser];
@@ -291,7 +291,7 @@ pgmPhysRomWriteHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhys,
     PPGMROMPAGE const   pRomPage = &pRom->aPages[iPage];
 
     Log5(("pgmPhysRomWriteHandler: %d %c %#08RGp %#04zx\n", pRomPage->enmProt, enmAccessType == PGMACCESSTYPE_READ ? 'R' : 'W', GCPhys, cbBuf));
-    RT_NOREF(pVCpu, pvPhys, enmOrigin);
+    RT_NOREF(pVCpu, pvPhys, fOrigin);
 
     if (enmAccessType == PGMACCESSTYPE_READ)
     {
@@ -467,7 +467,7 @@ DECLCALLBACK(VBOXSTRICTRC) pgmPhysMmio2WritePfHandler(PVMCC pVM, PVMCPUCC pVCpu,
  */
 DECLCALLBACK(VBOXSTRICTRC)
 pgmPhysMmio2WriteHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhys, void *pvBuf, size_t cbBuf,
-                         PGMACCESSTYPE enmAccessType, PGMACCESSORIGIN enmOrigin, uint64_t uUser)
+                         PGMACCESSTYPE enmAccessType, PGMACCESSORIGIN fOrigin, uint64_t uUser)
 {
     VBOXSTRICTRC rcStrict = PGM_LOCK(pVM); /* We should already have it, but just make sure we do. */
     if (RT_SUCCESS(rcStrict))
@@ -477,7 +477,7 @@ pgmPhysMmio2WriteHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhy
         if (rcStrict == VINF_SUCCESS)
             rcStrict = VINF_PGM_HANDLER_DO_DEFAULT;
     }
-    RT_NOREF(pvPhys, pvBuf, cbBuf, enmAccessType, enmOrigin);
+    RT_NOREF(pvPhys, pvBuf, cbBuf, enmAccessType, fOrigin);
     return rcStrict;
 }
 
@@ -1257,14 +1257,149 @@ DECLHIDDEN(uint16_t) pgmPhysMmio2CalcChunkCount(RTGCPHYS cb, uint32_t *pcPagesPe
 
 
 /**
- * Worker for PGMR3PhysMmio2Register and PGMR0PhysMmio2RegisterReq.
+ * Common worker for pgmPhysMmio2RegisterWorkerAlloc() and pgmPhysMmio2RegisterWorkerExisting().
+ */
+static int pgmPhysMmio2RegisterWorkerCommon(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
+                                            const uint8_t cChunks, PPDMDEVINSR3 const pDevIns,
+                                            uint8_t const iSubDev, uint8_t const iRegion, uint32_t const fFlags,
+                                            uint32_t const cGuestPagesPerChunk, R3PTRTYPE(uint8_t *) pbMmio2BackingR3
+#ifdef IN_RING0
+                                            , RTR0MEMOBJ hMemObj, RTR0MEMOBJ hMapObj
+# ifndef VBOX_WITH_LINEAR_HOST_PHYS_MEM
+                                            , uint8_t *pbMmio2BackingR0
+# endif
+#endif
+                                            )
+{
+    /*
+     * Create the MMIO2 registration records and associated RAM ranges.
+     * The RAM range allocation may fail here.
+     */
+    int rc = VINF_SUCCESS;
+    RTGCPHYS offMmio2Backing = 0;
+    uint32_t cGuestPagesLeft = cGuestPages;
+    for (uint32_t iChunk = 0, idx = idMmio2 - 1; iChunk < cChunks; iChunk++, idx++)
+    {
+        uint32_t const cPagesTrackedByChunk = RT_MIN(cGuestPagesLeft, cGuestPagesPerChunk);
+
+        /*
+         * Allocate the RAM range for this chunk.
+         */
+        uint32_t idRamRange = UINT32_MAX;
+        rc = pgmPhysRamRangeAllocCommon(pVM, cPagesTrackedByChunk, PGM_RAM_RANGE_FLAGS_AD_HOC_MMIO_EX, &idRamRange);
+        if (RT_FAILURE(rc))
+        {
+            /* We only zap the pointers to the backing storage.
+               PGMR3Term and friends will clean up the RAM ranges and stuff. */
+            while (iChunk-- > 0)
+            {
+                idx--;
+#ifdef IN_RING0
+                pVM->pgmr0.s.acMmio2RangePages[idx] = 0;
+# ifndef VBOX_WITH_LINEAR_HOST_PHYS_MEM
+                pVM->pgmr0.s.apbMmio2Backing[idx]   = NULL;
+# endif
+#endif
+
+                PPGMREGMMIO2RANGE const pMmio2 = &pVM->pgm.s.aMmio2Ranges[idx];
+                pMmio2->pbR3 = NIL_RTR3PTR;
+
+                PPGMRAMRANGE const      pRamRange = pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apMmio2RamRanges[idx];
+                pRamRange->pbR3 = NIL_RTR3PTR;
+                RT_BZERO(&pRamRange->aPages[0], sizeof(pRamRange->aPages) * cGuestPagesPerChunk);
+            }
+            break;
+        }
+
+        pVM->pgm.s.apMmio2RamRanges[idx]    = pVM->pgm.s.apRamRanges[idRamRange];
+#ifdef IN_RING0
+        pVM->pgmr0.s.apMmio2RamRanges[idx]  = pVM->pgmr0.s.apRamRanges[idRamRange];
+        pVM->pgmr0.s.acMmio2RangePages[idx] = cPagesTrackedByChunk;
+#endif
+
+        /* Initialize the RAM range. */
+        PPGMRAMRANGE const pRamRange       = pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apRamRanges[idRamRange];
+        pRamRange->pbR3 = pbMmio2BackingR3 + offMmio2Backing;
+        uint32_t iDstPage = cPagesTrackedByChunk;
+#ifdef IN_RING0
+        AssertRelease(HOST_PAGE_SHIFT == GUEST_PAGE_SHIFT);
+        while (iDstPage-- > 0)
+        {
+            RTHCPHYS HCPhys = RTR0MemObjGetPagePhysAddr(hMemObj, iDstPage + (offMmio2Backing >> HOST_PAGE_SHIFT));
+            Assert(HCPhys != NIL_RTHCPHYS);
+            PGM_PAGE_INIT(&pRamRange->aPages[iDstPage], HCPhys, PGM_MMIO2_PAGEID_MAKE(idMmio2, iDstPage),
+                          PGMPAGETYPE_MMIO2, PGM_PAGE_STATE_ALLOCATED);
+        }
+#else
+        Assert(PGM_IS_IN_NEM_MODE(pVM));
+        while (iDstPage-- > 0)
+            PGM_PAGE_INIT(&pRamRange->aPages[iDstPage], UINT64_C(0x0000ffffffff0000),
+                          PGM_MMIO2_PAGEID_MAKE(idMmio2, iDstPage),
+                          PGMPAGETYPE_MMIO2, PGM_PAGE_STATE_ALLOCATED);
+#endif
+
+        /*
+         * Initialize the MMIO2 registration structure.
+         */
+        PPGMREGMMIO2RANGE const pMmio2 = &pVM->pgm.s.aMmio2Ranges[idx];
+        pMmio2->pDevInsR3       = pDevIns;
+        pMmio2->pbR3            = pbMmio2BackingR3 + offMmio2Backing;
+        pMmio2->fFlags          = 0;
+        if (iChunk == 0)
+            pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_FIRST_CHUNK;
+        if (iChunk + 1 == cChunks)
+            pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_LAST_CHUNK;
+        if (fFlags & PGMPHYS_MMIO2_FLAGS_TRACK_DIRTY_PAGES)
+            pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_TRACK_DIRTY_PAGES;
+
+        pMmio2->iSubDev         = iSubDev;
+        pMmio2->iRegion         = iRegion;
+        pMmio2->idSavedState    = UINT8_MAX;
+        pMmio2->idMmio2         = idMmio2 + iChunk;
+        pMmio2->idRamRange      = idRamRange;
+        Assert(pMmio2->idRamRange == idRamRange);
+        pMmio2->GCPhys          = NIL_RTGCPHYS;
+        pMmio2->cbReal          = (RTGCPHYS)cPagesTrackedByChunk << GUEST_PAGE_SHIFT;
+        pMmio2->pPhysHandlerR3  = NIL_RTR3PTR; /* Pre-alloc is done by ring-3 caller. */
+        pMmio2->paLSPages       = NIL_RTR3PTR;
+
+#if defined(IN_RING0) && !defined(VBOX_WITH_LINEAR_HOST_PHYS_MEM)
+        pVM->pgmr0.s.apbMmio2Backing[idx] = &pbMmio2BackingR0[offMmio2Backing];
+#endif
+
+        /* Advance */
+        cGuestPagesLeft -= cPagesTrackedByChunk;
+        offMmio2Backing += (RTGCPHYS)cPagesTrackedByChunk << GUEST_PAGE_SHIFT;
+    } /* chunk alloc loop */
+
+    Assert(cGuestPagesLeft == 0 || RT_FAILURE_NP(rc));
+    if (RT_SUCCESS(rc))
+    {
+        /*
+         * Account for pages and ring-0 memory objects.
+         */
+        pVM->pgm.s.cAllPages     += cGuestPages;
+        pVM->pgm.s.cPrivatePages += cGuestPages;
+#ifdef IN_RING0
+        pVM->pgmr0.s.ahMmio2MemObjs[idMmio2 - 1] = hMemObj;
+        pVM->pgmr0.s.ahMmio2MapObjs[idMmio2 - 1] = hMapObj;
+#endif
+        pVM->pgm.s.cMmio2Ranges = idMmio2 + cChunks - 1U;
+    }
+
+    return rc;
+}
+
+
+/**
+ * Worker for PGMR3PhysMmio2Register and PGMR0PhysMmio2RegisterReq - allocate backing memory.
  *
  * (The caller already know which MMIO2 region ID will be assigned and how many
  * chunks will be used, so no output parameters required.)
  */
-DECLHIDDEN(int) pgmPhysMmio2RegisterWorker(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
-                                           const uint8_t cChunks, PPDMDEVINSR3 const pDevIns, uint8_t
-                                           const iSubDev, uint8_t const iRegion, uint32_t const fFlags)
+DECLHIDDEN(int) pgmPhysMmio2RegisterWorkerAlloc(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
+                                                const uint8_t cChunks, PPDMDEVINSR3 const pDevIns,
+                                                uint8_t const iSubDev, uint8_t const iRegion, uint32_t const fFlags)
 {
     /*
      * Get the number of pages per chunk.
@@ -1296,7 +1431,7 @@ DECLHIDDEN(int) pgmPhysMmio2RegisterWorker(PVMCC pVM, uint32_t const cGuestPages
     if (RT_SUCCESS(rc))
     {
         /*
-         * Make sure it's is initialized to zeros before it's mapped to userland.
+         * Make sure it is initialized to zeros before it's mapped to userland.
          */
 #ifdef IN_RING0
 # ifndef VBOX_WITH_LINEAR_HOST_PHYS_MEM
@@ -1320,124 +1455,17 @@ DECLHIDDEN(int) pgmPhysMmio2RegisterWorker(PVMCC pVM, uint32_t const cGuestPages
             pbMmio2BackingR3 = RTR0MemObjAddressR3(hMapObj);
 #endif
 
-            /*
-             * Create the MMIO2 registration records and associated RAM ranges.
-             * The RAM range allocation may fail here.
-             */
-            RTGCPHYS offMmio2Backing = 0;
-            uint32_t cGuestPagesLeft = cGuestPages;
-            for (uint32_t iChunk = 0, idx = idMmio2 - 1; iChunk < cChunks; iChunk++, idx++)
-            {
-                uint32_t const cPagesTrackedByChunk = RT_MIN(cGuestPagesLeft, cGuestPagesPerChunk);
-
-                /*
-                 * Allocate the RAM range for this chunk.
-                 */
-                uint32_t idRamRange = UINT32_MAX;
-                rc = pgmPhysRamRangeAllocCommon(pVM, cPagesTrackedByChunk, PGM_RAM_RANGE_FLAGS_AD_HOC_MMIO_EX, &idRamRange);
-                if (RT_FAILURE(rc))
-                {
-                    /* We only zap the pointers to the backing storage.
-                       PGMR3Term and friends will clean up the RAM ranges and stuff. */
-                    while (iChunk-- > 0)
-                    {
-                        idx--;
+            rc = pgmPhysMmio2RegisterWorkerCommon(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags,
+                                                  cGuestPagesPerChunk, pbMmio2BackingR3
 #ifdef IN_RING0
-                        pVM->pgmr0.s.acMmio2RangePages[idx] = 0;
+                                                  , hMemObj, hMapObj
 # ifndef VBOX_WITH_LINEAR_HOST_PHYS_MEM
-                        pVM->pgmr0.s.apbMmio2Backing[idx]   = NULL;
+                                                  , pbMmio2BackingR0
 # endif
 #endif
-
-                        PPGMREGMMIO2RANGE const pMmio2 = &pVM->pgm.s.aMmio2Ranges[idx];
-                        pMmio2->pbR3 = NIL_RTR3PTR;
-
-                        PPGMRAMRANGE const      pRamRange = pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apMmio2RamRanges[idx];
-                        pRamRange->pbR3 = NIL_RTR3PTR;
-                        RT_BZERO(&pRamRange->aPages[0], sizeof(pRamRange->aPages) * cGuestPagesPerChunk);
-                    }
-                    break;
-                }
-
-                pVM->pgm.s.apMmio2RamRanges[idx]    = pVM->pgm.s.apRamRanges[idRamRange];
-#ifdef IN_RING0
-                pVM->pgmr0.s.apMmio2RamRanges[idx]  = pVM->pgmr0.s.apRamRanges[idRamRange];
-                pVM->pgmr0.s.acMmio2RangePages[idx] = cPagesTrackedByChunk;
-#endif
-
-                /* Initialize the RAM range. */
-                PPGMRAMRANGE const pRamRange       = pVM->CTX_EXPR(pgm, pgmr0, pgm).s.apRamRanges[idRamRange];
-                pRamRange->pbR3 = pbMmio2BackingR3 + offMmio2Backing;
-                uint32_t iDstPage = cPagesTrackedByChunk;
-#ifdef IN_RING0
-                AssertRelease(HOST_PAGE_SHIFT == GUEST_PAGE_SHIFT);
-                while (iDstPage-- > 0)
-                {
-                    RTHCPHYS HCPhys = RTR0MemObjGetPagePhysAddr(hMemObj, iDstPage + (offMmio2Backing >> HOST_PAGE_SHIFT));
-                    Assert(HCPhys != NIL_RTHCPHYS);
-                    PGM_PAGE_INIT(&pRamRange->aPages[iDstPage], HCPhys, PGM_MMIO2_PAGEID_MAKE(idMmio2, iDstPage),
-                                  PGMPAGETYPE_MMIO2, PGM_PAGE_STATE_ALLOCATED);
-                }
-#else
-                Assert(PGM_IS_IN_NEM_MODE(pVM));
-                while (iDstPage-- > 0)
-                    PGM_PAGE_INIT(&pRamRange->aPages[iDstPage], UINT64_C(0x0000ffffffff0000),
-                                  PGM_MMIO2_PAGEID_MAKE(idMmio2, iDstPage),
-                                  PGMPAGETYPE_MMIO2, PGM_PAGE_STATE_ALLOCATED);
-#endif
-
-                /*
-                 * Initialize the MMIO2 registration structure.
-                 */
-                PPGMREGMMIO2RANGE const pMmio2 = &pVM->pgm.s.aMmio2Ranges[idx];
-                pMmio2->pDevInsR3       = pDevIns;
-                pMmio2->pbR3            = pbMmio2BackingR3 + offMmio2Backing;
-                pMmio2->fFlags          = 0;
-                if (iChunk == 0)
-                    pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_FIRST_CHUNK;
-                if (iChunk + 1 == cChunks)
-                    pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_LAST_CHUNK;
-                if (fFlags & PGMPHYS_MMIO2_FLAGS_TRACK_DIRTY_PAGES)
-                    pMmio2->fFlags     |= PGMREGMMIO2RANGE_F_TRACK_DIRTY_PAGES;
-
-                pMmio2->iSubDev         = iSubDev;
-                pMmio2->iRegion         = iRegion;
-                pMmio2->idSavedState    = UINT8_MAX;
-                pMmio2->idMmio2         = idMmio2 + iChunk;
-                pMmio2->idRamRange      = idRamRange;
-                Assert(pMmio2->idRamRange == idRamRange);
-                pMmio2->GCPhys          = NIL_RTGCPHYS;
-                pMmio2->cbReal          = (RTGCPHYS)cPagesTrackedByChunk << GUEST_PAGE_SHIFT;
-                pMmio2->pPhysHandlerR3  = NIL_RTR3PTR; /* Pre-alloc is done by ring-3 caller. */
-                pMmio2->paLSPages       = NIL_RTR3PTR;
-
-#if defined(IN_RING0) && !defined(VBOX_WITH_LINEAR_HOST_PHYS_MEM)
-                pVM->pgmr0.s.apbMmio2Backing[idx] = &pbMmio2BackingR0[offMmio2Backing];
-#endif
-
-                /* Advance */
-                cGuestPagesLeft -= cPagesTrackedByChunk;
-                offMmio2Backing += (RTGCPHYS)cPagesTrackedByChunk << GUEST_PAGE_SHIFT;
-            } /* chunk alloc loop */
-            Assert(cGuestPagesLeft == 0 || RT_FAILURE_NP(rc));
+                                                  );
             if (RT_SUCCESS(rc))
-            {
-                /*
-                 * Account for pages and ring-0 memory objects.
-                 */
-                pVM->pgm.s.cAllPages     += cGuestPages;
-                pVM->pgm.s.cPrivatePages += cGuestPages;
-#ifdef IN_RING0
-                pVM->pgmr0.s.ahMmio2MemObjs[idMmio2 - 1] = hMemObj;
-                pVM->pgmr0.s.ahMmio2MapObjs[idMmio2 - 1] = hMapObj;
-#endif
-                pVM->pgm.s.cMmio2Ranges = idMmio2 + cChunks - 1U;
-
-                /*
-                 * Done!.
-                 */
                 return VINF_SUCCESS;
-            }
 
             /*
              * Bail.
@@ -1452,6 +1480,92 @@ DECLHIDDEN(int) pgmPhysMmio2RegisterWorker(PVMCC pVM, uint32_t const cGuestPages
     }
     else
         LogRel(("pgmPhysMmio2RegisterWorker: Failed to allocate %RGp bytes of MMIO2 backing memory: %Rrc\n", cbMmio2Aligned, rc));
+    return rc;
+}
+
+
+/**
+ * Worker for PGMR3PhysMmio2Register and PGMR0PhysMmio2RegisterReq.
+ *
+ * (The caller already know which MMIO2 region ID will be assigned and how many
+ * chunks will be used, so no output parameters required.)
+ */
+DECLHIDDEN(int) pgmPhysMmio2RegisterWorkerExisting(PVMCC pVM, uint32_t const cGuestPages, uint8_t const idMmio2,
+                                                   const uint8_t cChunks, PPDMDEVINSR3 const pDevIns, uint8_t
+                                                   const iSubDev, uint8_t const iRegion, uint32_t const fFlags,
+                                                   R3PTRTYPE(uint8_t *) pb)
+{
+    /*
+     * Get the number of pages per chunk.
+     */
+    uint32_t cGuestPagesPerChunk;
+    AssertReturn(pgmPhysMmio2CalcChunkCount((RTGCPHYS)cGuestPages << GUEST_PAGE_SHIFT, &cGuestPagesPerChunk) == cChunks,
+                 VERR_PGM_PHYS_MMIO_EX_IPE);
+    Assert(idMmio2 != 0);
+
+    /*
+     * The first thing we need to do is the allocate the memory that will be
+     * backing the whole range.
+     */
+    RTGCPHYS const          cbMmio2Backing   = (RTGCPHYS)cGuestPages << GUEST_PAGE_SHIFT;
+    size_t const            cHostPages       = (cbMmio2Backing + HOST_PAGE_SIZE - 1U) >> HOST_PAGE_SHIFT;
+    size_t const            cbMmio2Aligned   = cHostPages << HOST_PAGE_SHIFT;
+    R3PTRTYPE(uint8_t *)    pbMmio2BackingR3 = pb;
+#ifdef IN_RING0
+    RTR0MEMOBJ              hMemObj          = NIL_RTR0MEMOBJ;
+
+    /*
+     * Not in ring-0 on this branch.  Memory of a device as the backing has to
+     * be locked in a way the runtime of the 7.2 branch has for it
+     * (RTMEMOBJ_LOCK_USER_F_TREAT_MMIO_AS_PHYS) and the one of this branch has
+     * not, and the runtime in ring-0 and the support driver are left as they
+     * are here.  The one user is the PCI passthrough device, which takes the
+     * native execution engine, where the ring-3 part below does this.
+     */
+    int rc = VERR_NOT_SUPPORTED;
+#else  /* !IN_RING0 */
+    AssertReturn(PGM_IS_IN_NEM_MODE(pVM), VERR_INTERNAL_ERROR_4);
+    int rc = VINF_SUCCESS;
+#endif /* !IN_RING0 */
+    if (RT_SUCCESS(rc))
+    {
+#ifdef IN_RING0
+        /*
+         * Map it into ring-0.
+         */
+        RTR0MEMOBJ hMapObj = NIL_RTR0MEMOBJ;
+        rc = RTR0MemObjMapKernel(&hMapObj, hMemObj, (void *)-1, 0, RTMEM_PROT_READ | RTMEM_PROT_WRITE);
+        if (RT_SUCCESS(rc))
+        {
+# ifndef VBOX_WITH_LINEAR_HOST_PHYS_MEM
+            uint8_t *pbMmio2BackingR0 = (uint8_t *)RTR0MemObjAddress(hMapObj);
+            AssertPtr(pbMmio2BackingR0);
+# endif
+#endif
+
+            rc = pgmPhysMmio2RegisterWorkerCommon(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags,
+                                                  cGuestPagesPerChunk, pbMmio2BackingR3
+#ifdef IN_RING0
+                                                  , hMemObj, hMapObj
+# ifndef VBOX_WITH_LINEAR_HOST_PHYS_MEM
+                                                  , pbMmio2BackingR0
+# endif
+#endif
+                                                  );
+            if (RT_SUCCESS(rc))
+                return VINF_SUCCESS;
+
+            /*
+             * Bail.
+             */
+#ifdef IN_RING0
+            RTR0MemObjFree(hMapObj, true /*fFreeMappings*/);
+        }
+        RTR0MemObjFree(hMemObj, true /*fFreeMappings*/);
+#endif
+    }
+    else
+        LogRel(("pgmPhysMmio2RegisterWorkerExisting: Failed to lock %RGp bytes of MMIO2 backing memory: %Rrc\n", cbMmio2Aligned, rc));
     return rc;
 }
 
@@ -1509,6 +1623,11 @@ VMMR0_INT_DECL(int) PGMR0PhysMmio2RegisterReq(PGVM pGVM, PPGMPHYSMMIO2REGISTERRE
                     ("idMmio2=%#x cChunks=%#x\n", pReq->idMmio2, pReq->cChunks),
                     VERR_INVALID_PARAMETER);
 
+    AssertMsgReturn(   !pReq->pbR3
+                    || (pReq->fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING),
+                    ("fFlags=%#x\n", pReq->fFlags),
+                    VERR_INVALID_PARAMETER);
+
     for (uint32_t iChunk = 0, idx = pReq->idMmio2 - 1; iChunk < pReq->cChunks; iChunk++, idx++)
     {
         AssertReturn(pGVM->pgmr0.s.ahMmio2MapObjs[idx] == NIL_RTR0MEMOBJ, VERR_INVALID_STATE);
@@ -1528,8 +1647,13 @@ VMMR0_INT_DECL(int) PGMR0PhysMmio2RegisterReq(PGVM pGVM, PPGMPHYSMMIO2REGISTERRE
     AssertReturnStmt(pGVM->pgmr0.s.idRamRangeMax + 1U + pReq->cChunks <= RT_ELEMENTS(pGVM->pgmr0.s.apRamRanges),
                      PGM_UNLOCK(pGVM), VERR_PGM_TOO_MANY_RAM_RANGES);
 
-    rc = pgmPhysMmio2RegisterWorker(pGVM, pReq->cGuestPages, pReq->idMmio2, pReq->cChunks,
-                                    pReq->pDevIns, pReq->iSubDev, pReq->iRegion, pReq->fFlags);
+    if (pReq->fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING)
+        rc = pgmPhysMmio2RegisterWorkerExisting(pGVM, pReq->cGuestPages, pReq->idMmio2, pReq->cChunks,
+                                                pReq->pDevIns, pReq->iSubDev, pReq->iRegion, pReq->fFlags,
+                                                pReq->pbR3);
+    else
+        rc = pgmPhysMmio2RegisterWorkerAlloc(pGVM, pReq->cGuestPages, pReq->idMmio2, pReq->cChunks,
+                                             pReq->pDevIns, pReq->iSubDev, pReq->iRegion, pReq->fFlags);
 
     PGM_UNLOCK(pGVM);
     return rc;
@@ -3855,10 +3979,10 @@ static void pgmPhysCacheAdd(PVM pVM, PGMPHYSCACHE *pCache, RTGCPHYS GCPhys, uint
  * @param   GCPhys      The physical address to start reading at.
  * @param   pvBuf       Where to put the bits we read.
  * @param   cb          How much to read - less or equal to a page.
- * @param   enmOrigin   The origin of this call.
+ * @param   fOrigin     The origin of this call.
  */
 static VBOXSTRICTRC pgmPhysReadHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPhys, void *pvBuf, size_t cb,
-                                       PGMACCESSORIGIN enmOrigin)
+                                       PGMACCESSORIGIN fOrigin)
 {
     /*
      * The most frequent access here is MMIO and shadowed ROM.
@@ -3897,7 +4021,7 @@ static VBOXSTRICTRC pgmPhysReadHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPhy
             Assert((pCur->Key     & GUEST_PAGE_OFFSET_MASK) == 0);
             Assert((pCur->KeyLast & GUEST_PAGE_OFFSET_MASK) == GUEST_PAGE_OFFSET_MASK);
 #ifndef IN_RING3
-            if (enmOrigin != PGMACCESSORIGIN_IEM)
+            if (fOrigin != PGMACCESSORIGIN_IEM)
             {
                 /* Cannot reliably handle informational status codes in this context */
                 pgmPhysReleaseInternalPageMappingLock(pVM, &PgMpLck);
@@ -3918,9 +4042,9 @@ static VBOXSTRICTRC pgmPhysReadHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPhy
             /* If the access origins with a device, make sure the buffer is initialized
                as a guard against leaking heap, stack and other info via badly written
                MMIO handling. @bugref{10651} */
-            if (enmOrigin == PGMACCESSORIGIN_DEVICE)
+            if ((fOrigin & PGMACCESSORIGIN_MAIN_MASK) == PGMACCESSORIGIN_DEVICE)
                 memset(pvBuf, 0xff, cb);
-            rcStrict = pfnHandler(pVM, pVCpu, GCPhys, (void *)pvSrc, pvBuf, cb, PGMACCESSTYPE_READ, enmOrigin, uUser);
+            rcStrict = pfnHandler(pVM, pVCpu, GCPhys, (void *)pvSrc, pvBuf, cb, PGMACCESSTYPE_READ, fOrigin, uUser);
             PGM_LOCK_VOID(pVM);
 
             STAM_PROFILE_STOP(&pCur->Stat, h); /* no locking needed, entry is unlikely reused before we get here. */
@@ -3985,9 +4109,9 @@ static VBOXSTRICTRC pgmPhysReadHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPhy
  * @param   GCPhys          Physical address start reading from.
  * @param   pvBuf           Where to put the read bits.
  * @param   cbRead          How many bytes to read.
- * @param   enmOrigin       The origin of this call.
+ * @param   fOrigin         The origin of this call.
  */
-VMMDECL(VBOXSTRICTRC) PGMPhysRead(PVMCC pVM, RTGCPHYS GCPhys, void *pvBuf, size_t cbRead, PGMACCESSORIGIN enmOrigin)
+VMMDECL(VBOXSTRICTRC) PGMPhysRead(PVMCC pVM, RTGCPHYS GCPhys, void *pvBuf, size_t cbRead, PGMACCESSORIGIN fOrigin)
 {
     AssertMsgReturn(cbRead > 0, ("don't even think about reading zero bytes!\n"), VINF_SUCCESS);
     LogFlow(("PGMPhysRead: %RGp %d\n", GCPhys, cbRead));
@@ -4049,7 +4173,7 @@ VMMDECL(VBOXSTRICTRC) PGMPhysRead(PVMCC pVM, RTGCPHYS GCPhys, void *pvBuf, size_
                  */
                 else
                 {
-                    VBOXSTRICTRC rcStrict2 = pgmPhysReadHandler(pVM, pPage, pRam->GCPhys + off, pvBuf, cb, enmOrigin);
+                    VBOXSTRICTRC rcStrict2 = pgmPhysReadHandler(pVM, pPage, pRam->GCPhys + off, pvBuf, cb, fOrigin);
                     if (PGM_PHYS_RW_IS_SUCCESS(rcStrict2))
                         PGM_PHYS_RW_DO_UPDATE_STRICT_RC(rcStrict, rcStrict2);
                     else
@@ -4113,10 +4237,10 @@ VMMDECL(VBOXSTRICTRC) PGMPhysRead(PVMCC pVM, RTGCPHYS GCPhys, void *pvBuf, size_
  * @param   GCPhys      The physical address to start writing at.
  * @param   pvBuf       What to write.
  * @param   cbWrite     How much to write - less or equal to a page.
- * @param   enmOrigin   The origin of this call.
+ * @param   fOrigin     The origin of this call.
  */
 static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPhys, void const *pvBuf, size_t cbWrite,
-                                        PGMACCESSORIGIN enmOrigin)
+                                        PGMACCESSORIGIN fOrigin)
 {
     PGMPAGEMAPLOCK  PgMpLck;
     void           *pvDst = NULL;
@@ -4136,7 +4260,7 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
     {
         Assert(GCPhys >= pCur->Key && GCPhys <= pCur->KeyLast);
 #ifndef IN_RING3
-        if (enmOrigin != PGMACCESSORIGIN_IEM)
+        if (fOrigin != PGMACCESSORIGIN_IEM)
             /* Cannot reliably handle informational status codes in this context */
             return VERR_PGM_PHYS_WR_HIT_HANDLER;
 #endif
@@ -4164,11 +4288,11 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
                dirty page trackers will want to keep it for performance reasons. */
             PGM_LOCK_ASSERT_OWNER(pVM);
             if (pCurType->fKeepPgmLock)
-                rcStrict = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, enmOrigin, uUser);
+                rcStrict = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, fOrigin, uUser);
             else
             {
                 PGM_UNLOCK(pVM);
-                rcStrict = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, enmOrigin, uUser);
+                rcStrict = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, fOrigin, uUser);
                 PGM_LOCK_VOID(pVM);
             }
 
@@ -4225,8 +4349,8 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
      *        more. */
     /* The loop state (big + ugly). */
     PPGMPHYSHANDLER pPhys       = NULL;
-    uint32_t        offPhys     = GUEST_PAGE_SIZE;
-    uint32_t        offPhysLast = GUEST_PAGE_SIZE;
+    uint64_t        offPhys     = GUEST_PAGE_SIZE;
+    uint64_t        offPhysLast = GUEST_PAGE_SIZE;
     bool            fMorePhys   = PGM_PAGE_HAS_ACTIVE_PHYSICAL_HANDLERS(pPage);
 
     /* The loop. */
@@ -4238,7 +4362,7 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
             if (RT_SUCCESS_NP(rcStrict))
             {
                 offPhys = 0;
-                offPhysLast = pPhys->KeyLast - GCPhys; /* ASSUMES < 4GB handlers... */
+                offPhysLast = pPhys->KeyLast - GCPhys;
             }
             else
             {
@@ -4253,8 +4377,7 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
                     && pPhys->Key <= GCPhys + (cbWrite - 1))
                 {
                     offPhys     = pPhys->Key     - GCPhys;
-                    offPhysLast = pPhys->KeyLast - GCPhys; /* ASSUMES < 4GB handlers... */
-                    Assert(pPhys->KeyLast - pPhys->Key < _4G);
+                    offPhysLast = pPhys->KeyLast - GCPhys;
                 }
                 else
                 {
@@ -4269,8 +4392,7 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
          * Handle access to space without handlers (that's easy).
          */
         VBOXSTRICTRC rcStrict2 = VINF_PGM_HANDLER_DO_DEFAULT;
-        uint32_t cbRange = (uint32_t)cbWrite;
-        Assert(cbRange == cbWrite);
+        size_t cbRange = cbWrite;
 
         /*
          * Physical handler.
@@ -4278,7 +4400,7 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
         if (!offPhys)
         {
 #ifndef IN_RING3
-            if (enmOrigin != PGMACCESSORIGIN_IEM)
+            if (fOrigin != PGMACCESSORIGIN_IEM)
                 /* Cannot reliably handle informational status codes in this context */
                 return VERR_PGM_PHYS_WR_HIT_HANDLER;
 #endif
@@ -4298,11 +4420,11 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
                dirty page trackers will want to keep it for performance reasons. */
             PGM_LOCK_ASSERT_OWNER(pVM);
             if (pCurType->fKeepPgmLock)
-                rcStrict2 = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, enmOrigin, uUser);
+                rcStrict2 = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, fOrigin, uUser);
             else
             {
                 PGM_UNLOCK(pVM);
-                rcStrict2 = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, enmOrigin, uUser);
+                rcStrict2 = pfnHandler(pVM, pVCpu, GCPhys, pvDst, (void *)pvBuf, cbRange, PGMACCESSTYPE_WRITE, fOrigin, uUser);
                 PGM_LOCK_VOID(pVM);
             }
 
@@ -4389,11 +4511,11 @@ static VBOXSTRICTRC pgmPhysWriteHandler(PVMCC pVM, PPGMPAGE pPage, RTGCPHYS GCPh
  * @param   GCPhys          Physical address to write to.
  * @param   pvBuf           What to write.
  * @param   cbWrite         How many bytes to write.
- * @param   enmOrigin       Who is calling.
+ * @param   fOrigin         Who is calling.
  */
-VMMDECL(VBOXSTRICTRC) PGMPhysWrite(PVMCC pVM, RTGCPHYS GCPhys, const void *pvBuf, size_t cbWrite, PGMACCESSORIGIN enmOrigin)
+VMMDECL(VBOXSTRICTRC) PGMPhysWrite(PVMCC pVM, RTGCPHYS GCPhys, const void *pvBuf, size_t cbWrite, PGMACCESSORIGIN fOrigin)
 {
-    AssertMsg(!pVM->pgm.s.fNoMorePhysWrites, ("Calling PGMPhysWrite after pgmR3Save()! enmOrigin=%d\n", enmOrigin));
+    AssertMsg(!pVM->pgm.s.fNoMorePhysWrites, ("Calling PGMPhysWrite after pgmR3Save()! fOrigin=%#zx\n", fOrigin));
     AssertMsgReturn(cbWrite > 0, ("don't even think about writing zero bytes!\n"), VINF_SUCCESS);
     LogFlow(("PGMPhysWrite: %RGp %d\n", GCPhys, cbWrite));
 
@@ -4450,7 +4572,7 @@ VMMDECL(VBOXSTRICTRC) PGMPhysWrite(PVMCC pVM, RTGCPHYS GCPhys, const void *pvBuf
                  */
                 else
                 {
-                    VBOXSTRICTRC rcStrict2 = pgmPhysWriteHandler(pVM, pPage, pRam->GCPhys + off, pvBuf, cb, enmOrigin);
+                    VBOXSTRICTRC rcStrict2 = pgmPhysWriteHandler(pVM, pPage, pRam->GCPhys + off, pvBuf, cb, fOrigin);
                     if (PGM_PHYS_RW_IS_SUCCESS(rcStrict2))
                         PGM_PHYS_RW_DO_UPDATE_STRICT_RC(rcStrict, rcStrict2);
                     else
@@ -4905,10 +5027,10 @@ VMMDECL(int) PGMPhysSimpleDirtyWriteGCPtr(PVMCPUCC pVCpu, RTGCPTR GCPtrDst, cons
  * @param   pvDst       The destination address.
  * @param   GCPtrSrc    The source address (GC pointer).
  * @param   cb          The number of bytes to read.
- * @param   enmOrigin   Who is calling.
+ * @param   fOrigin     Who is calling.
  * @thread  EMT(pVCpu)
  */
-VMMDECL(VBOXSTRICTRC) PGMPhysReadGCPtr(PVMCPUCC pVCpu, void *pvDst, RTGCPTR GCPtrSrc, size_t cb, PGMACCESSORIGIN enmOrigin)
+VMMDECL(VBOXSTRICTRC) PGMPhysReadGCPtr(PVMCPUCC pVCpu, void *pvDst, RTGCPTR GCPtrSrc, size_t cb, PGMACCESSORIGIN fOrigin)
 {
     int         rc;
     PVMCC       pVM = pVCpu->CTX_SUFF(pVM);
@@ -4940,7 +5062,7 @@ VMMDECL(VBOXSTRICTRC) PGMPhysReadGCPtr(PVMCPUCC pVCpu, void *pvDst, RTGCPTR GCPt
             AssertRC(rc);
         }
 
-        return PGMPhysRead(pVM, GCPhys, pvDst, cb, enmOrigin);
+        return PGMPhysRead(pVM, GCPhys, pvDst, cb, fOrigin);
     }
 
     /*
@@ -4965,14 +5087,14 @@ VMMDECL(VBOXSTRICTRC) PGMPhysReadGCPtr(PVMCPUCC pVCpu, void *pvDst, RTGCPTR GCPt
         size_t cbRead = GUEST_PAGE_SIZE - ((RTGCUINTPTR)GCPtrSrc & GUEST_PAGE_OFFSET_MASK);
         if (cbRead < cb)
         {
-            VBOXSTRICTRC rcStrict = PGMPhysRead(pVM, GCPhys, pvDst, cbRead, enmOrigin);
+            VBOXSTRICTRC rcStrict = PGMPhysRead(pVM, GCPhys, pvDst, cbRead, fOrigin);
             if (RT_LIKELY(rcStrict == VINF_SUCCESS))
             { /* likely */ }
             else
                 return rcStrict;
         }
         else    /* Last page (cbRead is GUEST_PAGE_SIZE, we only need cb!) */
-            return PGMPhysRead(pVM, GCPhys, pvDst, cb, enmOrigin);
+            return PGMPhysRead(pVM, GCPhys, pvDst, cb, fOrigin);
 
         /* next */
         Assert(cb > cbRead);
@@ -4997,9 +5119,9 @@ VMMDECL(VBOXSTRICTRC) PGMPhysReadGCPtr(PVMCPUCC pVCpu, void *pvDst, RTGCPTR GCPt
  * @param   GCPtrDst    The destination address (GC pointer).
  * @param   pvSrc       The source address.
  * @param   cb          The number of bytes to write.
- * @param   enmOrigin       Who is calling.
+ * @param   fOrigin     Who is calling.
  */
-VMMDECL(VBOXSTRICTRC) PGMPhysWriteGCPtr(PVMCPUCC pVCpu, RTGCPTR GCPtrDst, const void *pvSrc, size_t cb, PGMACCESSORIGIN enmOrigin)
+VMMDECL(VBOXSTRICTRC) PGMPhysWriteGCPtr(PVMCPUCC pVCpu, RTGCPTR GCPtrDst, const void *pvSrc, size_t cb, PGMACCESSORIGIN fOrigin)
 {
     int         rc;
     PVMCC       pVM = pVCpu->CTX_SUFF(pVM);
@@ -5035,7 +5157,7 @@ VMMDECL(VBOXSTRICTRC) PGMPhysWriteGCPtr(PVMCPUCC pVCpu, RTGCPTR GCPtrDst, const 
             AssertRC(rc);
         }
 
-        return PGMPhysWrite(pVM, GCPhys, pvSrc, cb, enmOrigin);
+        return PGMPhysWrite(pVM, GCPhys, pvSrc, cb, fOrigin);
     }
 
     /*
@@ -5064,14 +5186,14 @@ VMMDECL(VBOXSTRICTRC) PGMPhysWriteGCPtr(PVMCPUCC pVCpu, RTGCPTR GCPtrDst, const 
         size_t cbWrite = GUEST_PAGE_SIZE - ((RTGCUINTPTR)GCPtrDst & GUEST_PAGE_OFFSET_MASK);
         if (cbWrite < cb)
         {
-            VBOXSTRICTRC rcStrict = PGMPhysWrite(pVM, GCPhys, pvSrc, cbWrite, enmOrigin);
+            VBOXSTRICTRC rcStrict = PGMPhysWrite(pVM, GCPhys, pvSrc, cbWrite, fOrigin);
             if (RT_LIKELY(rcStrict == VINF_SUCCESS))
             { /* likely */ }
             else
                 return rcStrict;
         }
         else    /* Last page (cbWrite is GUEST_PAGE_SIZE, we only need cb!) */
-            return PGMPhysWrite(pVM, GCPhys, pvSrc, cb, enmOrigin);
+            return PGMPhysWrite(pVM, GCPhys, pvSrc, cb, fOrigin);
 
         /* next */
         Assert(cb > cbWrite);

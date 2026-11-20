@@ -104,9 +104,9 @@
  * EMT worker for PGMR3PhysReadExternal.
  */
 static DECLCALLBACK(int) pgmR3PhysReadExternalEMT(PVM pVM, PRTGCPHYS pGCPhys, void *pvBuf, size_t cbRead,
-                                                  PGMACCESSORIGIN enmOrigin)
+                                                  PGMACCESSORIGIN fOrigin)
 {
-    VBOXSTRICTRC rcStrict = PGMPhysRead(pVM, *pGCPhys, pvBuf, cbRead, enmOrigin);
+    VBOXSTRICTRC rcStrict = PGMPhysRead(pVM, *pGCPhys, pvBuf, cbRead, fOrigin);
     AssertMsg(rcStrict == VINF_SUCCESS, ("%Rrc\n", VBOXSTRICTRC_VAL(rcStrict))); NOREF(rcStrict);
     return VINF_SUCCESS;
 }
@@ -122,11 +122,11 @@ static DECLCALLBACK(int) pgmR3PhysReadExternalEMT(PVM pVM, PRTGCPHYS pGCPhys, vo
  * @param   GCPhys          Physical address to read from.
  * @param   pvBuf           Where to read into.
  * @param   cbRead          How many bytes to read.
- * @param   enmOrigin       Who is calling.
+ * @param   fOrigin         Who is calling.
  *
  * @thread  Any but EMTs.
  */
-VMMR3DECL(int) PGMR3PhysReadExternal(PVM pVM, RTGCPHYS GCPhys, void *pvBuf, size_t cbRead, PGMACCESSORIGIN enmOrigin)
+VMMR3DECL(int) PGMR3PhysReadExternal(PVM pVM, RTGCPHYS GCPhys, void *pvBuf, size_t cbRead, PGMACCESSORIGIN fOrigin)
 {
     VM_ASSERT_OTHER_THREAD(pVM);
 
@@ -164,7 +164,7 @@ VMMR3DECL(int) PGMR3PhysReadExternal(PVM pVM, RTGCPHYS GCPhys, void *pvBuf, size
                     PGM_UNLOCK(pVM);
 
                     return VMR3ReqPriorityCallWait(pVM, VMCPUID_ANY, (PFNRT)pgmR3PhysReadExternalEMT, 5,
-                                                   pVM, &GCPhys, pvBuf, cbRead, enmOrigin);
+                                                   pVM, &GCPhys, pvBuf, cbRead, fOrigin);
                 }
                 Assert(!PGM_PAGE_IS_MMIO_OR_SPECIAL_ALIAS(pPage));
 
@@ -232,10 +232,10 @@ VMMR3DECL(int) PGMR3PhysReadExternal(PVM pVM, RTGCPHYS GCPhys, void *pvBuf, size
  * EMT worker for PGMR3PhysWriteExternal.
  */
 static DECLCALLBACK(int) pgmR3PhysWriteExternalEMT(PVM pVM, PRTGCPHYS pGCPhys, const void *pvBuf, size_t cbWrite,
-                                                   PGMACCESSORIGIN enmOrigin)
+                                                   PGMACCESSORIGIN fOrigin)
 {
     /** @todo VERR_EM_NO_MEMORY */
-    VBOXSTRICTRC rcStrict = PGMPhysWrite(pVM, *pGCPhys, pvBuf, cbWrite, enmOrigin);
+    VBOXSTRICTRC rcStrict = PGMPhysWrite(pVM, *pGCPhys, pvBuf, cbWrite, fOrigin);
     AssertMsg(rcStrict == VINF_SUCCESS, ("%Rrc\n", VBOXSTRICTRC_VAL(rcStrict))); NOREF(rcStrict);
     return VINF_SUCCESS;
 }
@@ -252,17 +252,17 @@ static DECLCALLBACK(int) pgmR3PhysWriteExternalEMT(PVM pVM, PRTGCPHYS pGCPhys, c
  * @param   GCPhys          Physical address to write to.
  * @param   pvBuf           What to write.
  * @param   cbWrite         How many bytes to write.
- * @param   enmOrigin       Who is calling.
+ * @param   fOrigin         Who is calling.
  *
  * @thread  Any but EMTs.
  */
-VMMDECL(int) PGMR3PhysWriteExternal(PVM pVM, RTGCPHYS GCPhys, const void *pvBuf, size_t cbWrite, PGMACCESSORIGIN enmOrigin)
+VMMDECL(int) PGMR3PhysWriteExternal(PVM pVM, RTGCPHYS GCPhys, const void *pvBuf, size_t cbWrite, PGMACCESSORIGIN fOrigin)
 {
     VM_ASSERT_OTHER_THREAD(pVM);
 
     AssertMsg(!pVM->pgm.s.fNoMorePhysWrites,
-              ("Calling PGMR3PhysWriteExternal after pgmR3Save()! GCPhys=%RGp cbWrite=%#x enmOrigin=%d\n",
-               GCPhys, cbWrite, enmOrigin));
+              ("Calling PGMR3PhysWriteExternal after pgmR3Save()! GCPhys=%RGp cbWrite=%#x fOrigin=%#zx\n",
+               GCPhys, cbWrite, fOrigin));
     AssertMsgReturn(cbWrite > 0, ("don't even think about writing zero bytes!\n"), VINF_SUCCESS);
     LogFlow(("PGMR3PhysWriteExternal: %RGp %d\n", GCPhys, cbWrite));
 
@@ -306,7 +306,7 @@ VMMDECL(int) PGMR3PhysWriteExternal(PVM pVM, RTGCPHYS GCPhys, const void *pvBuf,
                         PGM_UNLOCK(pVM);
 
                         return VMR3ReqPriorityCallWait(pVM, VMCPUID_ANY, (PFNRT)pgmR3PhysWriteExternalEMT, 5,
-                                                       pVM, &GCPhys, pvBuf, cbWrite, enmOrigin);
+                                                       pVM, &GCPhys, pvBuf, cbWrite, fOrigin);
                     }
                 }
                 Assert(!PGM_PAGE_IS_MMIO_OR_SPECIAL_ALIAS(pPage));
@@ -2108,7 +2108,12 @@ int pgmR3PhysRamPreAllocate(PVM pVM)
     Assert(pVM->pgm.s.fRamPreAlloc);
     Log(("pgmR3PhysRamPreAllocate: enter\n"));
 #ifdef VBOX_WITH_PGM_NEM_MODE
+#ifdef VBOX_WITH_PREALLOC_RAM_BY_DEFAULT
+    Log(("pgmR3PhysRamPreAllocate: Handled by default in NEM mode, skip\n"));
+    return VINF_SUCCESS;
+#else
     AssertLogRelReturn(!pVM->pgm.s.fNemMode, VERR_PGM_NOT_SUPPORTED_FOR_NEM_MODE);
+#endif
 #endif
 
     /*
@@ -3209,7 +3214,8 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
      * Validate input.
      */
     AssertPtrReturn(ppv, VERR_INVALID_POINTER);
-    *ppv = NULL;
+    if (!(fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+        *ppv = NULL;
     if (phRegion)
     {
         AssertPtrReturn(phRegion, VERR_INVALID_POINTER);
@@ -3280,7 +3286,12 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
          * and maybe a ring-0 mapping address for it all.
          */
         if (SUPR3IsDriverless())
-            rc = pgmPhysMmio2RegisterWorker(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags);
+        {
+            if (!(fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+                rc = pgmPhysMmio2RegisterWorkerAlloc(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags);
+            else
+                rc = pgmPhysMmio2RegisterWorkerExisting(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags, (uint8_t *)*ppv);
+        }
         else
         {
             PGMPHYSMMIO2REGISTERREQ Mmio2RegReq;
@@ -3294,6 +3305,10 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
             Mmio2RegReq.iRegion      = (uint8_t)iRegion;
             Mmio2RegReq.fFlags       = fFlags;
             Mmio2RegReq.pDevIns      = pDevIns;
+            if ((fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+                Mmio2RegReq.pbR3     = (uint8_t *)*ppv;
+            else
+                Mmio2RegReq.pbR3     = NULL;
             rc = VMMR3CallR0Emt(pVM, pVCpu, VMMR0_DO_PGM_PHYS_MMIO2_REGISTER, 0 /*u64Arg*/, &Mmio2RegReq.Hdr);
         }
         if (RT_SUCCESS(rc))

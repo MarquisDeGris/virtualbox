@@ -82,6 +82,10 @@
 # include <errno.h>
 # include <net/if.h>
 # include <net/if_arp.h>
+# include <fcntl.h>
+# include <unistd.h>
+# include "PCIUpdateDevices.h"
+# include "HostPCIDeviceImpl.h"
 #endif /* RT_OS_LINUX */
 
 #ifdef RT_OS_SOLARIS
@@ -2041,6 +2045,52 @@ HRESULT  Host::getHostDrives(std::vector<ComPtr<IHostDrive> > &aHostDrives)
         }
     }
     return hrc;
+}
+
+
+HRESULT Host::getPCIDevices(std::vector<ComPtr<IHostPCIDevice> > &aPCIDevices)
+{
+#ifdef RT_OS_LINUX
+    HRESULT hrc = S_OK;
+    RTLISTANCHOR LstDevs;
+    RTListInit(&LstDevs);
+    int vrc = PCIUpdateDevices(&LstDevs);
+    if (RT_SUCCESS(vrc))
+    {
+        PPCIDEVICE pIt, pItNext;
+        RTListForEachSafe(&LstDevs, pIt, pItNext, PCIDEVICE, NdLst)
+        {
+            RTListNodeRemove(&pIt->NdLst);
+
+            ComObjPtr<HostPCIDevice> pHostDev;
+            hrc = pHostDev.createObject();
+            if (SUCCEEDED(hrc))
+                hrc = pHostDev->initFromDevice(pIt);
+            if (FAILED(hrc))
+                break;
+            aPCIDevices.push_back(pHostDev);
+        }
+
+        if (FAILED(hrc))
+        {
+            /* Free devices remaining. */
+            RTListForEachSafe(&LstDevs, pIt, pItNext, PCIDEVICE, NdLst)
+            {
+                RTListNodeRemove(&pIt->NdLst);
+                RTMemFree(pIt);
+            }
+        }
+    }
+    else
+        hrc = setErrorNoLog(VBOX_E_NOT_SUPPORTED,
+                            tr("Failed to query list of PCI devices attached to host (%Rrc)"),
+                            vrc);
+
+    return hrc;
+#else
+    RT_NOREF(aPCIDevices);
+    ReturnComNotImplemented();
+#endif
 }
 
 

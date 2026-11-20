@@ -73,9 +73,9 @@ static DECLCALLBACK(int) pgmR3InfoHandlersPhysicalOne(PPGMPHYSHANDLER pHandler, 
  */
 DECLCALLBACK(VBOXSTRICTRC) pgmR3HandlerPhysicalHandlerInvalid(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhys, void *pvPhys,
                                                               void *pvBuf, size_t cbBuf, PGMACCESSTYPE enmAccessType,
-                                                              PGMACCESSORIGIN enmOrigin, uint64_t uUser)
+                                                              PGMACCESSORIGIN fOrigin, uint64_t uUser)
 {
-    RT_NOREF(pVM, pVCpu, GCPhys, pvPhys, pvBuf, cbBuf, enmAccessType, enmOrigin, uUser);
+    RT_NOREF(pVM, pVCpu, GCPhys, pvPhys, pvBuf, cbBuf, enmAccessType, fOrigin, uUser);
     LogRel(("GCPhys=%RGp cbBuf=%#zx enmAccessType=%d uUser=%#RX64\n", GCPhys, cbBuf, enmAccessType, uUser));
     return VERR_PGM_HANDLER_IPE_1;
 }
