@@ -925,6 +925,14 @@ which is about code a Linux host runs was then tried on 7.1:
   does not apply to 7.1 as it is and is not built here. The rest of
   that second pass was on 7.1 already under another revision, or about
   nothing but compiler warnings, or new features.
+- The KVM backend of the two lines compared (2026-11-20): the version
+  for 7.1 is of 2025-11-03, the one for 7.2 of 2026-10-21, and its
+  authors have published nothing newer. What the two patches add and
+  remove was compared file by file: it is the same but for six files of
+  the VMM and one register which upstream renamed between the lines, and
+  a blank in a makefile. So the backend for 7.1 lacks no change which
+  the one for 7.2 has, and the three changes of this work to the backend
+  are on both branches.
 - The same without the passthrough work: branch `backports-7.1`, five
   commits on upstream's 7.1 branch (the 25 changes, r175241, the result
   of `Console::i_saveState`, the NAT library, r175077), which is merge
