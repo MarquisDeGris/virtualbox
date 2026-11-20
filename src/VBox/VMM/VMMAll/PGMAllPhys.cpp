@@ -1508,8 +1508,8 @@ DECLHIDDEN(int) pgmPhysMmio2RegisterWorkerExisting(PVMCC pVM, uint32_t const cGu
      * backing the whole range.
      */
     RTGCPHYS const          cbMmio2Backing   = (RTGCPHYS)cGuestPages << GUEST_PAGE_SHIFT;
-    size_t const            cHostPages       = (cbMmio2Backing + HOST_PAGE_SIZE_DYNAMIC - 1U) >> HOST_PAGE_SHIFT_DYNAMIC;
-    size_t const            cbMmio2Aligned   = cHostPages << HOST_PAGE_SHIFT_DYNAMIC;
+    size_t const            cHostPages       = (cbMmio2Backing + HOST_PAGE_SIZE - 1U) >> HOST_PAGE_SHIFT;
+    size_t const            cbMmio2Aligned   = cHostPages << HOST_PAGE_SHIFT;
     R3PTRTYPE(uint8_t *)    pbMmio2BackingR3 = pb;
 #ifdef IN_RING0
     RTR0MEMOBJ              hMemObj          = NIL_RTR0MEMOBJ;
