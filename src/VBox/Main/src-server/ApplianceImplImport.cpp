@@ -6137,6 +6137,8 @@ l_skipped:
     config.sanitizeImportedSerialPorts();
     config.sanitizeSharedFolderSettings();
     config.sanitizeImportedNvramSettings();
+    if (!m->optListImport.contains(ImportOptions_KeepExtraData))
+        config.sanitizeImportedExtraData();
 
     // this magic constructor fills the new machine object with the MachineConfig
     // instance that we created from the vbox:Machine

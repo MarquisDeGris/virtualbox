@@ -1133,6 +1133,7 @@ HRESULT SystemProperties::getSupportedImportOptions(std::vector<ImportOptions_T>
         ImportOptions_KeepAllMACs,
         ImportOptions_KeepNATMACs,
         ImportOptions_ImportToVDI,
+        ImportOptions_KeepExtraData,
     };
     RT_CPP_VECTOR_ASSIGN_ARRAY(aSupportedImportOptions, s_aImportOptions);
     return S_OK;
