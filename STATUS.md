@@ -1343,5 +1343,6 @@ slot.
 | 240 | `pci-passthrough-hotplug-7.2` @ `4b35fd22` | allsim, exploring | passed (the build failed) | 5 minutes. The same with the change of the development line which builds the KVM backend for Linux on x86: the backend of the 7.2 branch does not compile. It is the backend as it was before upstream made it build and work in January and February 2026. The change is taken back on the branch |
 | 241 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped at the checkout) | 1 minute. The 7.1 branch names the commit of kBuild in its tree and has no `.gitmodules` saying where to get it. The workflow fetches it itself now |
 | 242 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped in `configure`) | 2 minutes. kBuild is there. The `configure` of 7.1 does not know one of the options the one of 7.2 takes. The workflow asks the script which of them it knows now |
+| 243 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped in `configure`) | 2 minutes. The `configure` of 7.1 looks for kBuild one directory above where its repository has it. The workflow tells it where it is |
 
 Run numbers are those GitHub shows for the `build` workflow.

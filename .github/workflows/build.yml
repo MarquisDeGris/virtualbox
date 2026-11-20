@@ -198,6 +198,9 @@ jobs:
             for o in --disable-java --disable-kmods --disable-dxvk; do
               if grep -q -E "^ +${o}\)|\|${o}\)|^ +${o}\|" configure; then opts="$opts $o"; fi
             done
+            # Where kBuild is: the configure of 7.1 looks one directory too high
+            # for a kBuild which comes from its repository (run 243).
+            opts="$opts --with-kbuild=$KBUILD_PATH"
           fi
           echo "configure $opts"
           # The tool checks of configure run into their time limits now and then, so
