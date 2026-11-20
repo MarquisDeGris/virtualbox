@@ -87,6 +87,31 @@ jobs:
           gcc --version | head -1
           ls -l /dev/kvm || true
 
+      # What processor the runner has cannot be chosen, and some things show
+      # on one kind only.  Of the two steps after this one exactly one runs,
+      # and neither does anything: which of them ran can be read through the
+      # API while the job goes on, so a run which was started for the sake of
+      # one kind of processor can be cancelled in its first minute when it got
+      # the other (.ci-tools/ci-cpu.sh on the machine the runs are started
+      # from).
+      - name: Processor of the runner
+        id: cpu
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          if grep -q AuthenticAMD /proc/cpuinfo; then
+            echo "vendor=amd" >> "$GITHUB_OUTPUT"
+          else
+            echo "vendor=other" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: The runner has an AMD processor
+        if: steps.cpu.outputs.vendor == 'amd'
+        run: "true"
+
+      - name: The runner has another processor
+        if: steps.cpu.outputs.vendor != 'amd'
+        run: "true"
+
       - name: Check out source
         uses: actions/checkout@v4
         with:
