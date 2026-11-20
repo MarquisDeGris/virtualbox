@@ -541,6 +541,20 @@ the hosts this is meant for can run:
 The branches for 7.2 and 7.1 stay as what they are: the work and its
 tests on those bases, building, for whoever takes way 2 or 3.
 
+A fourth way showed up later on 2026-11-20: there is a KVM backend for
+the released lines which is not upstream's. Cyberus Technology publishes
+one for VirtualBox as a patch
+([virtualbox-kvm](https://github.com/cyberus-technology/virtualbox-kvm),
+GPL version 3, last updated 2026-10-21), and that patch goes onto the
+7.2 branch with nothing but its line endings in the way. It uses the
+interrupt controller of KVM with the I/O APIC in VirtualBox, keeps the
+memory of the guest in the VM process in one piece, and makes the
+process do without the support driver, which is what the passthrough
+device asks of an engine. `pci-passthrough-hotplug-7.2-kvm` is the branch
+for 7.2 with that patch on top (one place merged by hand). Whether it
+builds and whether the simulation runs on it is the next thing to find
+out. Its readme calls AMD processors experimental.
+
 State of `pci-passthrough-hotplug-7.2` (pushed): the 7.2 branch of
 upstream, then one commit with 24 revisions of upstream (the management
 in the API, `VBoxManage` and Main, the PCI domain in host addresses, the
@@ -1347,5 +1361,6 @@ slot.
 | 241 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped at the checkout) | 1 minute. The 7.1 branch names the commit of kBuild in its tree and has no `.gitmodules` saying where to get it. The workflow fetches it itself now |
 | 242 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped in `configure`) | 2 minutes. kBuild is there. The `configure` of 7.1 does not know one of the options the one of 7.2 takes. The workflow asks the script which of them it knows now |
 | 243 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped in `configure`) | 2 minutes. The `configure` of 7.1 looks for kBuild one directory above where its repository has it. The workflow tells it where it is |
+| 244 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed | 13 minutes. The maintenance branch 7.1 as upstream has it builds here, in 10 minutes 55 seconds; its output is kept for the builds of the branch with this work |
 
 Run numbers are those GitHub shows for the `build` workflow.

@@ -195,7 +195,11 @@ jobs:
           else
             # Of these it gets the ones it knows: 7.1 has no DXVK to leave out
             # (run 242).
-            for o in --disable-java --disable-kmods --disable-dxvk; do
+            # --with-kvm is of a tree which has the KVM backend of Cyberus
+            # Technology: with it VirtualBox runs its VMs on KVM and without its
+            # kernel driver, which is what the simulation needs on a
+            # maintenance branch.
+            for o in --disable-java --disable-kmods --disable-dxvk --with-kvm; do
               if grep -q -E "^ +${o}\)|\|${o}\)|^ +${o}\|" configure; then opts="$opts $o"; fi
             done
             # Where kBuild is: the configure of 7.1 looks one directory too high
