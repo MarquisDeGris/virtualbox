@@ -9919,9 +9919,9 @@ IEM_CIMPL_DEF_0(iemCImpl_vmx_pause)
  */
 DECLCALLBACK(VBOXSTRICTRC) iemVmxApicAccessPageHandler(PVMCC pVM, PVMCPUCC pVCpu, RTGCPHYS GCPhysFault, void *pvPhys,
                                                        void *pvBuf, size_t cbBuf, PGMACCESSTYPE enmAccessType,
-                                                       PGMACCESSORIGIN enmOrigin, uint64_t uUser)
+                                                       PGMACCESSORIGIN fOrigin, uint64_t uUser)
 {
-    RT_NOREF3(pvPhys, enmOrigin, uUser);
+    RT_NOREF3(pvPhys, fOrigin, uUser);
 
     RTGCPHYS const GCPhysAccessBase = GCPhysFault & ~(RTGCPHYS)GUEST_PAGE_OFFSET_MASK;
     if (CPUMIsGuestInVmxNonRootMode(IEM_GET_CTX(pVCpu)))
