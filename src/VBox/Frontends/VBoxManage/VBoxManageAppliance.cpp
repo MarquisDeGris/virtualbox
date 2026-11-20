@@ -116,6 +116,8 @@ static int parseImportOptions(const char *psz, com::SafeArray<ImportOptions_T> *
                 options->push_back(ImportOptions_KeepNATMACs);
             else if (!RTStrNICmp(psz, "ImportToVDI", len))
                 options->push_back(ImportOptions_ImportToVDI);
+            else if (!RTStrNICmp(psz, "KeepExtraData", len))
+                options->push_back(ImportOptions_KeepExtraData);
             else
                 vrc = VERR_PARSE_ERROR;
         }

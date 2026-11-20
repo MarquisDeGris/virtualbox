@@ -9467,6 +9467,11 @@ void MachineConfigFile::sanitizeImportedNvramSettings()
     hardwareMachine.nvramSettings.strNvramPath.setNull();
 }
 
+void MachineConfigFile::sanitizeImportedExtraData()
+{
+    mapExtraDataItems.clear();
+}
+
 /**
  * Called from write() before calling ConfigFileBase::createStubDocument().
  * This adjusts the settings version in m->sv if incompatible settings require
