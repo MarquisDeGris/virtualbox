@@ -3209,7 +3209,8 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
      * Validate input.
      */
     AssertPtrReturn(ppv, VERR_INVALID_POINTER);
-    *ppv = NULL;
+    if (!(fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+        *ppv = NULL;
     if (phRegion)
     {
         AssertPtrReturn(phRegion, VERR_INVALID_POINTER);
@@ -3280,7 +3281,12 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
          * and maybe a ring-0 mapping address for it all.
          */
         if (SUPR3IsDriverless())
-            rc = pgmPhysMmio2RegisterWorker(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags);
+        {
+            if (!(fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+                rc = pgmPhysMmio2RegisterWorkerAlloc(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags);
+            else
+                rc = pgmPhysMmio2RegisterWorkerExisting(pVM, cGuestPages, idMmio2, cChunks, pDevIns, iSubDev, iRegion, fFlags, (uint8_t *)*ppv);
+        }
         else
         {
             PGMPHYSMMIO2REGISTERREQ Mmio2RegReq;
@@ -3294,6 +3300,10 @@ VMMR3_INT_DECL(int) PGMR3PhysMmio2Register(PVM pVM, PPDMDEVINS pDevIns, uint32_t
             Mmio2RegReq.iRegion      = (uint8_t)iRegion;
             Mmio2RegReq.fFlags       = fFlags;
             Mmio2RegReq.pDevIns      = pDevIns;
+            if ((fFlags & PGMPHYS_MMIO2_FLAGS_USE_EXISTING_BACKING))
+                Mmio2RegReq.pbR3     = (uint8_t *)*ppv;
+            else
+                Mmio2RegReq.pbR3     = NULL;
             rc = VMMR3CallR0Emt(pVM, pVCpu, VMMR0_DO_PGM_PHYS_MMIO2_REGISTER, 0 /*u64Arg*/, &Mmio2RegReq.Hdr);
         }
         if (RT_SUCCESS(rc))

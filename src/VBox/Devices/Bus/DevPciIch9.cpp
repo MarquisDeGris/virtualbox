@@ -991,7 +991,12 @@ DECLCALLBACK(int) devpciR3CommonRegisterDevice(PPDMDEVINS pDevIns, PPDMPCIDEV pP
 DECLCALLBACK(int) devpcibridgeR3CommonRegisterDevice(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev, uint32_t fFlags,
                                                      uint8_t uPciDevNo, uint8_t uPciFunNo, const char *pszName)
 {
-    PDEVPCIBUS pBus = PDMINS_2_DATA(pDevIns, PDEVPCIBUS);
+    PDEVPCIBUSCC pBusCC = PDMINS_2_DATA_CC(pDevIns, PDEVPCIBUSCC);
+    PDEVPCIBUS   pBus = PDMINS_2_DATA(pDevIns, PDEVPCIBUS);
+
+    /** @todo Required for MSI-X support in DevPciVfio.cpp which ignores the current MSI-X implementation for passthrough. */
+    pPciDev->Int.s.pvPciBusPtrR3 = pBusCC->CTX_SUFF(pPciHlp);
+
     return devpciR3CommonRegisterDeviceOnBus(pDevIns, pBus, pPciDev, fFlags, uPciDevNo, uPciFunNo, pszName);
 }
 
@@ -1886,7 +1891,7 @@ static int ich9pciBiosInitDeviceGetRegions(PPDMPCIDEV pPciDev)
     uint8_t uHeaderType = devpciR3GetByte(pPciDev, VBOX_PCI_HEADER_TYPE) & 0x7f;
     if (uHeaderType == 0x00)
         /* Ignore ROM region here, which is included in VBOX_PCI_NUM_REGIONS. */
-        return VBOX_PCI_NUM_REGIONS - 1;
+        return VBOX_PCI_NUM_REGIONS;
     else if (uHeaderType == 0x01)
         /* PCI bridges have 2 BARs. */
         return 2;
@@ -2793,9 +2798,16 @@ DECLINLINE(void) devpciR3WriteBarByte(PPDMPCIDEV pPciDev, uint32_t iRegion, uint
                    ? (1 << 2) - 1 /* 2 lowest bits for IO region */ :
                      (1 << 4) - 1 /* 4 lowest bits for memory region, also ROM enable bit for ROM region */;
 
+        /* Need to preserve the guest trying to enable the ROM bar. */
+        uint8_t bRomEn = 0;
+        if (   iRegion == VBOX_PCI_ROM_SLOT
+            && off == 0
+            && (bVal & RT_BIT(0)))
+            bRomEn = 1;
+
         /* safe, only needs to go to the config space array */
         uint8_t bOld = PDMPciDevGetByte(pPciDev, uAddr) & bMask;
-        bVal = (bOld & bMask) | (bVal & ~bMask);
+        bVal = (bOld & bMask) | (bVal & ~bMask) | bRomEn;
 
         Log3Func(("%x changed to  %x\n", bOld, bVal));
 

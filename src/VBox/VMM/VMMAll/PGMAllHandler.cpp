@@ -250,7 +250,6 @@ int pgmHandlerPhysicalExRegister(PVMCC pVM, PPGMPHYSHANDLER pPhysHandler, RTGCPH
     AssertReturn(pPhysHandler->Key == NIL_RTGCPHYS, VERR_WRONG_ORDER);
 
     AssertMsgReturn(GCPhys < GCPhysLast, ("GCPhys >= GCPhysLast (%#x >= %#x)\n", GCPhys, GCPhysLast), VERR_INVALID_PARAMETER);
-    Assert(GCPhysLast - GCPhys < _4G); /* ASSUMPTION in PGMAllPhys.cpp */
 
     switch (pType->enmKind)
     {

@@ -117,6 +117,9 @@ extern const PDMDEVREG g_DeviceQemuFwCfg;
 extern const PDMDEVREG g_DeviceTpm;
 extern const PDMDEVREG g_DeviceTpmPpi;
 #endif
+#ifdef VBOX_WITH_VFIO_PCI_PASSTHROUGH
+extern const PDMDEVREG g_DevicePciVfio;
+#endif
 
 extern const PDMDRVREG g_DrvMouseQueue;
 extern const PDMDRVREG g_DrvKeyboardQueue;

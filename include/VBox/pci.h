@@ -415,7 +415,21 @@ typedef enum PCIADDRTYPE
 #define  VBOX_PCI_EXT_CAP_ID_ARI     0x0e
 #define  VBOX_PCI_EXT_CAP_ID_ATS     0x0f
 #define  VBOX_PCI_EXT_CAP_ID_SRIOV   0x10
-
+#define  VBOX_PCI_EXT_CAP_ID_MCAST   0x12    /* Multicast */
+#define  VBOX_PCI_EXT_CAP_ID_RESZBAR 0x15    /* Resizable BAR */
+#define  VBOX_PCI_EXT_CAP_ID_DPA     0x16    /* Dynamic Power Allocation */
+#define  VBOX_PCI_EXT_CAP_ID_TPH     0x17    /* TPH Requester */
+#define  VBOX_PCI_EXT_CAP_ID_LTR     0x18    /* Latency Tolerance Reporting */
+#define  VBOX_PCI_EXT_CAP_ID_SECPCIE 0x19    /* Secondary PCI Express */
+#define  VBOX_PCI_EXT_CAP_ID_PASID   0x1b    /* PASID */
+#define  VBOX_PCI_EXT_CAP_ID_LNR     0x1c    /* LN Requester */
+#define  VBOX_PCI_EXT_CAP_ID_DPC     0x1d    /* Downstream Port Containment */
+#define  VBOX_PCI_EXT_CAP_ID_L1PM    0x1e    /* L1 PM Substates */
+#define  VBOX_PCI_EXT_CAP_ID_PTM     0x1f    /* Precision Time Management */
+#define  VBOX_PCI_EXT_CAP_ID_MPCIE   0x20    /* M-PCI Express */
+#define  VBOX_PCI_EXT_CAP_ID_FRS     0x21    /* Function Readiness Status */
+#define  VBOX_PCI_EXT_CAP_ID_RTR     0x22    /* Readiness Time Reporting */
+#define  VBOX_PCI_EXT_CAP_ID_DVSEC   0x23    /* Designated Vendor-Specific */
 
 /* MSI flags, aka Message Control (2 bytes, capability offset 2) */
 #define  VBOX_PCI_MSI_FLAGS_ENABLE   0x0001  /* MSI feature enabled */

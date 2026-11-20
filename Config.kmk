@@ -771,6 +771,10 @@ if1of ($(KBUILD_TARGET), linux darwin win solaris)
 endif
 # Disable keyboard HID Consumer/Desktop control keys passthrough
 # VBOX_WITHOUT_KEYBOARD_HID_CC_DC_PASSTHROUGH = 1
+# Enable VFIO based PCI passthrough
+if1of ($(KBUILD_TARGET), linux)
+ VBOX_WITH_VFIO_PCI_PASSTHROUGH = 1
+endif
 ## @}
 
 # legacy
