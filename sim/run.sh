@@ -254,7 +254,7 @@ make_initrd() # <name> <init script> <module>...
 
 
 note "The guest"
-make_initrd guest "$SIM/guest-init" nvme
+make_initrd guest "$SIM/guest-init" nvme virtio_net
 
 # A disk for the guest: a GPT with an EFI system partition which has the
 # kernel as a unified kernel image where the firmware looks for one, and, should
@@ -312,10 +312,20 @@ note "Part 1: VirtualBox on the runner"
 sudo chmod 666 /dev/kvm
 sudo modprobe iommufd 2> /dev/null || echo "the kernel of the runner has no iommufd module"
 mkdir -p "$OUT/runner"
+# For the phase "nat": a file the guest fetches through the NAT engine from
+# this machine, which the guest reaches as its gateway (guest-init has the
+# port).  Nothing but this machine itself can reach the server.
+mkdir -p "$WORK/http"
+head -c 2M /dev/urandom > "$WORK/http/sim.bin"
+HTTP_MD5=$(md5sum < "$WORK/http/sim.bin" | cut -d' ' -f1)
+( cd "$WORK/http" && exec python3 -m http.server 8099 --bind 127.0.0.1 > "$WORK/http.log" 2>&1 ) &
+HTTP_PID=$!
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
-         GUEST_RAW="$WORK/guest.raw" SIM_WHERE=runner SIM_BOOT_WAIT=240 \
-    timeout -k 30 1500 bash "$SIM/vbox-phases.sh" plain emptyslot
+         GUEST_RAW="$WORK/guest.raw" SIM_WHERE=runner SIM_BOOT_WAIT=240 SIM_HTTP_MD5="$HTTP_MD5" \
+    timeout -k 30 1800 bash "$SIM/vbox-phases.sh" plain emptyslot nat
 echo "part 1 ended with $?"
+kill "$HTTP_PID" 2> /dev/null
+echo "requests to the file server: $(grep -c 'GET /sim.bin' "$WORK/http.log" 2> /dev/null)"
 
 
 part_simhost_prepare()

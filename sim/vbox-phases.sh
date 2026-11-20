@@ -541,6 +541,49 @@ phase_emptyslot()
     end_phase
 }
 
+# A VM with a network adapter behind NAT: an address from the DHCP server of
+# the NAT engine, its gateway answering a ping, and a file fetched through it
+# from the machine the VM runs on, compared by its checksum.  Nothing of the
+# passthrough work is in this.  It is here for what the branches for 7.1 took
+# over from 7.2 in the NAT library and in the virtio network device, which no
+# other check goes through; on the other branches it tells that a VM has a
+# network at all.
+phase_nat()
+{
+    PHASE=nat
+    reset_vm
+    if [ -z "${SIM_HTTP_MD5:-}" ]; then
+        stage "a VM with a network adapter behind NAT boots the guest" skipped "nothing to fetch was set up"
+        return
+    fi
+    run modifyvm "$VM" --nic1 nat --nictype1 virtio --cableconnected1 on
+    if boot "a VM with a network adapter behind NAT boots the guest"; then
+        wait_serial 'GUEST: NET http' 150
+        serial_show 'GUEST: (NET|pci: .* driver virtio)' 8
+        if serial_has 'GUEST: NET dhcp [0-9]'; then
+            stage "guest: gets an address from the NAT engine" ok
+        else
+            stage "guest: gets an address from the NAT engine" FAILED
+        fi
+        if serial_has 'GUEST: NET ping ok'; then
+            stage "guest: the gateway of the NAT engine answers a ping" ok
+        else
+            stage "guest: the gateway of the NAT engine answers a ping" FAILED
+        fi
+        if serial_has "GUEST: NET http md5=$SIM_HTTP_MD5 "; then
+            stage "guest: fetches a file through NAT from the machine the VM runs on, the checksum is right" ok
+        else
+            stage "guest: fetches a file through NAT from the machine the VM runs on, the checksum is right" FAILED \
+                  "$(serial_new | grep -a 'GUEST: NET http' | tail -n 1 | cut -c1-100)"
+            diag
+        fi
+        guest_goes_on "the guest keeps running"
+    fi
+    end_phase
+    settle
+    run modifyvm "$VM" --nic1 none
+}
+
 # The device as upstream passes it through: there when the VM starts, no
 # hot-plug.
 phase_passthrough()
@@ -857,6 +900,7 @@ if setup; then
         case "$p" in
             plain)       phase_plain ;;
             emptyslot)   phase_emptyslot ;;
+            nat)         phase_nat ;;
             passthrough) phase_passthrough ;;
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;

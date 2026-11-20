@@ -49,6 +49,46 @@ done
 kmsg
 say "READY"
 
+# A network adapter, where the VM has one (the phase "nat" of the simulation):
+# an address from the DHCP server on the other side, a ping to the gateway it
+# names, and a file fetched from there, whose checksum is told.  With NAT of
+# VirtualBox the gateway is the machine the VM runs on.
+net_try()
+{
+    [ -e /sys/class/net/eth0 ] || return 0
+    ip link set eth0 up
+    cat > /tmp/dhcp.sh << 'EOF'
+#!/bin/busybox sh
+case "$1" in
+    bound|renew)
+        /bin/busybox ip addr add "$ip/${mask:-24}" dev "$interface"
+        [ -n "$router" ] && /bin/busybox ip route add default via "${router%% *}"
+        echo "$ip ${router%% *}" > /tmp/dhcp.out
+        ;;
+esac
+EOF
+    chmod 755 /tmp/dhcp.sh
+    if ! udhcpc -i eth0 -n -q -t 8 -T 2 -s /tmp/dhcp.sh > /tmp/dhcp.log 2>&1 || [ ! -s /tmp/dhcp.out ]; then
+        say "NET dhcp failed: $(tail -n 2 /tmp/dhcp.log | tr '\n' ' ' | cut -c1-120)"
+        return 0
+    fi
+    read -r nip ngw < /tmp/dhcp.out
+    say "NET dhcp $nip gateway ${ngw:-none}"
+    [ -n "$ngw" ] || return 0
+    if ping -c 3 -W 3 "$ngw" > /tmp/ping.log 2>&1; then
+        say "NET ping ok"
+    else
+        say "NET ping failed: $(tail -n 2 /tmp/ping.log | tr '\n' ' ' | cut -c1-120)"
+    fi
+    if wget -q -T 20 -O /tmp/net.bin "http://$ngw:8099/sim.bin" 2> /tmp/wget.log; then
+        say "NET http md5=$(md5sum < /tmp/net.bin | cut -d' ' -f1) bytes=$(wc -c < /tmp/net.bin)"
+    else
+        say "NET http failed: $(tail -n 2 /tmp/wget.log | tr '\n' ' ' | cut -c1-120)"
+    fi
+    rm -f /tmp/net.bin
+}
+net_try
+
 # The drive: whatever has the class of an NVMe controller.
 finddev()
 {
