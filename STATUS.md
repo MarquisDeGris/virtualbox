@@ -584,7 +584,9 @@ the old passthrough code, which is switched off there as it is), and the
 same 35 commits, which went on with one conflict of a line. It builds
 and its tests pass since run 246. One commit more since run 250:
 `Console::i_saveState` returns its result, as on the lines after 7.1
-(see that run).
+(see that run). Two more since run 252: what the 7.2 branch received
+and this one had not, see "The 7.1 line and what the 7.2 line received
+after it".
 
 **Run 247** (2026-11-20, `allsim`, for finding out,
 `pci-passthrough-hotplug-7.2-kvm` @ `2139a88e`, 27 minutes, AMD EPYC
@@ -819,8 +821,12 @@ What the 7.2 branch got from March 2026 on and the 7.1 branch did not
 was looked up by the revisions the commits of both name, and each change
 which is about code a Linux host runs was then tried on 7.1:
 
-- Taken over to the 7.1 branch (work branch `scratch/71-hardening`, not
-  built yet): 25 changes as they are, to devices (VirtIO, USB, audio),
+- Taken over to the 7.1 branch (`pci-passthrough-hotplug-7.1` @
+  `ec8bcc46`; built in run 252, every changed file compiled for ring 3
+  and for the kernel driver without a warning, the tests of the device
+  pass; nothing of it has run in a VM before the next run on the branch
+  with the KVM backend): 25 changes as they are, to devices (VirtIO, USB,
+  audio),
   the host services a guest talks to, the image formats (VMDK, VDI, GPT,
   ISO), the import of appliances and the console, two of them adapted in
   one place each; and r175241, with which the VMM keeps a device from
@@ -1665,5 +1671,6 @@ slot.
 | 249 | `pci-passthrough-hotplug-7.1-kvm` @ `160d83a6` | allsim, exploring | passed (ten checks of the simulation fail) | 36 minutes, AMD EPYC 9V45. The first build of the 7.1 branch with the KVM backend of Cyberus Technology: it builds in 6 minutes 52 seconds, the tests of the device pass, the 19 checks with the Linux guest on the runner pass. Windows with the Hyper-V interface is installed in 276 seconds and does not go on after a saved state is loaded. Every VM inside the virtual machine standing in for a host stops at its first step, as in run 247, and the log names the register now. 67 passed, 10 failed; see "Run 249" |
 | 250 | `pci-passthrough-hotplug-7.1-kvm` @ `2aaddf20` | allsim, exploring | passed (six checks of the simulation fail) | 54 minutes, Intel Xeon 6975P-C. Windows where the drive is passes for the first time, all 35 checks: Windows starts with the drive in the hot-plug capable slot, reads from it, lets go of it when asked, takes it again, has it taken by force and takes it once more. With the Linux guest the device runs passed through on the 7.1 line. After the refused save of the state the VM stays in the state Saving on that line and the three phases after it do not start (four checks); Windows on the runner says nothing after its saved state is loaded (two checks). 95 passed, 6 failed; see "Run 250" |
 | 251 | `pci-passthrough-hotplug-7.1-kvm` @ `3b085eca` | allsim, exploring | passed (twelve checks of the simulation fail) | 124 minutes, Intel Xeon Platinum 8573C. With `Console::i_saveState` returning its result: all 67 checks with the Linux guest inside the virtual machine standing in for a host pass on the 7.1 line, the three new ones about a snapshot among them. Windows on the runner goes on after its saved state is loaded and does not shut down (two checks). Windows where the drive is starts, reads from the drive, lets go of it when asked and then says nothing any more (ten checks, 70 minutes of waiting); not understood. 148 passed, 12 failed; see "Run 251" |
+| 252 | `scratch/71-hardening` @ `ec8bcc46` | tests, exploring | passed | 8 minutes. The 7.1 branch with what was taken over from the 7.2 branch (26 changes, see "The 7.1 line and what the 7.2 line received after it"): it builds, every file the changes touch is compiled for ring 3 and for the kernel driver, without a warning in one of them; the tests of the device pass, the ACPI table check passes. The 7.1 branch was moved to this commit after it |
 
 Run numbers are those GitHub shows for the `build` workflow.
