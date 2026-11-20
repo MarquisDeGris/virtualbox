@@ -781,6 +781,19 @@ VMMR3_INT_DECL(int) NEMR3KvmSetMsr(PVMCPU pVCpu, uint64_t msr, uint64_t val)
     return VINF_SUCCESS;
 }
 
+VMMR3_INT_DECL(int) NEMR3KvmSetClock(PVM pVM, uint64_t cNanoSecs)
+{
+    struct kvm_clock_data Clock;
+    RT_ZERO(Clock);
+    Clock.clock = cNanoSecs;
+
+    int rcLnx = ioctl(pVM->nem.s.fdVm, KVM_SET_CLOCK, &Clock);
+    AssertLogRelMsgReturn(rcLnx == 0, ("NEMR3KvmSetClock: Failed to set the clock of the VM to %RU64 ns. Error: %d, errno %d\n",
+                                       cNanoSecs, rcLnx, errno), VERR_NOT_SUPPORTED);
+
+    return VINF_SUCCESS;
+}
+
 VMMR3_INT_DECL(int) NEMR3KvmGetLapicState(PVMCPU pVCpu, void* pXApicPage)
 {
     struct kvm_lapic_state state;

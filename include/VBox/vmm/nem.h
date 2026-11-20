@@ -195,6 +195,15 @@ VMMR3_INT_DECL(int) NEMR3KvmGetMsr(PVMCPU pVCpu, uint64_t msr, uint64_t* val);
 VMMR3_INT_DECL(int) NEMR3KvmSetMsr(PVMCPU pVCpu, uint64_t msr, uint64_t val);
 
 /**
+ * Sets the clock KVM keeps for the VM, which is what the reference time of
+ * the Hyper-V interface is read from.
+ * @param pVM The cross context VM structure.
+ * @param cNanoSecs What the clock is to show now, in nanoseconds.
+ * @return VBox status code, VINF_SUCCESS, if the clock was set.
+ */
+VMMR3_INT_DECL(int) NEMR3KvmSetClock(PVM pVM, uint64_t cNanoSecs);
+
+/**
  * Asserts a specific interrupt line on both PIC and I/O APIC.
  * @param  pVM The cross context VM structure.
  * @param  u16Gsi the GSI of the interrupt lines that should be asserted.
