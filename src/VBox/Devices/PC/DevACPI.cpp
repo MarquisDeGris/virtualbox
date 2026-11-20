@@ -3774,28 +3774,29 @@ static int acpiR3ReadCustomTable(PPDMDEVINS pDevIns, uint8_t **ppu8CustBin, uint
         if (RT_SUCCESS(rc))
         {
             /* The following checks should be in sync the AssertReleaseMsg's below. */
-            if (    *pcbCustBin > cbBufAvail
-                ||  *pcbCustBin < sizeof(ACPITBLHEADER))
-                rc = VERR_TOO_MUCH_DATA;
-
-            /*
-             * Allocate buffer for the custom table binary data.
-             */
-            *ppu8CustBin = (uint8_t *)PDMDevHlpMMHeapAlloc(pDevIns, *pcbCustBin);
-            if (*ppu8CustBin)
+            if (    *pcbCustBin <= cbBufAvail
+                &&  *pcbCustBin > sizeof(ACPITBLHEADER))
             {
-                rc = RTFileRead(FileCUSTBin, *ppu8CustBin, *pcbCustBin, NULL);
-                if (RT_FAILURE(rc))
+                /*
+                 * Allocate buffer for the custom table binary data.
+                 */
+                *ppu8CustBin = (uint8_t *)PDMDevHlpMMHeapAlloc(pDevIns, *pcbCustBin);
+                if (*ppu8CustBin)
                 {
-                    AssertMsgFailed(("RTFileRead(,,%d,NULL) -> %Rrc\n", *pcbCustBin, rc));
-                    PDMDevHlpMMHeapFree(pDevIns, *ppu8CustBin);
-                    *ppu8CustBin = NULL;
+                    rc = RTFileRead(FileCUSTBin, *ppu8CustBin, *pcbCustBin, NULL);
+                    if (RT_FAILURE(rc))
+                    {
+                        AssertMsgFailed(("RTFileRead(,,%d,NULL) -> %Rrc\n", *pcbCustBin, rc));
+                        PDMDevHlpMMHeapFree(pDevIns, *ppu8CustBin);
+                        *ppu8CustBin = NULL;
+                    }
                 }
+                else
+                    rc = VERR_NO_MEMORY;
             }
             else
-            {
-                rc = VERR_NO_MEMORY;
-            }
+                rc = VERR_TOO_MUCH_DATA;
+
             RTFileClose(FileCUSTBin);
         }
     }
