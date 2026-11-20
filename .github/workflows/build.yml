@@ -248,7 +248,11 @@ jobs:
           which kmk
           kmk --version > kmk-version.log 2>&1 || true
           sed -n '1,3p' kmk-version.log
-          if ! ( time kmk -j"$(nproc)" KBUILD_TYPE=release ${{ inputs.kmk_args }} ) > build.log 2>&1; then
+          # An exploring run goes on after a file which does not compile, so that
+          # one run tells about all of them.
+          keepgoing=
+          if [ "${{ inputs.explore }}" = "yes" ]; then keepgoing=-k; fi
+          if ! ( time kmk -j"$(nproc)" $keepgoing KBUILD_TYPE=release ${{ inputs.kmk_args }} ) > build.log 2>&1; then
             echo "BUILD FAILED"
             grep -n -E '(^|[^a-zA-Z])(error|Error|\*\*\*)[: ]' build.log | head -150 || true
             echo ----
