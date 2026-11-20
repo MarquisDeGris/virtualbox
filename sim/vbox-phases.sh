@@ -556,7 +556,10 @@ phase_nat()
         stage "a VM with a network adapter behind NAT boots the guest" skipped "nothing to fetch was set up"
         return
     fi
-    run modifyvm "$VM" --nic1 nat --nictype1 virtio --cableconnected1 on
+    # The file comes from the loopback interface of the machine the VM runs
+    # on, by way of the gateway address of the NAT engine.  A VM does not get
+    # there unless it is allowed to, and a new VM is not.
+    run modifyvm "$VM" --nic1 nat --nictype1 virtio --cableconnected1 on --nat-localhostreachable1 on
     if boot "a VM with a network adapter behind NAT boots the guest"; then
         wait_serial 'GUEST: NET http' 150
         serial_show 'GUEST: (NET|pci: .* driver virtio)' 8
