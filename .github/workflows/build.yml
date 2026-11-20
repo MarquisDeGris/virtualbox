@@ -117,7 +117,10 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           submodules: false
-          fetch-depth: 50
+          # Deep enough to reach a commit of upstream below the commits of
+          # the branch: the step "Source facts" takes the revision from one.
+          # 50 was too few for the 7.1 branch with the KVM backend (run 257).
+          fetch-depth: 300
 
       - name: Check out kBuild
         run: |
@@ -144,8 +147,11 @@ jobs:
           echo "kbuild=$(git -C kBuild rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           # The build takes the product revision from a trailer in the commit message of
           # HEAD, which commits made in this fork do not have; use the newest upstream one.
-          rev=$(git log -50 --format=%B | grep -m1 -o -E '^svn:sync-xref-src-repo-rev: r[0-9]+$' | grep -o -E '[0-9]+$')
-          test -n "$rev"
+          rev=$(git log -300 --format=%B | grep -m1 -o -E '^svn:sync-xref-src-repo-rev: r[0-9]+$' | grep -o -E '[0-9]+$' || true)
+          if [ -z "$rev" ]; then
+            echo "no commit of upstream among the newest 300 of this branch: nothing to take the revision from"
+            exit 1
+          fi
           echo "VBOX_SVN_REV=$rev" >> "$GITHUB_ENV"
           echo "revision $rev"
           # The commit whose build output can be reused.
