@@ -723,6 +723,26 @@ frozen_note()
         | grep -a -o -E '<Counter c="[1-9][0-9]*"[^>]*name="[^"]*"' \
         | sed -E 's/^<Counter c="([0-9]+)".*name="([^"]*)"$/\2: \1/' | head -n 40 | sed 's/^/    | /'
     shot
+    # Is it the whole guest, or what it does about its devices?  The keyboard
+    # and the power button are interrupts which have nothing to do with the
+    # slot.  The window of Windows Server takes "15" and Enter for leaving to
+    # a command line, which changes the picture; the power button shuts
+    # Windows down, or at least has it say so on the screen.
+    local before
+    before=$(exits_now)
+    echo "+ VBoxManage controlvm $VM keyboardputscancode: 1, 5, Enter"
+    vbm controlvm "$VM" keyboardputscancode 02 82 06 86 1c 9c > /dev/null 2>&1
+    sleep 20
+    echo "    | exits before the keys $before, 20 s after them $(exits_now)"
+    shot
+    run controlvm "$VM" acpipowerbutton
+    if wait_off 120; then
+        echo "    | the guest shut down when the power button was pressed: it was alive, and what stood still was less than all of it"
+    else
+        echo "    | the VM is in state '$(vmstate)' 120 s after the power button was pressed"
+        irq_state "120 s after the power button was pressed"
+        shot
+    fi
 }
 
 # The drive in the hot-plug capable slot of a VM with Windows: there when
