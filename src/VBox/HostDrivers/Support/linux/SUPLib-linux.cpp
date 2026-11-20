@@ -96,6 +96,11 @@ DECLHIDDEN(int) suplibOsInit(PSUPLIBDATA pThis, bool fPreInited, uint32_t fFlags
         return VINF_SUCCESS;
     Assert(pThis->hDevice == (intptr_t)NIL_RTFILE);
 
+#ifdef VBOX_WITH_KVM
+    pThis->fDriverless = true;
+    return VINF_SUCCESS;
+#endif
+
     /*
      * Check if madvise works.
      */
@@ -256,10 +261,15 @@ DECLHIDDEN(int) suplibOsPageAlloc(PSUPLIBDATA pThis, size_t cPages, uint32_t fFl
         fMmap |= MAP_HUGETLB;
 #endif
 
+#ifdef VBOX_WITH_PREALLOC_RAM_BY_DEFAULT
+    fMmap |= MAP_POPULATE;
+#endif
+
     uint32_t const cbPage = SUP_PAGE_SIZE;
     uint32_t const cPageShift = SUP_PAGE_SHIFT;
 
     size_t cbMmap = cPages << cPageShift;
+
     if (   !pThis->fSysMadviseWorks
         && (fFlags & (SUP_PAGE_ALLOC_F_FOR_LOCKING | SUP_PAGE_ALLOC_F_LARGE_PAGES)) == SUP_PAGE_ALLOC_F_FOR_LOCKING)
         cbMmap += cbPage * 2;

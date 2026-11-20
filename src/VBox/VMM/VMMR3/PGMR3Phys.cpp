@@ -2125,11 +2125,16 @@ int pgmR3PhysRamPreAllocate(PVM pVM)
     Assert(pVM->pgm.s.fRamPreAlloc);
     Log(("pgmR3PhysRamPreAllocate: enter\n"));
 # ifdef VBOX_WITH_PGM_NEM_MODE
+#ifdef VBOX_WITH_PREALLOC_RAM_BY_DEFAULT
+    Log(("pgmR3PhysRamPreAllocate: Handled by default in NEM mode, skip\n"));
+    return VINF_SUCCESS;
+#else
     if (VM_IS_NEM_ENABLED(pVM))
     {
         LogRel(("PGM: Pre-alloc ignored in NEM mode.\n"));
         return VINF_SUCCESS;
     }
+#endif
 # endif
 
     /*
