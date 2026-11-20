@@ -147,7 +147,8 @@ VBoxVMM_SOURCES  = \
 	VMMR3/EMR3Nem.cpp \
 	VMMR3/GCMR3.cpp \
 	VMMR3/GIMR3.cpp \
-	VMMR3/GIMR3Hv.cpp \
+	$(if-expr !defined(VBOX_WITH_KVM), VMMR3/GIMR3Hv.cpp,) \
+	$(if-expr  defined(VBOX_WITH_KVM), VMMR3/GIMHvOnKvm.cpp,) \
 	VMMR3/GIMR3Kvm.cpp \
 	VMMR3/GIMR3Minimal.cpp \
 	VMMR3/IEMR3.cpp \
@@ -237,7 +238,8 @@ VBoxVMM_SOURCES  = \
 	VMMAll/EMAll.cpp \
 	VMMAll/GCMAll.cpp \
 	VMMAll/GIMAll.cpp \
-	VMMAll/GIMAllHv.cpp \
+	$(if-expr !defined(VBOX_WITH_KVM), VMMAll/GIMAllHv.cpp,) \
+	$(if-expr  defined(VBOX_WITH_KVM), VMMAll/GIMAllHvOnKvm.cpp,) \
 	VMMAll/GIMAllKvm.cpp \
 	VMMAll/TMAll.cpp \
 	VMMAll/TMAllCpu.cpp \

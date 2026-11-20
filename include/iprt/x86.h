@@ -682,6 +682,8 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_EBX_SMAP              RT_BIT_32(20)
 /** EBX Bit 23 - CLFLUSHOPT - Supports CLFLUSHOPT (Cache Line Flush). */
 #define X86_CPUID_STEXT_FEATURE_EBX_CLFLUSHOPT        RT_BIT_32(23)
+/** EBX Bit 24 - CLWB - Supports CLWB (Cache Line write-back). */
+#define X86_CPUID_STEXT_FEATURE_EBX_CLWB              RT_BIT_32(24)
 /** EBX Bit 25 - INTEL_PT - Supports Intel Processor Trace. */
 #define X86_CPUID_STEXT_FEATURE_EBX_INTEL_PT          RT_BIT_32(25)
 /** EBX Bit 26 - AVX512PF - Supports AVX512PF. */
@@ -703,6 +705,8 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_ECX_OSPKE             RT_BIT_32(4)
 /** ECX Bit 7 - CET_SS - Supports CET shadow stack features. */
 #define X86_CPUID_STEXT_FEATURE_ECX_CET_SS            RT_BIT_32(7)
+/** ECX Bit 8 - GFNI - Supports Galois Field instructions . */
+#define X86_CPUID_STEXT_FEATURE_ECX_GFNI              RT_BIT_32(8)
 /** ECX Bit 15 - LA57  - Supports 5-level paging. */
 #define X86_CPUID_STEXT_FEATURE_ECX_LA57              RT_BIT_32(16)
 /** ECX Bits 17-21 - MAWAU - Value used by BNDLDX and BNDSTX. */
@@ -712,6 +716,8 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 /** ECX Bit 30 - SGX_LC - Supports SGX launch configuration. */
 #define X86_CPUID_STEXT_FEATURE_ECX_SGX_LC            RT_BIT_32(30)
 
+/** EDX Bit 4 - FSRM - Supports Fast Short REP MOVSB */
+#define X86_CPUID_STEXT_FEATURE_EDX_FSRM              RT_BIT(4)
 /** EDX bit 9 - SRBDS_CTRL - (Special Register Buffer Data Sample Control)
  *  Supports IA32_MCU_OPT_CTRL and IA32_MCU_OPT_CTRL.RNGDS_MITG_DIS. */
 #define X86_CPUID_STEXT_FEATURE_EDX_SRBDS_CTRL        RT_BIT_32(9)
@@ -719,6 +725,8 @@ typedef const X86CPUIDFEATEDX *PCX86CPUIDFEATEDX;
 #define X86_CPUID_STEXT_FEATURE_EDX_MD_CLEAR          RT_BIT_32(10)
 /** EDX Bit 11 - TSX_FORCE_ABORT - Supports for IA32_TSX_FORCE_ABORT MSR. */
 #define X86_CPUID_STEXT_FEATURE_EDX_TSX_FORCE_ABORT   RT_BIT_32(11)
+/** EDX Bit 14 - SERIALIZE - Supports the SERIALIZE CPU instruction. */
+#define X86_CPUID_STEXT_FEATURE_EDX_SERIALIZE         RT_BIT_32(14)
 /** EDX Bit 20 - CET_IBT - Supports CET indirect branch tracking features. */
 #define X86_CPUID_STEXT_FEATURE_EDX_CET_IBT           RT_BIT_32(20)
 /** EDX Bit 26 - IBRS & IBPB - Supports the IBRS flag in IA32_SPEC_CTRL and

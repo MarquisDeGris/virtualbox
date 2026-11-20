@@ -1569,6 +1569,7 @@ DECLHIDDEN(void) cpumR3InitVmxGuestFeaturesAndMsrs(PVM pVM, PCFGMNODE pCpumCfg, 
     if (fVmxEpt)
     {
         const char *pszWhy = NULL;
+#ifndef VBOX_WITH_KVM_NESTING
         if (!VM_IS_HM_ENABLED(pVM) && !VM_IS_EXEC_ENGINE_IEM(pVM))
             pszWhy = "execution engine is neither HM nor IEM";
 #ifdef RT_ARCH_AMD64
@@ -1576,6 +1577,9 @@ DECLHIDDEN(void) cpumR3InitVmxGuestFeaturesAndMsrs(PVM pVM, PCFGMNODE pCpumCfg, 
             pszWhy = "nested paging is not enabled for the VM or it is not supported by the host";
         else if (VM_IS_HM_ENABLED(pVM) && !pVM->cpum.s.HostFeatures.s.fNoExecute)
             pszWhy = "NX is not available on the host";
+#endif
+#else
+        if (VM_IS_HM_ENABLED(pVM) && !HMIsNestedPagingActive(pVM))
 #endif
         if (pszWhy)
         {
@@ -2492,10 +2496,20 @@ DECLCALLBACK(int) cpumR3LoadExecTarget(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersi
                     rc = SSMR3GetStructEx(pSSM, &pGstCtx->XState.Hdr, sizeof(pGstCtx->XState.Hdr),
                                           0, g_aCpumXSaveHdrFields, NULL);
                     AssertRCReturn(rc, rc);
+#ifndef VBOX_WITH_KVM
+                    /*
+                     * This assertion triggers on resume when the guest was
+                     * suspended early during boot. The hypothesis is that this
+                     * happens when XSAVE is not enabled yet. Seems harmless for
+                     * now.
+                     *
+                     * See virtualbox#69.
+                     */
                     AssertLogRelMsgReturn(!(pGstCtx->XState.Hdr.bmXState & ~pGstCtx->fXStateMask),
                                           ("bmXState=%#RX64 fXStateMask=%#RX64\n",
                                            pGstCtx->XState.Hdr.bmXState, pGstCtx->fXStateMask),
                                           VERR_CPUM_INVALID_XSAVE_HDR);
+#endif
                 }
                 if (pGstCtx->fXStateMask & XSAVE_C_YMM)
                 {
