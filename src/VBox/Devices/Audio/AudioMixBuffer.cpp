@@ -654,7 +654,7 @@ static void audioMixBufRateResetAlways(PAUDIOSTREAMRATE pRate)
     pRate->offDst = 0;
     pRate->offSrc = 0;
     for (uintptr_t i = 0; i < RT_ELEMENTS(pRate->SrcLast.ai32Samples); i++)
-        pRate->SrcLast.ai32Samples[0] = 0;
+        pRate->SrcLast.ai32Samples[i] = 0;
 }
 
 

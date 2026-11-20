@@ -844,7 +844,8 @@ DECLINLINE(int) vmdkFileInflateSync(PVMDKIMAGE pImage, PVMDKEXTENT pExtent,
 
     /* Sanity check - the expansion ratio should be much less than 2. */
     Assert(cbCompSize < 2 * cbToRead);
-    if (cbCompSize >= 2 * cbToRead)
+    if (   cbCompSize >= 2 * cbToRead
+        || RT_ALIGN_Z(cbCompSize + RT_UOFFSETOF(VMDKMARKER, uType), 512) > pExtent->cbCompGrain)
         return VERR_VD_VMDK_INVALID_FORMAT;
 
     /* Compressed grain marker. Data follows immediately. */
