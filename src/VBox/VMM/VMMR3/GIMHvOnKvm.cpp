@@ -53,7 +53,10 @@
  * We use a number that is far away from the original GIMHv saved state version
  * to prevent future collisions.
  */
-#define GIM_HV_SAVED_STATE_VERSION                      UINT32_C(0x1000)
+#define GIM_HV_SAVED_STATE_VERSION                      UINT32_C(0x1001)
+/** The saved state has the registers as the first virtual CPU has them and
+ *  nothing of the other CPUs. */
+#define GIM_HV_SAVED_STATE_VERSION_FIRST_CPU_ONLY       UINT32_C(0x1000)
 
 #ifdef VBOX_WITH_STATISTICS
 # define GIMHV_MSRRANGE(a_uFirst, a_uLast, a_szName) \
@@ -87,6 +90,24 @@ static CPUMMSRRANGE const g_aMsrRanges_HyperV[] =
     GIMHV_MSRRANGE(MSR_GIM_HV_RANGE12_FIRST, MSR_GIM_HV_RANGE12_LAST, "Hyper-V range 12")
 };
 #undef GIMHV_MSRRANGE
+
+/**
+ * The registers every virtual CPU has for itself, which the saved state has
+ * for the CPUs after the first one: the assist page, the synthetic interrupt
+ * controller and the synthetic timers.  Handed to KVM in this order, a register
+ * finds in place what it depends on.
+ */
+static const struct
+{
+    uint32_t uFirst;
+    uint32_t uLast;
+} g_aMsrRangesPerCpu_HyperV[] =
+{
+    { MSR_GIM_HV_APIC_ASSIST_PAGE, MSR_GIM_HV_APIC_ASSIST_PAGE },
+    { MSR_GIM_HV_SCONTROL,         MSR_GIM_HV_SIMP },
+    { MSR_GIM_HV_SINT0,            MSR_GIM_HV_SINT15 },
+    { MSR_GIM_HV_STIMER0_CONFIG,   MSR_GIM_HV_STIMER3_COUNT }
+};
 
 /*********************************************************************************************************************************
 *   Internal Functions                                                                                                           *
@@ -538,7 +559,8 @@ VMMR3_INT_DECL(int) gimR3HvLoad(PVM pVM, PSSMHANDLE pSSM)
     int rc = SSMR3GetU32(pSSM, &uHvSavedStateVersion);
     AssertRCReturn(rc, rc);
 
-    if (uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION) {
+    if (   uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION
+        && uHvSavedStateVersion != GIM_HV_SAVED_STATE_VERSION_FIRST_CPU_ONLY) {
         return SSMR3SetLoadError(pSSM, VERR_SSM_UNSUPPORTED_DATA_UNIT_VERSION, RT_SRC_POS,
                                  N_("Unsupported Hyper-V saved-state version %u (current %u)!"),
                                  uHvSavedStateVersion, GIM_HV_SAVED_STATE_VERSION);
@@ -557,12 +579,58 @@ VMMR3_INT_DECL(int) gimR3HvLoad(PVM pVM, PSSMHANDLE pSSM)
 
             SSMR3GetU64(pSSM, &val);
 
+            // The reference time is the clock KVM keeps for the VM, in units of
+            // 100 ns, and KVM does not take it as a register. The clock of a VM
+            // which was just created starts anew: the guest would see its time
+            // go back, and a synthetic timer it has set for a point in time
+            // would not be due before the clock got there again. The clock is
+            // set to where it was, before the registers which depend on it.
+            if (msr == MSR_GIM_HV_TIME_REF_COUNT) {
+                if (val != 0 && val < UINT64_MAX / 100) {
+                    NEMR3KvmSetClock(pVM, val * 100);
+                }
+                continue;
+            }
+
             rc = NEMR3KvmSetMsr(pVCpu, msr, val);
             if (rc != VINF_SUCCESS) {
                 // Some MSRs can only be written when HYPERV_SYINC2 has been enabled.
                 // We don't actually care here because if we unable to write the MSR,
                 // the guest couldn't have read/written it either.
                 LogRel2(("Unable to read HV MSR: 0x%x\n", msr));
+            }
+        }
+    }
+
+    if (uHvSavedStateVersion == GIM_HV_SAVED_STATE_VERSION_FIRST_CPU_ONLY) {
+        if (pVM->cCpus > 1) {
+            LogRel(("GIM: HyperV: The saved state has the registers of the first virtual CPU only\n"));
+        }
+        return VINF_SUCCESS;
+    }
+
+    // The registers the other virtual CPUs have for themselves, see gimR3HvSave.
+    uint32_t cCpus {0};
+    rc = SSMR3GetU32(pSSM, &cCpus);
+    AssertRCReturn(rc, rc);
+    if (cCpus != pVM->cCpus) {
+        return SSMR3SetLoadError(pSSM, VERR_SSM_LOAD_CONFIG_MISMATCH, RT_SRC_POS,
+                                 N_("The saved state has the Hyper-V registers of %u virtual CPUs, the VM has %u"),
+                                 cCpus, pVM->cCpus);
+    }
+
+    for (VMCPUID idCpu = 1; idCpu < pVM->cCpus; idCpu++) {
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aMsrRangesPerCpu_HyperV); i++) {
+            for (uint32_t msr {g_aMsrRangesPerCpu_HyperV[i].uFirst}; msr <= g_aMsrRangesPerCpu_HyperV[i].uLast; ++msr) {
+                uint64_t val {0};
+
+                rc = SSMR3GetU64(pSSM, &val);
+                AssertRCReturn(rc, rc);
+
+                rc = NEMR3KvmSetMsr(pVM->apCpusR3[idCpu], msr, val);
+                if (rc != VINF_SUCCESS) {
+                    LogRel2(("Unable to write HV MSR: 0x%x of CPU %u\n", msr, idCpu));
+                }
             }
         }
     }
@@ -620,6 +688,29 @@ VMMR3_INT_DECL(int) gimR3HvSave(PVM pVM, PSSMHANDLE pSSM)
             }
 
             SSMR3PutU64(pSSM, val);
+        }
+    }
+
+    /*
+     * What is above is every register as the first virtual CPU has it. The
+     * assist page, the synthetic interrupt controller and the synthetic timers
+     * are there once per CPU, and a guest with more than one CPU which finds
+     * them gone on the others after the state was loaded gets no timer
+     * interrupt there any more. So those follow for the other CPUs.
+     */
+    SSMR3PutU32(pSSM, pVM->cCpus);
+    for (VMCPUID idCpu = 1; idCpu < pVM->cCpus; idCpu++) {
+        for (unsigned i = 0; i < RT_ELEMENTS(g_aMsrRangesPerCpu_HyperV); i++) {
+            for (uint32_t msr {g_aMsrRangesPerCpu_HyperV[i].uFirst}; msr <= g_aMsrRangesPerCpu_HyperV[i].uLast; ++msr) {
+                uint64_t val {0};
+
+                int rc {NEMR3KvmGetMsr(pVM->apCpusR3[idCpu], msr, &val)};
+                if (rc != VINF_SUCCESS) {
+                    LogRel2(("Unable to read HV MSR: 0x%x of CPU %u\n", msr, idCpu));
+                }
+
+                SSMR3PutU64(pSSM, val);
+            }
         }
     }
 
