@@ -252,6 +252,9 @@ typedef struct NEM
 # else
     /** KVM_CAP_X86_ROBUST_SINGLESTEP. */
     bool                        fRobustSingleStep;
+    /** Set when the kernel does not take IA32_SPEC_CTRL for a CPU of the guest,
+     * see nemR3NativeInitCompleted. */
+    bool                        fSpecCtrlRefused;
 # endif
 
     /** Hint where there might be a free slot. */
