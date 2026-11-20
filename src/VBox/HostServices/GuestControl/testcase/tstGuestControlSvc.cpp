@@ -30,9 +30,34 @@
 *   Header Files                                                                                                                 *
 *********************************************************************************************************************************/
 #include <VBox/HostServices/GuestControlSvc.h>
+#include <VBox/VMMDev.h>
+#include <iprt/assert.h>
 #include <iprt/initterm.h>
+#include <iprt/mem.h>
 #include <iprt/stream.h>
+#include <iprt/string.h>
 #include <iprt/test.h>
+
+
+/*********************************************************************************************************************************
+*   Defined Constants And Macros                                                                                                 *
+*********************************************************************************************************************************/
+/** The ID of the client which the tests connect. */
+#define TST_CLIENT_ID       UINT32_C(1)
+/** The context ID of the messages which the host queues. */
+#define TST_CONTEXT_ID      UINT32_C(1000)
+/** The 32-bit value in the message which the host queues. */
+#define TST_VALUE_U32       UINT32_C(0x12345678)
+/** The 64-bit value in the message which the host queues. */
+#define TST_VALUE_U64       UINT64_C(0x1122334455667788)
+/** What a 32-bit parameter of the client holds before a call. */
+#define TST_UNTOUCHED_U32   UINT32_C(0xfeedface)
+/** What a 64-bit parameter of the client holds before a call. */
+#define TST_UNTOUCHED_U64   UINT64_C(0xfeedfacefeedface)
+/** What the buffer of the client is filled with before a call. */
+#define TST_UNTOUCHED_CH    '#'
+/** The number of parameters of the message which the host queues. */
+#define TST_MSG_PARMS       4
 
 
 /*********************************************************************************************************************************
@@ -48,14 +73,53 @@ extern "C" DECLCALLBACK(DECLEXPORT(int)) VBoxHGCMSvcLoad(VBOXHGCMSVCFNTABLE *pTa
 struct VBOXHGCMCALLHANDLE_TYPEDEF
 {
     /** Where to store the result code. */
-    int32_t rc;
+    int32_t  rc;
+    /** How many times the call was completed. */
+    uint32_t cCompleted;
 };
+
+/** The handle of the call which the client is making.  It is not on the stack:
+ *  the service keeps the handle of a call which it does not complete. */
+static struct VBOXHGCMCALLHANDLE_TYPEDEF g_Call;
+
+/** The buffer in the message which the host queues. */
+static char g_szTstData[] = "foo.bar";
+
 
 /** Call completion callback for guest calls. */
 static DECLCALLBACK(int) callComplete(VBOXHGCMCALLHANDLE callHandle, int32_t rc)
 {
     callHandle->rc = rc;
+    callHandle->cCompleted++;
     return VINF_SUCCESS;
+}
+
+/** @interface_method_impl{VBOXHGCMSVCHELPERS,pfnIsCallRestored} */
+static DECLCALLBACK(bool) isCallRestored(VBOXHGCMCALLHANDLE callHandle)
+{
+    RT_NOREF(callHandle);
+    return false;
+}
+
+/** @interface_method_impl{VBOXHGCMSVCHELPERS,pfnIsCallCancelled} */
+static DECLCALLBACK(bool) isCallCancelled(VBOXHGCMCALLHANDLE callHandle)
+{
+    RT_NOREF(callHandle);
+    return false;
+}
+
+/** @interface_method_impl{VBOXHGCMSVCHELPERS,pfnGetRequestor} */
+static DECLCALLBACK(uint32_t) getRequestor(VBOXHGCMCALLHANDLE hCall)
+{
+    RT_NOREF(hCall);
+    return VMMDEV_REQUESTOR_LEGACY;
+}
+
+/** @interface_method_impl{VBOXHGCMSVCHELPERS,pfnGetVMMDevSessionId} */
+static DECLCALLBACK(uint64_t) getVMMDevSessionId(void *pvInstance)
+{
+    RT_NOREF(pvInstance);
+    return 42;
 }
 
 /**
@@ -67,180 +131,433 @@ static DECLCALLBACK(int) callComplete(VBOXHGCMCALLHANDLE callHandle, int32_t rc)
  */
 static int initTable(VBOXHGCMSVCFNTABLE *pTable, VBOXHGCMSVCHELPERS *pHelpers)
 {
+    RT_ZERO(*pTable);
+    RT_ZERO(*pHelpers);
     pTable->cbSize = sizeof (VBOXHGCMSVCFNTABLE);
     pTable->u32Version = VBOX_HGCM_SVC_VERSION;
-    pHelpers->pfnCallComplete = callComplete;
+    pHelpers->pfnCallComplete       = callComplete;
+    pHelpers->pfnIsCallRestored     = isCallRestored;
+    pHelpers->pfnIsCallCancelled    = isCallCancelled;
+    pHelpers->pfnGetRequestor       = getRequestor;
+    pHelpers->pfnGetVMMDevSessionId = getVMMDevSessionId;
     pTable->pHelpers = pHelpers;
 
     return VINF_SUCCESS;
 }
 
-typedef struct CMDHOST
+/**
+ * Connects the client of the tests.
+ *
+ * The service keeps the state of a client in memory which HGCM hands to it:
+ * VBOXHGCMSVCFNTABLE::cbClient bytes, zeroed.  The first client which connects
+ * the way an old guest does is the one messages for the root service go to.
+ *
+ * @returns The memory with the state of the client, NULL on failure.
+ * @param   pTable      The service table.
+ */
+static void *tstClientConnect(const VBOXHGCMSVCFNTABLE *pTable)
 {
-    /** The HGCM command to execute. */
-    int cmd;
-    /** Number of parameters. */
-    int num_parms;
-    /** The actual parameters. */
-    const PVBOXHGCMSVCPARM parms;
-    /** Flag indicating whether we need a connected client for this command. */
-    bool fNeedsClient;
-    /** The desired return value from the host. */
-    int rc;
-} CMDHOST, *PCMDHOST;
-
-typedef struct CMDCLIENT
-{
-    /** The client's ID. */
-    int client_id;
-    /** The HGCM command to execute. */
-    int cmd;
-    /** Number of parameters. */
-    int num_parms;
-    /** The actual parameters. */
-    const PVBOXHGCMSVCPARM parms;
-    /** The desired return value from the host. */
-    int rc;
-} CMDCLIENT, *PCMDCLIENT;
+    void *pvClient = RTMemAllocZ(pTable->cbClient);
+    if (!pvClient)
+    {
+        RTTestIFailed("no memory for the state of the client (%u bytes)", pTable->cbClient);
+        return NULL;
+    }
+    int rc = pTable->pfnConnect(pTable->pvService, TST_CLIENT_ID, pvClient, VMMDEV_REQUESTOR_LEGACY, false /* fRestoring */);
+    if (RT_FAILURE(rc))
+    {
+        RTTestIFailed("connecting the client failed with %Rrc", rc);
+        RTMemFree(pvClient);
+        return NULL;
+    }
+    return pvClient;
+}
 
 /**
- * Tests the HOST_EXEC_CMD function.
- * @returns iprt status value to indicate whether the test went as expected.
- * @note    prints its own diagnostic information to stdout.
+ * Disconnects the client of the tests.
+ *
+ * @param   pTable      The service table.
+ * @param   pvClient    What tstClientConnect returned.
  */
-static int testHostCmd(const VBOXHGCMSVCFNTABLE *pTable, const PCMDHOST pCmd, uint32_t uNumTests)
+static void tstClientDisconnect(const VBOXHGCMSVCFNTABLE *pTable, void *pvClient)
 {
-    int rc = VINF_SUCCESS;
-    if (!RT_VALID_PTR(pTable->pfnHostCall))
+    RTTESTI_CHECK_RC(pTable->pfnDisconnect(pTable->pvService, TST_CLIENT_ID, pvClient), VINF_SUCCESS);
+    RTMemFree(pvClient);
+}
+
+/**
+ * Makes a call of the client and returns what the service completed it with.
+ *
+ * No call the tests make is one the service keeps for later.
+ *
+ * @returns What the call was completed with, VERR_IPE_UNEXPECTED_STATUS if it
+ *          was not completed exactly once.
+ * @param   pTable      The service table.
+ * @param   pvClient    The state of the client.
+ * @param   idFunction  The function to call.
+ * @param   cParms      The number of parameters.
+ * @param   paParms     The parameters.
+ */
+static int tstClientCall(const VBOXHGCMSVCFNTABLE *pTable, void *pvClient, uint32_t idFunction,
+                         uint32_t cParms, PVBOXHGCMSVCPARM paParms)
+{
+    g_Call.rc         = VERR_IPE_UNINITIALIZED_STATUS;
+    g_Call.cCompleted = 0;
+    pTable->pfnCall(pTable->pvService, &g_Call, TST_CLIENT_ID, pvClient, idFunction, cParms, paParms, 0 /* tsArrival */);
+    if (g_Call.cCompleted != 1)
     {
-        RTTestPrintf(g_hTest, RTTESTLVL_FAILURE, "Invalid pfnHostCall() pointer\n");
-        rc = VERR_INVALID_POINTER;
+        RTTestIFailed("function %u with %u parameters was completed %u times", idFunction, cParms, g_Call.cCompleted);
+        return VERR_IPE_UNEXPECTED_STATUS;
     }
-    if (RT_SUCCESS(rc))
+    return g_Call.rc;
+}
+
+/**
+ * Lets the host queue the message which the client tests fetch: a context
+ * ID, a 32-bit value, a 64-bit value and a buffer.
+ *
+ * @returns What the service returned.
+ * @param   pTable      The service table.
+ */
+static int tstHostQueueMsg(const VBOXHGCMSVCFNTABLE *pTable)
+{
+    VBOXHGCMSVCPARM aParms[TST_MSG_PARMS];
+    HGCMSvcSetU64(&aParms[0], VBOX_GUESTCTRL_DST_ROOT_SVC | TST_CONTEXT_ID);
+    HGCMSvcSetU32(&aParms[1], TST_VALUE_U32);
+    HGCMSvcSetU64(&aParms[2], TST_VALUE_U64);
+    HGCMSvcSetPv(&aParms[3], g_szTstData, sizeof(g_szTstData));
+    return pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParms), aParms);
+}
+
+/**
+ * Sets up the parameters with which a client fetches the message of
+ * tstHostQueueMsg, each holding what tells that it was not written to.
+ *
+ * @param   paParms     The parameters, TST_MSG_PARMS of them.
+ * @param   pchBuf      The buffer of the client.
+ * @param   cbBuf       Its size.
+ */
+static void tstSetFetchParms(PVBOXHGCMSVCPARM paParms, char *pchBuf, uint32_t cbBuf)
+{
+    /* The first parameter names the message the client expects, and gets the context ID. */
+    HGCMSvcSetU32(&paParms[0], (uint32_t)HOST_MSG_EXEC_CMD);
+    HGCMSvcSetU32(&paParms[1], TST_UNTOUCHED_U32);
+    HGCMSvcSetU64(&paParms[2], TST_UNTOUCHED_U64);
+    memset(pchBuf, TST_UNTOUCHED_CH, cbBuf);
+    HGCMSvcSetPv(&paParms[3], pchBuf, cbBuf);
+}
+
+/**
+ * Tells whether a buffer of the client was not written to.
+ *
+ * @returns true if every byte is what tstSetFetchParms put there.
+ * @param   pchBuf      The buffer.
+ * @param   cbBuf       Its size.
+ */
+static bool tstIsBufUntouched(const char *pchBuf, size_t cbBuf)
+{
+    for (size_t off = 0; off < cbBuf; off++)
+        if (pchBuf[off] != TST_UNTOUCHED_CH)
+            return false;
+    return true;
+}
+
+/**
+ * Checks that the client has got the message of tstHostQueueMsg.
+ *
+ * @param   paParms     The parameters after the call.
+ * @param   pchBuf      The buffer of the client.
+ * @param   cbBuf       Its size.
+ */
+static void tstCheckFetched(PVBOXHGCMSVCPARM paParms, const char *pchBuf, size_t cbBuf)
+{
+    RTTESTI_CHECK_MSG(paParms[0].u.uint32 == TST_CONTEXT_ID, ("context ID %#x\n", paParms[0].u.uint32));
+    RTTESTI_CHECK_MSG(paParms[1].u.uint32 == TST_VALUE_U32, ("32-bit value %#x\n", paParms[1].u.uint32));
+    RTTESTI_CHECK_MSG(paParms[2].u.uint64 == TST_VALUE_U64, ("64-bit value %#RX64\n", paParms[2].u.uint64));
+    RTTESTI_CHECK(memcmp(pchBuf, g_szTstData, sizeof(g_szTstData)) == 0);
+    /* Nothing was written behind the data. */
+    RTTESTI_CHECK(tstIsBufUntouched(pchBuf + sizeof(g_szTstData), cbBuf - sizeof(g_szTstData)));
+}
+
+/**
+ * Messages of the host which the service has to refuse, and one it takes.
+ *
+ * @param   pTable      The service table.
+ */
+static void testHost(const VBOXHGCMSVCFNTABLE *pTable)
+{
+    RTTestISub("Messages of the host");
+
+    VBOXHGCMSVCPARM aParms[2];
+    HGCMSvcSetU64(&aParms[0], VBOX_GUESTCTRL_DST_ROOT_SVC | TST_CONTEXT_ID);
+    HGCMSvcSetU32(&aParms[1], TST_VALUE_U32);
+
+    /* No client is connected: there is nobody the message could go to. */
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParms), aParms), VERR_NOT_FOUND);
+
+    void *pvClient = tstClientConnect(pTable);
+    if (!pvClient)
+        return;
+
+    /* A number of parameters which is out of range, with parameters and without. */
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, 0, NULL), VERR_WRONG_PARAMETER_COUNT);
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, 0, aParms), VERR_WRONG_PARAMETER_COUNT);
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, VMMDEV_MAX_HGCM_PARMS, NULL),
+                     VERR_WRONG_PARAMETER_COUNT);
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, UINT32_MAX, NULL), VERR_WRONG_PARAMETER_COUNT);
+
+    /* No parameters where there have to be some. */
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, 1, NULL), VERR_INVALID_POINTER);
+
+    /* A first parameter which is no context ID. */
+    VBOXHGCMSVCPARM aParmsBad[2];
+    HGCMSvcSetPv(&aParmsBad[0], g_szTstData, sizeof(g_szTstData));
+    HGCMSvcSetU32(&aParmsBad[1], TST_VALUE_U32);
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParmsBad), aParmsBad),
+                     VERR_WRONG_PARAMETER_TYPE);
+
+    /* A context ID which names no destination. */
+    HGCMSvcSetU64(&aParmsBad[0], TST_CONTEXT_ID);
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParmsBad), aParmsBad),
+                     VERR_INTERNAL_ERROR_3);
+
+    /* A session as the destination which no client has. */
+    HGCMSvcSetU64(&aParmsBad[0], VBOX_GUESTCTRL_DST_SESSION | TST_CONTEXT_ID);
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParmsBad), aParmsBad),
+                     VERR_NOT_FOUND);
+
+    /* A parameter of a type which a message cannot have. */
+    HGCMSvcSetU64(&aParmsBad[0], VBOX_GUESTCTRL_DST_ROOT_SVC | TST_CONTEXT_ID);
+    aParmsBad[1].type = VBOX_HGCM_SVC_PARM_INVALID;
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParmsBad), aParmsBad),
+                     VERR_WRONG_PARAMETER_TYPE);
+
+    /* None of these was queued. */
+    VBOXHGCMSVCPARM aParmsPeek[2];
+    HGCMSvcSetU32(&aParmsPeek[0], 0);
+    HGCMSvcSetU32(&aParmsPeek[1], 0);
+    RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, RT_ELEMENTS(aParmsPeek), aParmsPeek), VERR_TRY_AGAIN);
+
+    /* A message as it has to be.  The client disconnects with it in its queue. */
+    RTTESTI_CHECK_RC(pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, RT_ELEMENTS(aParms), aParms), VINF_SUCCESS);
+    HGCMSvcSetU32(&aParmsPeek[0], 0);
+    HGCMSvcSetU32(&aParmsPeek[1], 0);
+    RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, RT_ELEMENTS(aParmsPeek), aParmsPeek), VINF_SUCCESS);
+    RTTESTI_CHECK_MSG(aParmsPeek[0].u.uint32 == (uint32_t)HOST_MSG_EXEC_CMD, ("message %u\n", aParmsPeek[0].u.uint32));
+    RTTESTI_CHECK_MSG(aParmsPeek[1].u.uint32 == RT_ELEMENTS(aParms), ("%u parameters\n", aParmsPeek[1].u.uint32));
+
+    tstClientDisconnect(pTable, pvClient);
+}
+
+/**
+ * A client fetches a message with GUEST_MSG_PEEK_NOWAIT and GUEST_MSG_GET,
+ * and is refused when it does not ask for what is queued.
+ *
+ * @param   pTable      The service table.
+ */
+static void testClientGet(const VBOXHGCMSVCFNTABLE *pTable)
+{
+    RTTestISub("A client fetches a message");
+
+    void *pvClient = tstClientConnect(pTable);
+    if (!pvClient)
+        return;
+
+    VBOXHGCMSVCPARM aParms[TST_MSG_PARMS + 2];
+    char            achBuf[32];
+    do
     {
-        for (unsigned i = 0; (i < uNumTests) && RT_SUCCESS(rc); i++)
+        /*
+         * Nothing is queued.
+         */
+        HGCMSvcSetU32(&aParms[0], 0);
+        HGCMSvcSetU32(&aParms[1], 0);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, 2, aParms), VERR_TRY_AGAIN);
+        HGCMSvcSetU32(&aParms[0], 0);
+        HGCMSvcSetU32(&aParms[1], 0);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, 2, aParms), VERR_TRY_AGAIN);
+
+        /*
+         * The host queues a message, and the client asks what it is.
+         */
+        RTTESTI_CHECK_RC_BREAK(tstHostQueueMsg(pTable), VINF_SUCCESS);
+
+        for (unsigned i = 0; i < RT_ELEMENTS(aParms); i++)
+            HGCMSvcSetU32(&aParms[i], TST_UNTOUCHED_U32);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, RT_ELEMENTS(aParms), aParms), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(aParms[0].u.uint32 == (uint32_t)HOST_MSG_EXEC_CMD, ("message %u\n", aParms[0].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[1].u.uint32 == TST_MSG_PARMS, ("%u parameters\n", aParms[1].u.uint32));
+        /* A value is told as the inverted size of its type, a buffer by its size. */
+        RTTESTI_CHECK_MSG(aParms[2].u.uint32 == ~(uint32_t)sizeof(uint32_t), ("%#x\n", aParms[2].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[3].u.uint32 == ~(uint32_t)sizeof(uint32_t), ("%#x\n", aParms[3].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[4].u.uint32 == ~(uint32_t)sizeof(uint64_t), ("%#x\n", aParms[4].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[5].u.uint32 == sizeof(g_szTstData), ("%#x\n", aParms[5].u.uint32));
+
+        /*
+         * The client expects another message than the one which is queued.
+         */
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        HGCMSvcSetU32(&aParms[0], (uint32_t)HOST_MSG_EXEC_CMD + 1);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS, aParms), VERR_MISMATCH);
+        RTTESTI_CHECK(aParms[1].u.uint32 == TST_UNTOUCHED_U32);
+        RTTESTI_CHECK(aParms[2].u.uint64 == TST_UNTOUCHED_U64);
+        RTTESTI_CHECK(tstIsBufUntouched(achBuf, sizeof(achBuf)));
+
+        /*
+         * The client has one parameter less than the message, and one more.
+         */
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS - 1, aParms), VERR_WRONG_PARAMETER_COUNT);
+        RTTESTI_CHECK(aParms[1].u.uint32 == TST_UNTOUCHED_U32);
+        RTTESTI_CHECK(aParms[2].u.uint64 == TST_UNTOUCHED_U64);
+
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        HGCMSvcSetU32(&aParms[TST_MSG_PARMS], TST_UNTOUCHED_U32);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS + 1, aParms), VERR_WRONG_PARAMETER_COUNT);
+        RTTESTI_CHECK(aParms[1].u.uint32 == TST_UNTOUCHED_U32);
+        RTTESTI_CHECK(aParms[2].u.uint64 == TST_UNTOUCHED_U64);
+        RTTESTI_CHECK(tstIsBufUntouched(achBuf, sizeof(achBuf)));
+
+        /*
+         * One parameter of the client is of another type than the one of the
+         * message, for each of the parameters after the first in turn.  The
+         * client gets nothing then, also not the parameters before that one.
+         */
+        for (unsigned iBad = 1; iBad < TST_MSG_PARMS; iBad++)
         {
-            RTTestPrintf(g_hTest, RTTESTLVL_INFO, "Testing #%u (cmd: %d, num_parms: %d, parms: 0x%p\n",
-                         i, pCmd[i].cmd, pCmd[i].num_parms, pCmd[i].parms);
-
-            if (pCmd[i].fNeedsClient)
-            {
-                int client_rc = pTable->pfnConnect(pTable->pvService, 1000 /* Client ID */, NULL /* pvClient */, 0, false);
-                if (RT_FAILURE(client_rc))
-                    rc = client_rc;
-            }
-
-            if (RT_SUCCESS(rc))
-            {
-                int host_rc = pTable->pfnHostCall(pTable->pvService,
-                                                  pCmd[i].cmd,
-                                                  pCmd[i].num_parms,
-                                                  pCmd[i].parms);
-                if (host_rc != pCmd[i].rc)
-                {
-                    RTTestPrintf(g_hTest, RTTESTLVL_FAILURE, "Host call test #%u returned with rc=%Rrc instead of rc=%Rrc\n",
-                                 i, host_rc, pCmd[i].rc);
-                    rc = host_rc;
-                    if (RT_SUCCESS(rc))
-                        rc = VERR_INVALID_PARAMETER;
-                }
-
-                if (pCmd[i].fNeedsClient)
-                {
-                    int client_rc = pTable->pfnDisconnect(pTable->pvService, 1000 /* Client ID */, NULL /* pvClient */);
-                    if (RT_SUCCESS(rc))
-                        rc = client_rc;
-                }
-            }
+            tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+            if (iBad == 1)
+                HGCMSvcSetU64(&aParms[iBad], TST_UNTOUCHED_U64);
+            else
+                HGCMSvcSetU32(&aParms[iBad], TST_UNTOUCHED_U32);
+            int rc = tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS, aParms);
+            RTTESTI_CHECK_MSG(rc == VERR_WRONG_PARAMETER_TYPE, ("parameter %u: %Rrc\n", iBad, rc));
+            RTTESTI_CHECK_MSG(aParms[0].u.uint32 == (uint32_t)HOST_MSG_EXEC_CMD, ("parameter %u\n", iBad));
+            if (iBad == 1)
+                RTTESTI_CHECK_MSG(aParms[1].u.uint64 == TST_UNTOUCHED_U64, ("parameter %u\n", iBad));
+            else
+                RTTESTI_CHECK_MSG(aParms[1].u.uint32 == TST_UNTOUCHED_U32, ("parameter %u\n", iBad));
+            if (iBad == 2)
+                RTTESTI_CHECK_MSG(aParms[2].u.uint32 == TST_UNTOUCHED_U32, ("parameter %u\n", iBad));
+            else
+                RTTESTI_CHECK_MSG(aParms[2].u.uint64 == TST_UNTOUCHED_U64, ("parameter %u\n", iBad));
+            if (iBad == 3)
+                RTTESTI_CHECK_MSG(aParms[3].u.uint32 == TST_UNTOUCHED_U32, ("parameter %u\n", iBad));
+            RTTESTI_CHECK_MSG(tstIsBufUntouched(achBuf, sizeof(achBuf)), ("parameter %u\n", iBad));
         }
-    }
-    return rc;
+
+        /* The same with a first parameter which is no value. */
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        char achBuf0[8];
+        HGCMSvcSetPv(&aParms[0], achBuf0, sizeof(achBuf0));
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS, aParms), VERR_WRONG_PARAMETER_TYPE);
+        RTTESTI_CHECK(aParms[1].u.uint32 == TST_UNTOUCHED_U32);
+        RTTESTI_CHECK(aParms[2].u.uint64 == TST_UNTOUCHED_U64);
+        RTTESTI_CHECK(tstIsBufUntouched(achBuf, sizeof(achBuf)));
+
+        /*
+         * The buffer of the client is one byte too small: it is told the size
+         * which is needed and nothing is written to the buffer.
+         */
+        tstSetFetchParms(aParms, achBuf, sizeof(g_szTstData) - 1);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS, aParms), VERR_BUFFER_OVERFLOW);
+        RTTESTI_CHECK_MSG(aParms[3].u.pointer.size == sizeof(g_szTstData), ("size %#x\n", aParms[3].u.pointer.size));
+        RTTESTI_CHECK(tstIsBufUntouched(achBuf, sizeof(g_szTstData) - 1));
+
+        /*
+         * After all of that the message is still the first in the queue.
+         */
+        HGCMSvcSetU32(&aParms[0], 0);
+        HGCMSvcSetU32(&aParms[1], 0);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, 2, aParms), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(aParms[0].u.uint32 == (uint32_t)HOST_MSG_EXEC_CMD, ("message %u\n", aParms[0].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[1].u.uint32 == TST_MSG_PARMS, ("%u parameters\n", aParms[1].u.uint32));
+
+        /*
+         * The client asks for what is queued and gets it.
+         */
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_GET, TST_MSG_PARMS, aParms), VINF_SUCCESS);
+        tstCheckFetched(aParms, achBuf, sizeof(achBuf));
+        RTTESTI_CHECK_MSG(aParms[3].u.pointer.size == sizeof(g_szTstData), ("size %#x\n", aParms[3].u.pointer.size));
+
+        /*
+         * The queue is empty again.
+         */
+        HGCMSvcSetU32(&aParms[0], 0);
+        HGCMSvcSetU32(&aParms[1], 0);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, 2, aParms), VERR_TRY_AGAIN);
+    } while (0);
+
+    tstClientDisconnect(pTable, pvClient);
 }
 
-static int testHost(const VBOXHGCMSVCFNTABLE *pTable)
+/**
+ * A client fetches a message with GUEST_MSG_WAIT, the way guests did before
+ * there was GUEST_MSG_PEEK_NOWAIT and GUEST_MSG_GET.
+ *
+ * @param   pTable      The service table.
+ */
+static void testClientWait(const VBOXHGCMSVCFNTABLE *pTable)
 {
-    RTTestSub(g_hTest, "Testing host commands ...");
+    RTTestISub("A client fetches a message the old way");
 
-    VBOXHGCMSVCPARM aParms[1];
-    HGCMSvcSetU32(&aParms[0], 1000 /* Context ID */);
+    void *pvClient = tstClientConnect(pTable);
+    if (!pvClient)
+        return;
 
-    CMDHOST aCmdHostAll[] =
+    VBOXHGCMSVCPARM aParms[TST_MSG_PARMS];
+    char            achBuf[32];
+    do
     {
-#if 0
-        /** No client connected. */
-        { 1024 /* Not existing command */, 0, 0, false, VERR_NOT_FOUND },
-        { -1 /* Invalid command */, 0, 0, false, VERR_NOT_FOUND },
-        { HOST_CANCEL_PENDING_WAITS, 1024, 0, false, VERR_NOT_FOUND },
-        { HOST_CANCEL_PENDING_WAITS, 0, &aParms[0], false, VERR_NOT_FOUND },
+        /*
+         * The message is queued first: a client which waits with nothing in
+         * the queue is answered when a message comes, not now.
+         */
+        RTTESTI_CHECK_RC_BREAK(tstHostQueueMsg(pTable), VINF_SUCCESS);
 
-        /** No client connected, valid command. */
-        { HOST_CANCEL_PENDING_WAITS, 0, 0, false, VERR_NOT_FOUND },
+        /*
+         * The first call is told what the message is and how many parameters
+         * it has, with the status which says that there is more to fetch.
+         */
+        HGCMSvcSetU32(&aParms[0], 0);
+        HGCMSvcSetU32(&aParms[1], 0);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_WAIT, 2, aParms), VERR_TOO_MUCH_DATA);
+        RTTESTI_CHECK_MSG(aParms[0].u.uint32 == (uint32_t)HOST_MSG_EXEC_CMD, ("message %u\n", aParms[0].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[1].u.uint32 == TST_MSG_PARMS, ("%u parameters\n", aParms[1].u.uint32));
 
-        /** Client connected, no parameters given. */
-        { HOST_EXEC_SET_INPUT, 0 /* No parameters given */, 0, true, VERR_INVALID_PARAMETER },
-        { 1024 /* Not existing command */, 0 /* No parameters given */, 0, true, VERR_INVALID_PARAMETER },
-        { -1 /* Invalid command */, 0 /* No parameters given */, 0, true, VERR_INVALID_PARAMETER },
+        /*
+         * The client has the right number of parameters and the last is of
+         * another type than the one of the message.  It is told again what
+         * the message is, in its first two parameters, and gets nothing of
+         * the message: the parameter before the one which does not fit holds
+         * what it held.
+         */
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        HGCMSvcSetU32(&aParms[3], TST_UNTOUCHED_U32);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_WAIT, TST_MSG_PARMS, aParms), VERR_TOO_MUCH_DATA);
+        RTTESTI_CHECK_MSG(aParms[0].u.uint32 == (uint32_t)HOST_MSG_EXEC_CMD, ("message %u\n", aParms[0].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[1].u.uint32 == TST_MSG_PARMS, ("%u parameters\n", aParms[1].u.uint32));
+        RTTESTI_CHECK_MSG(aParms[2].u.uint64 == TST_UNTOUCHED_U64, ("64-bit value %#RX64\n", aParms[2].u.uint64));
+        RTTESTI_CHECK_MSG(aParms[3].u.uint32 == TST_UNTOUCHED_U32, ("%#x\n", aParms[3].u.uint32));
+        RTTESTI_CHECK(tstIsBufUntouched(achBuf, sizeof(achBuf)));
 
-        /** Client connected, valid parameters given. */
-        { HOST_CANCEL_PENDING_WAITS, 0, 0, true, VINF_SUCCESS },
-        { HOST_CANCEL_PENDING_WAITS, 1024, &aParms[0], true, VINF_SUCCESS },
-        { HOST_CANCEL_PENDING_WAITS, 0, &aParms[0], true, VINF_SUCCESS},
-#endif
+        /*
+         * The client has the parameters of the message and gets it.
+         */
+        tstSetFetchParms(aParms, achBuf, sizeof(achBuf));
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_WAIT, TST_MSG_PARMS, aParms), VINF_SUCCESS);
+        tstCheckFetched(aParms, achBuf, sizeof(achBuf));
 
-        /** Client connected, invalid parameters given. */
-        { HOST_MSG_EXEC_CMD, 1024, 0, true, VERR_INVALID_POINTER },
-        { HOST_MSG_EXEC_CMD, 1, 0, true, VERR_INVALID_POINTER },
-        { HOST_MSG_EXEC_CMD, -1, 0, true, VERR_INVALID_POINTER },
+        /*
+         * The queue is empty after that.
+         */
+        HGCMSvcSetU32(&aParms[0], 0);
+        HGCMSvcSetU32(&aParms[1], 0);
+        RTTESTI_CHECK_RC(tstClientCall(pTable, pvClient, GUEST_MSG_PEEK_NOWAIT, 2, aParms), VERR_TRY_AGAIN);
+    } while (0);
 
-        /** Client connected, parameters given. */
-        { HOST_MSG_CANCEL_PENDING_WAITS, 1, &aParms[0], true, VINF_SUCCESS },
-        { HOST_MSG_EXEC_CMD, 1, &aParms[0], true, VINF_SUCCESS },
-        { HOST_MSG_EXEC_SET_INPUT, 1, &aParms[0], true, VINF_SUCCESS },
-        { HOST_MSG_EXEC_GET_OUTPUT, 1, &aParms[0], true, VINF_SUCCESS },
-
-        /** Client connected, unknown command + valid parameters given. */
-        { -1, 1, &aParms[0], true, VINF_SUCCESS }
-    };
-
-    int rc = testHostCmd(pTable, &aCmdHostAll[0], RT_ELEMENTS(aCmdHostAll));
-    RTTestSubDone(g_hTest);
-    return rc;
-}
-
-static int testClient(const VBOXHGCMSVCFNTABLE *pTable)
-{
-    RTTestSub(g_hTest, "Testing client commands ...");
-
-    int rc = pTable->pfnConnect(pTable->pvService, 1 /* Client ID */, NULL /* pvClient */, 0, false);
-    if (RT_SUCCESS(rc))
-    {
-        VBOXHGCMCALLHANDLE_TYPEDEF callHandle = { VINF_SUCCESS };
-
-        /* No commands from host yet. */
-        VBOXHGCMSVCPARM aParmsGuest[8];
-        HGCMSvcSetU32(&aParmsGuest[0], 0 /* Msg type */);
-        HGCMSvcSetU32(&aParmsGuest[1], 0 /* Parameters */);
-        pTable->pfnCall(pTable->pvService, &callHandle, 1 /* Client ID */, NULL /* pvClient */,
-                        GUEST_MSG_WAIT, 2, &aParmsGuest[0], 0);
-        RTTEST_CHECK_RC_RET(g_hTest, callHandle.rc, VINF_SUCCESS, callHandle.rc);
-
-        /* Host: Add a dummy command. */
-        VBOXHGCMSVCPARM aParmsHost[8];
-        HGCMSvcSetU32(&aParmsHost[0], 1000 /* Context ID */);
-        HGCMSvcSetStr(&aParmsHost[1], "foo.bar");
-        HGCMSvcSetStr(&aParmsHost[2], "baz");
-
-        rc = pTable->pfnHostCall(pTable->pvService, HOST_MSG_EXEC_CMD, 3, &aParmsHost[0]);
-        RTTEST_CHECK_RC_RET(g_hTest, rc, VINF_SUCCESS, rc);
-
-        /* Client: Disconnect again. */
-        int rc2 = pTable->pfnDisconnect(pTable->pvService, 1000 /* Client ID */, NULL /* pvClient */);
-        if (RT_SUCCESS(rc))
-            rc = rc2;
-    }
-
-    RTTestSubDone(g_hTest);
-    return rc;
+    tstClientDisconnect(pTable, pvClient);
 }
 
 /*
@@ -253,30 +570,32 @@ int main()
         return rcExit;
     RTTestBanner(g_hTest);
 
+    /* The service is handed what it has to refuse; in a build with assertions
+       it asserts on that before it does. */
+    RTAssertSetMayPanic(false);
+    RTAssertSetQuiet(true);
+
     /* Some host info. */
     RTTestIPrintf(RTTESTLVL_ALWAYS, "sizeof(void*)=%d\n", sizeof(void*));
 
-    /* Do the tests. */
+    /* Do the tests, each with a service of its own. */
     VBOXHGCMSVCFNTABLE svcTable;
     VBOXHGCMSVCHELPERS svcHelpers;
     RTTEST_CHECK_RC_RET(g_hTest, initTable(&svcTable, &svcHelpers), VINF_SUCCESS, 1);
 
-    do
+    typedef void FNTEST(const VBOXHGCMSVCFNTABLE *pTable);
+    static FNTEST * const s_apfnTests[] =
+    {
+        testHost,
+        testClientGet,
+        testClientWait
+    };
+    for (unsigned i = 0; i < RT_ELEMENTS(s_apfnTests); i++)
     {
         RTTESTI_CHECK_RC_BREAK(VBoxHGCMSvcLoad(&svcTable), VINF_SUCCESS);
-
-        RTTESTI_CHECK_RC_BREAK(testHost(&svcTable), VINF_SUCCESS);
-
+        s_apfnTests[i](&svcTable);
         RTTESTI_CHECK_RC_BREAK(svcTable.pfnUnload(svcTable.pvService), VINF_SUCCESS);
-
-        RTTESTI_CHECK_RC_BREAK(VBoxHGCMSvcLoad(&svcTable), VINF_SUCCESS);
-
-        RTTESTI_CHECK_RC_BREAK(testClient(&svcTable), VINF_SUCCESS);
-
-        RTTESTI_CHECK_RC_BREAK(svcTable.pfnUnload(svcTable.pvService), VINF_SUCCESS);
-
-    } while (0);
+    }
 
     return RTTestSummaryAndDestroy(g_hTest);
 }
-
