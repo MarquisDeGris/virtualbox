@@ -793,11 +793,43 @@ tells what the VM shows of the guest: the slot with the message of the
 port and what the guest has masked of it, where the CPU is and whether
 it moves, its interrupt flag and priority, the interrupt controllers.
 
+**Run 253** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f`, 39 minutes, Intel Xeon
+6975P-C): the 7.2 branch with the change to the backend about the
+Hyper-V registers in a saved state. **150 passed, none failed, none
+skipped**: the first run in which every check of all four parts passes.
+
+- The change builds (6 minutes 38 seconds for all of the tree).
+- **Windows goes on after its saved state is loaded and shuts down when
+  the power button is pressed**, two seconds after the press, with two
+  CPUs and the Hyper-V interface. That is the check which went wrong in
+  three ways in runs 249 to 251 on the branch for 7.1; this version of
+  the backend has the same code there, and it was not run without the
+  change. The saved state has the registers of the second CPU now and
+  KVM hands them back without a complaint; the eleven lines per save and
+  per load about registers the kernel does not have are still in the
+  log, as before.
+- Inside the virtual machine standing in for a host all 67 checks with
+  the Linux guest pass on this branch too, the three about the snapshot
+  among them (638 seconds).
+- **Windows where the drive is passes on 7.2 as well**, all 35 checks
+  (491 seconds; Windows starts in 413): the drive taken out with the
+  guest asked (6 seconds), put in, taken by force, put in again, read
+  each time. It did not stop as in run 251; that makes two runs out of
+  three in which this part passes, on two branches.
+- What the line about the slot shows since this run: Windows masks every
+  message of the port but the one it uses, the Linux guest masks none.
+  So Windows makes use of the mask register of the MSI capability, which
+  is where a message waits when it is sent while masked. Whether one
+  was waiting when Windows stopped in run 251 is what the next stop will
+  show.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
-message), and two commits about the register. It is built with
-`configure --with-kvm`.
+message), two commits about the register, and one about the Hyper-V
+registers in a saved state. It is built with `configure --with-kvm`.
+Every check of the simulation passes on it since run 253.
 
 State of `pci-passthrough-hotplug-7.1-kvm` (pushed): the 7.1 branch as
 above, the backend in its last version for the 7.1 line (2025-11-03, two
@@ -1369,13 +1401,12 @@ harness since WP5, saved states since the fourth part of WP6.
    KVM backend are what it goes on with then.
 4b. The branches with the KVM backend of Cyberus Technology: 7.2 runs the
    simulation with the device (run 248), and so does 7.1, with all
-   checks of the Linux guest (run 251). Left, in this order: the build
-   of what was taken over from 7.2 for the 7.1 branch; the change to the
-   backend about the Hyper-V registers in a saved state, on 7.2 and then
-   on 7.1 (local, not built); Windows where the drive is on the one for
-   7.2; a run on an AMD processor with the second change about the
-   register; the sanitizers on both; then merge requests in the fork for
-   them.
+   checks of the Linux guest (run 251). On 7.2 every check passes with
+   the change to the backend about the Hyper-V registers in a saved
+   state (run 253). Left, in this order: the same change and what was
+   taken over from 7.2 on the branch for 7.1 (the run after 253); a run
+   on an AMD processor with the second change about the register; the
+   sanitizers on both; then merge requests in the fork for them.
 5. Windows where the drive is: passed in run 250 and stopped after the
    first removal in run 251, same code, on the 7.1 branch with the
    backend of Cyberus Technology, Intel processors. Every run on a
@@ -1672,5 +1703,6 @@ slot.
 | 250 | `pci-passthrough-hotplug-7.1-kvm` @ `2aaddf20` | allsim, exploring | passed (six checks of the simulation fail) | 54 minutes, Intel Xeon 6975P-C. Windows where the drive is passes for the first time, all 35 checks: Windows starts with the drive in the hot-plug capable slot, reads from it, lets go of it when asked, takes it again, has it taken by force and takes it once more. With the Linux guest the device runs passed through on the 7.1 line. After the refused save of the state the VM stays in the state Saving on that line and the three phases after it do not start (four checks); Windows on the runner says nothing after its saved state is loaded (two checks). 95 passed, 6 failed; see "Run 250" |
 | 251 | `pci-passthrough-hotplug-7.1-kvm` @ `3b085eca` | allsim, exploring | passed (twelve checks of the simulation fail) | 124 minutes, Intel Xeon Platinum 8573C. With `Console::i_saveState` returning its result: all 67 checks with the Linux guest inside the virtual machine standing in for a host pass on the 7.1 line, the three new ones about a snapshot among them. Windows on the runner goes on after its saved state is loaded and does not shut down (two checks). Windows where the drive is starts, reads from the drive, lets go of it when asked and then says nothing any more (ten checks, 70 minutes of waiting); not understood. 148 passed, 12 failed; see "Run 251" |
 | 252 | `scratch/71-hardening` @ `ec8bcc46` | tests, exploring | passed | 8 minutes. The 7.1 branch with what was taken over from the 7.2 branch (26 changes, see "The 7.1 line and what the 7.2 line received after it"): it builds, every file the changes touch is compiled for ring 3 and for the kernel driver, without a warning in one of them; the tests of the device pass, the ACPI table check passes. The 7.1 branch was moved to this commit after it |
+| 253 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 39 minutes, Intel Xeon 6975P-C. With the change to the KVM backend of Cyberus Technology about the Hyper-V registers in a saved state. Every check passes, 150 of them: the Linux guest on the runner and inside the virtual machine standing in for a host (67 there), Windows on the runner, which now goes on after its saved state is loaded and shuts down on the power button, and Windows where the drive is (35), which takes the drive, lets go of it, takes it again, has it taken by force and takes it once more. See "Run 253" |
 
 Run numbers are those GitHub shows for the `build` workflow.
