@@ -27,7 +27,8 @@ can be put into the empty slot while the VM runs, the VM can start with an
 empty slot, its state can be saved and loaded while the slot is empty, and
 `VBoxManage controlvm` puts a device in and takes it out. The testcase has
 56 tests and three random tests and runs clean with AddressSanitizer,
-LeakSanitizer and UndefinedBehaviorSanitizer (runs 232 and 233). Main and
+LeakSanitizer and UndefinedBehaviorSanitizer (runs 232 and 233, and
+runs 262 and 263 on the branches for the released lines). Main and
 `VBoxManage` are built, and since 2026-11-17 a simulation runs all of it
 with a Linux guest and an emulated device behind an emulated IOMMU: 80
 checks, all pass (run 232; run 224, which fails if one does, for the head
@@ -1017,6 +1018,20 @@ the register. **172 passed, none failed, none skipped.**
 - Windows letting go of a device has now passed in six runs out of
   seven on the two branches, on Intel processors and on this one.
 
+**Runs 262 and 263** (2026-11-20, `sanitize`, for finding out, the
+branches without the backend: `pci-passthrough-hotplug-7.1` @ `80d2f488`,
+11 minutes, Intel Xeon 6975P-C, and `pci-passthrough-hotplug-7.2` @
+`5d633ceb`, 13 minutes, Intel Xeon Platinum 8573C): the device testcase
+built with AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer on the two released lines, which it had only
+been on the development line (run 233). On both: the 56 tests pass, the
+three random tests run in their full length (20000 device models, two
+million accesses to the root port, 100000 operations with devices
+coming and going), and no sanitizer reports anything. The device, the
+PCI bus code and the testcase are the same files on the branches with
+the backend, so this stands for those too. The testcases of the tree
+pass in both runs, 16 on 7.1 and 15 on 7.2.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -1685,11 +1700,9 @@ harness since WP5, saved states since the fourth part of WP6.
    two commits which are not about the device are in the merge request,
    with its description and HWTEST.md saying what they are for.
 4. The maintenance branches, see "The maintenance branches": the work is
-   on 7.2 and 7.1 as far as it goes there without KVM. Left: the build
-   and the tests of the branch for 7.1 (the workflow is ready for 7.1 as
-   far as reading its scripts tells, with the place of kBuild given to
-   `configure` after run 243; no run was made with that yet), and the
-   sanitizers on both. Not on 2026-11-20 any more, see the decisions.
+   on 7.2 and 7.1 as far as it goes there without KVM. Both build and
+   their tests pass (runs 238 and 246), also with the sanitizers (runs
+   262 and 263). Nothing is left of this item.
 4a. Whether the hosts this is meant for can run VMs with KVM, or only
    with the VirtualBox kernel driver: not answered yet. Since 2026-11-20
    the work goes on as if they can, on the word of who this is for and
@@ -1710,8 +1723,9 @@ harness since WP5, saved states since the fourth part of WP6.
    service and ran 16 testcases of the tree, which all pass. Run 261 had
    the same checks on the branch for 7.2, on an AMD processor, which the
    VMs with a device had not run on since the changes about the
-   register: all 172 pass. Left: the sanitizers on the branches without
-   the backend.
+   register: all 172 pass. Runs 262 and 263 had the sanitizers on the
+   branches without the backend. Nothing is left of this item which a
+   run of the workflow can show; what is left is in items 1 and 5.
 5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259
    and 261 and stopped after the first removal in run 251, on the
    branches with the backend of Cyberus Technology; run 261 had an AMD
@@ -2022,5 +2036,7 @@ slot.
 | 259 | `pci-passthrough-hotplug-7.1-kvm` @ `9e858a53` | allsim, exploring | passed; one testcase outside of the simulation did not run | 57 minutes, Intel Xeon 6975P-C. With the size check in the ACPI device. Every check of the simulation passes, 172 of them: new are an appliance exported and imported (8) and Windows in a VM with a TPM 2.0 (9); Windows where the drive is passes for the fifth time in six runs. Seven of the eight testcases of the host services pass; `tstGuestControlSvc` ends in its first connect, as it does on every branch of upstream, and was rewritten after the run. See "Run 259" |
 | 260 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | tests, exploring | passed | 15 minutes, AMD EPYC 7763. The build and the testcases, no simulation. The first build of the rewritten `tstGuestControlSvc`: it passes. All 16 testcases of the tree which the workflow runs since this run pass (host services, image formats, the audio mixing buffer, the USB mouse, the switch of the internal network), and the device testcase. See "Run 260" |
 | 261 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 38 minutes, AMD EPYC 9V45. Every check passes, 172 of them, the first time for this branch with the VM behind NAT, the appliance, the TPM 2.0 and the testcases of the tree (15 pass). The first run on an AMD processor in which the VMs inside the virtual machine standing in for a host run on this backend: the second change about the register does what it is for, and Windows where the drive is passes there too, for the sixth time in seven runs. See "Run 261" |
+| 262 | `pci-passthrough-hotplug-7.1` @ `80d2f488` | sanitize, exploring | passed | 11 minutes, Intel Xeon 6975P-C. The device testcase with the sanitizers on the 7.1 line: the 56 tests and the three random tests in full length pass, no report. 16 testcases of the tree pass, the rewritten `tstGuestControlSvc` among them |
+| 263 | `pci-passthrough-hotplug-7.2` @ `5d633ceb` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The same on the 7.2 line: the 56 tests and the three random tests pass, no report. 15 testcases of the tree pass |
 
 Run numbers are those GitHub shows for the `build` workflow.
