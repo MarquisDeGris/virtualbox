@@ -815,6 +815,13 @@ if1of ($(KBUILD_TARGET).$(KBUILD_TARGET_ARCH), solaris.amd64 win.amd64)
 endif
 # Whether to generate a database of USB vendor IDs and device IDs into VBoxSVC.
 VBOX_WITH_MAIN_USB_ID_DATABASE = 1
+# Whether to generate a database of PCI vendor IDs and device IDs into VBoxSVC.
+# The list it is generated from (pci.ids of the pciutils project) is not part
+# of this branch.  With a copy at the place below the database is generated,
+# without one VBoxSVC has no names for the PCI devices of the host.
+ifneq ($(wildcard $(PATH_ROOT)/src/VBox/Main/src-server/pci.ids),)
+ VBOX_WITH_MAIN_PCI_ID_DATABASE = 1
+endif
 # Whether to enable error message translation in Main.
 ifndef VBOX_ONLY_BUILD
  VBOX_WITH_MAIN_NLS = 1

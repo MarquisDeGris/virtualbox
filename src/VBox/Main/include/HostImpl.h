@@ -40,6 +40,7 @@ class Progress;
 class PerformanceCollector;
 class HostDrive;
 class HostDrivePartition;
+class HostPCIDevice;
 
 namespace settings
 {
@@ -124,6 +125,7 @@ private:
     HRESULT getProcessorCoreCount(ULONG *aProcessorCoreCount);
     HRESULT getProcessorOnlineCoreCount(ULONG *aProcessorOnlineCoreCount);
     HRESULT getHostDrives(std::vector<ComPtr<IHostDrive> > &aHostDrives);
+    HRESULT getPCIDevices(std::vector<ComPtr<IHostPCIDevice> > &aPCIDevices);
     HRESULT getMemorySize(ULONG *aMemorySize);
     HRESULT getMemoryAvailable(ULONG *aMemoryAvailable);
     HRESULT getOperatingSystem(com::Utf8Str &aOperatingSystem);

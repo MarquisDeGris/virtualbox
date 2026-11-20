@@ -5865,7 +5865,7 @@ AuthResult AUTHCALL AuthEntry(
               </row>
               <row>
                 <entry>IPciAddress</entry>
-                <entry><link linkend="IPCIAddress">IPCIAddress</link></entry>
+                <entry>IPCIAddress</entry>
               </row>
               <row>
                 <entry>IPciDeviceAttachment</entry>

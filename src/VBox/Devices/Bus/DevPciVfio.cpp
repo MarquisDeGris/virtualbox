@@ -390,6 +390,41 @@ typedef struct VFIOPCI
 typedef VFIOPCI *PVFIOPCI;
 
 
+/** Pointer to a const PCI quirk. */
+typedef const struct VFIOPCIQUIRK *PCVFIOPCIQUIRK;
+
+
+/**
+ * Applies quirks based on the detected vendir/device ID.
+ *
+ * @returns VBox status code.
+ * @param   pThis               The VFIO PCI device instance.
+ * @param   pFun                The function to apply the quirk to.
+ * @param   pQuirk              The quirk to apply.
+ */
+typedef DECLCALLBACKTYPE(int, FNVFIOPCIQUIRKAPPLY, (PVFIOPCI pThis, PVFIOPCIFUN pFun, PCVFIOPCIQUIRK pQuirk));
+/** Pointer to a quirk apply callback. */
+typedef FNVFIOPCIQUIRKAPPLY *PFNVFIOPCIQUIRKAPPLY;
+
+
+/**
+ * A quirk entry.
+ */
+typedef struct VFIOPCIQUIRK
+{
+    /** The vendor ID. */
+    uint16_t                idVendor;
+    /** The device ID. */
+    uint16_t                idDevice;
+    /** Some flags for the quirk. */
+    uint32_t                fQuirk;
+    /** The quirk handler. */
+    PFNVFIOPCIQUIRKAPPLY    pfnApply;
+    /** The quirk description for logging. */
+    const char              *pszDesc;
+} VFIOPCIQUIRK;
+
+
 #ifndef VBOX_DEVICE_STRUCT_TESTCASE
 
 /**
@@ -1941,10 +1976,16 @@ static int pciVfioCfgSpaceParseExtCapabilities(PVFIOPCI pThis, PVFIOPCIFUN pFun,
         if (!offCapNext)
             break;
 
-        if (   offCapNext < offCap
-            || offCapNext < offCap + cbCap)
+        /*
+         * Don't allow pointing inside the current capability, pointing backwards is allowed as that was seen on
+         * an Intel ARC Pro B70 GPU and there is nothing in the PCIe specification prohibiting that.
+         */
+        /** @todo Maybe check whether the new capability was visited already to avoid endless loops, which would
+         * indicate a broken device. */
+        if (   offCapNext >= offCap
+            && offCapNext < offCap + cbCap)
             return PDMDevHlpVMSetError(pDevIns, VERR_INVALID_STATE, RT_SRC_POS,
-                                       N_("Next capability pointer points backwards or inside the current capability (next offset %#x )"), offCapNext);
+                                       N_("Next capability pointer points inside the current capability (next offset %#x, current [%#x:%#x[)"), offCapNext, offCap, cbCap);
 
         offCap = offCapNext;
     }
@@ -2090,73 +2131,80 @@ static int pciVfioMapRegion(PVFIOPCI pThis, RTGCPHYS GCPhysStart, uintptr_t uPtr
 }
 
 
-static int pciVfioIommuGuestRamMap(PVFIOPCI pThis, PPDMDEVINS pDevIns)
+static void pciVfioIommuGuestRamMapRange(PVFIOPCI pThis, PPDMDEVINS pDevIns, RTGCPHYS GCPhysStart, RTGCPHYS cbMap)
 {
-    if (!pThis->fGuestRamMapped)
+    /** @todo This is a really gross hack because we currently lack
+     * a dedicated interface to get knowledge about guest RAM mappings.
+     * This might also return mappings for stuff not being guest RAM.
+     * Also this will allocate all guest RAM instantly but there is no way
+     * around that anyway in order for the IOMMU to work correctly.
+     */
+    uintptr_t uPtrMapping = 0;
+    size_t    cbMapping   = 0;
+    for (RTGCPHYS GCPhys = GCPhysStart; GCPhys < GCPhysStart + cbMap; GCPhys += _4K)
     {
-        /** @todo This is a really gross hack because we currently lack
-         * a dedicated interface to get knowledge about guest RAM mappings.
-         * This might also return mappings for stuff not being guest RAM.
-         */
-        RTGCPHYS  GCPhysStart = 0;
-        uintptr_t uPtrMapping = 0;
-        size_t    cbMapping   = 0;
-        for (RTGCPHYS GCPhys = 0; GCPhys < _4G + PDMDevHlpMMPhysGetRamSizeAbove4GB(pDevIns); GCPhys += _4K)
+        void *pv = NULL;
+        PGMPAGEMAPLOCK Lock;
+        int rc = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pv, &Lock);
+        if (RT_SUCCESS(rc))
         {
-            void *pv = NULL;
-            PGMPAGEMAPLOCK Lock;
-            int rc = PDMDevHlpPhysGCPhys2CCPtr(pDevIns, GCPhys, 0 /*fFlags*/, &pv, &Lock);
-            if (RT_SUCCESS(rc))
+            if (cbMapping)
             {
-                if (cbMapping)
-                {
-                    if (uPtrMapping + cbMapping == (uintptr_t)pv)
-                        cbMapping += _4K;
-                    else
-                    {
-                        rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-                        if (RT_FAILURE(rc))
-                            LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-
-                        GCPhysStart = GCPhys;
-                        uPtrMapping = (uintptr_t)pv;
-                        cbMapping = _4K;
-                    }
-                }
+                if (uPtrMapping + cbMapping == (uintptr_t)pv)
+                    cbMapping += _4K;
                 else
                 {
-                    Assert(!uPtrMapping);
+                    rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
+                    if (RT_FAILURE(rc))
+                        LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
+
                     GCPhysStart = GCPhys;
                     uPtrMapping = (uintptr_t)pv;
                     cbMapping = _4K;
                 }
-                PDMDevHlpPhysReleasePageMappingLock(pDevIns, &Lock);
             }
-            else if (cbMapping)
+            else
             {
-                LogRel(("PDMDevHlpPhysGCPhys2CCPtr(,%RGp) -> %Rrc\n", GCPhys, rc));
-                /* Map what we currently have. */
-                Assert(uPtrMapping);
-                rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
-                if (RT_FAILURE(rc))
-                    LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
-                cbMapping   = 0;
-                uPtrMapping = 0;
+                Assert(!uPtrMapping);
                 GCPhysStart = GCPhys;
+                uPtrMapping = (uintptr_t)pv;
+                cbMapping = _4K;
             }
+            PDMDevHlpPhysReleasePageMappingLock(pDevIns, &Lock);
         }
-
-        if (cbMapping)
+        else if (cbMapping)
         {
+            LogRel(("PDMDevHlpPhysGCPhys2CCPtr(,%RGp) -> %Rrc\n", GCPhys, rc));
             /* Map what we currently have. */
             Assert(uPtrMapping);
-            int rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
+            rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
             if (RT_FAILURE(rc))
                 LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
             cbMapping   = 0;
             uPtrMapping = 0;
+            GCPhysStart = GCPhys;
         }
+    }
 
+    if (cbMapping)
+    {
+        /* Map what we currently have. */
+        Assert(uPtrMapping);
+        int rc = pciVfioMapRegion(pThis, GCPhysStart, uPtrMapping, cbMapping);
+        if (RT_FAILURE(rc))
+            LogRel(("Mapping %RGp/%zu failed with %Rrc\n", GCPhysStart, cbMapping, rc));
+        cbMapping   = 0;
+        uPtrMapping = 0;
+    }
+}
+
+
+static int pciVfioIommuGuestRamMap(PVFIOPCI pThis, PPDMDEVINS pDevIns)
+{
+    if (!pThis->fGuestRamMapped)
+    {
+        pciVfioIommuGuestRamMapRange(pThis, pDevIns,   0 /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeBelow4GB(pDevIns));
+        pciVfioIommuGuestRamMapRange(pThis, pDevIns, _4G /*GCPhysStart*/, PDMDevHlpMMPhysGetRamSizeAbove4GB(pDevIns));
         pThis->fGuestRamMapped = true;
     }
 
@@ -2353,9 +2401,10 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigWrite(PPDMDEVINS pDevIns, PPDMPCI
                                 pThis->iInstance, pFun->uPciFun, rc));
                 }
 
-                /* Check whether the INTx config changes. */
+                /* Check whether the INTx config changes and reconfigure the interrupt mode if INTx is supported by the device. */
                 bool const fIntxEnabled = !RT_BOOL(u32Value & RT_BIT(10));
-                if (fIntxEnabled != (pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX))
+                if (   (fIntxEnabled != (pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX))
+                    && pFun->acIrqVectors[VFIO_PCI_INTX_IRQ_INDEX])
                 {
                     rc = pciVfioIrqReconfigure(pThis, pFun, VFIO_PCI_INTX_IRQ_INDEX, fIntxEnabled ? 1 : 0);
                     if (RT_FAILURE(rc))
@@ -2419,6 +2468,69 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigWrite(PPDMDEVINS pDevIns, PPDMPCI
 }
 
 
+/**
+ * Quirk handler for Intel Battlemage GPUs where the Windows driver reads from PCI config space 0x50
+ * when no hypervisor is detected and the physical device is passed through (does not apply to virtual functions in the SR-IOV case).
+ * The driver uses this to determine how much bytes to map for a PCI bar. However the 0x50 offset is not passed through because
+ * it is not part of the standard config space and not part of a capability and therefore returns 0.
+ * This results in the driver trying to map 0 bytes when calling DxgkcbMapMemory() which fails with NTSTATUS_INVALID_PARAMETER.
+ * The quirk just statically passes through the 0x50 offset readonly.
+ */
+static DECLCALLBACK(int) pciVfioQuirkIntelBattlemageApply(PVFIOPCI pThis, PVFIOPCIFUN pFun, PCVFIOPCIQUIRK pQuirk)
+{
+    RT_NOREF(pThis, pQuirk);
+
+    for (uint32_t i = 0x50; i < 0x50 + 16; i += 4)
+        pciVfioCfgSpaceSetInterceptRoU32(pFun, i, VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH);
+
+    return VINF_SUCCESS;
+}
+
+
+/*
+ * Quirk handling.
+ */
+static const VFIOPCIQUIRK g_aQuirks[] =
+{
+    /** Intel */
+    { 0x8086, 0xe223, 0, pciVfioQuirkIntelBattlemageApply, "Intel Arc Pro B70 config space passthrough" } /**< Intel Corporation Battlemage G31 [Arc Pro B70] */
+};
+
+
+/**
+ * Applies quirks for the given function.
+ *
+ * @returns VBox status code.
+ * @param   pThis               Pointer to the PCI VFIO device instance.
+ * @param   pFun                The function to apply a possible quirk for.
+ */
+static int pciVfioQuirkApply(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+{
+    uint16_t idVendor = 0;
+    uint16_t idDevice = 0;
+    int rc = pciVfioCfgSpaceReadU16(pFun, VBOX_PCI_VENDOR_ID, &idVendor);
+    if (RT_SUCCESS(rc))
+        rc = pciVfioCfgSpaceReadU16(pFun, VBOX_PCI_DEVICE_ID, &idDevice);
+    if (RT_SUCCESS(rc))
+    {
+        for (uint32_t i = 0; i < RT_ELEMENTS(g_aQuirks); i++)
+        {
+            PCVFIOPCIQUIRK pQuirk = &g_aQuirks[i];
+
+            if (   pQuirk->idVendor == idVendor
+                && pQuirk->idDevice == idDevice)
+            {
+                LogRel(("VFIO#%d.%u: Applying quirk \"%s\" for device %#RX16:%#RX16\n", pThis->iInstance, pFun->uPciFun,
+                        pQuirk->pszDesc, idVendor, idDevice));
+                return pQuirk->pfnApply(pThis, pFun, pQuirk);
+            }
+        }
+    }
+
+    return rc;
+}
+
+
 static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHLPR3 pHlp, PCFGMNODE pCfg)
 {
     /* Query configuration, configuration using the IOMMUFD takes precedence over the legacy VFIO group style. */
@@ -2470,7 +2582,7 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
                                            N_("Configuration error: The device configuration misses function 0"));
 
             char szHostAddress[32]; /* Format is xxxx:xx:xx.x */
-            rc = pHlp->pfnCFGMQueryString(pCfg, "HostAddress", &szHostAddress[0], sizeof(szHostAddress));
+            rc = pHlp->pfnCFGMQueryString(pCfgFun, "HostAddress", &szHostAddress[0], sizeof(szHostAddress));
             if (RT_FAILURE(rc))
                 return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                            N_("Configuration error: Querying \"HostAddress\" failed, no access method configured"));
@@ -3000,6 +3112,11 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         }
         else
             PDMPciDevSetInterruptPin(pPciDev, 0);
+
+        /* Apply any quirks for the function. */
+        rc = pciVfioQuirkApply(pThis, pFun);
+        if (RT_FAILURE(rc))
+            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS, N_("Applying quirk for device failed"));
 
         /* Subsequent function should use the same major as the previous one. */
         iPciDevNo = PDMPCIDEVREG_DEV_NO_SAME_AS_PREV;

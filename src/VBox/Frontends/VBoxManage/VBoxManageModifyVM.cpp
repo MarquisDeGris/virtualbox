@@ -211,10 +211,8 @@ enum
     MODIFYVM_AUTOSTART_ENABLED,
     MODIFYVM_AUTOSTART_DELAY,
     MODIFYVM_AUTOSTOP_TYPE,
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
     MODIFYVM_ATTACH_PCI,
     MODIFYVM_DETACH_PCI,
-#endif
 #ifdef VBOX_WITH_USB_CARDREADER
     MODIFYVM_USBCARDREADER,
 #endif
@@ -464,10 +462,8 @@ static const RTGETOPTDEF g_aModifyVMOptions[] =
     OPT1("--autostart-enabled",                                         MODIFYVM_AUTOSTART_ENABLED,         RTGETOPT_REQ_BOOL_ONOFF),
     OPT1("--autostart-delay",                                           MODIFYVM_AUTOSTART_DELAY,           RTGETOPT_REQ_UINT32),
     OPT1("--autostop-type",                                             MODIFYVM_AUTOSTOP_TYPE,             RTGETOPT_REQ_STRING),
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
     OPT2("--pci-attach",                    "--pciattach",              MODIFYVM_ATTACH_PCI,                RTGETOPT_REQ_STRING),
     OPT2("--pci-detach",                    "--pcidetach",              MODIFYVM_DETACH_PCI,                RTGETOPT_REQ_STRING),
-#endif
 #ifdef VBOX_WITH_USB_CARDREADER
     OPT2("--usb-card-reader",               "--usbcardreader",          MODIFYVM_USBCARDREADER,             RTGETOPT_REQ_BOOL_ONOFF),
 #endif
@@ -567,28 +563,32 @@ static HRESULT setExtraData(ComPtr<IMachine> &rSessionMachine, const char *pszVa
 }
 
 
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
-/** Parse PCI address in format 01:02.03 and convert it to the numeric representation. */
-static int32_t parsePci(const char* szPciAddr)
+/** Parse PCI address in format 0000:01:02.03 and convert it to the numeric representation. */
+static uint32_t parsePci(const char *pszPciAddr)
 {
+    uint16_t u16Domain = UINT16_MAX;
     uint8_t aVals[3] = {0, 0, 0};
 
-    char *pszNext;
-    int vrc = RTStrToUInt8Ex(pszNext, &pszNext, 16, &aVals[0]);
+    char *pszNext = (char *)pszPciAddr;
+    int vrc = RTStrToUInt16Ex(pszNext, &pszNext, 16, &u16Domain);
     if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != ':')
-        return -1;
+        return UINT32_MAX;
 
-    vrc = RTStrToUInt8Ex(pszNext+1, &pszNext, 16, &aVals[1]);
+    vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[0]);
+    if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != ':')
+        return UINT32_MAX;
+
+    vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[1]);
     if (RT_FAILURE(vrc) || pszNext == NULL || *pszNext != '.')
-        return -1;
+        return UINT32_MAX;
 
-    vrc = RTStrToUInt8Ex(pszNext+1, &pszNext, 16, &aVals[2]);
+    vrc = RTStrToUInt8Ex(pszNext + 1, &pszNext, 16, &aVals[2]);
     if (RT_FAILURE(vrc) || pszNext == NULL)
-        return -1;
+        return UINT32_MAX;
 
-    return (aVals[0] << 8) | (aVals[1] << 3) | (aVals[2] << 0);
+    return ((uint32_t)u16Domain << 16) | (aVals[0] << 8) | (aVals[1] << 3) | (aVals[2] << 0);
 }
-#endif
+
 
 void parseGroups(const char *pcszGroups, com::SafeArray<BSTR> *pGroups)
 {
@@ -3574,46 +3574,44 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
                     CHECK_ERROR(sessionMachine, COMSETTER(AutostopType)(enmAutostopType));
                 break;
             }
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
             case MODIFYVM_ATTACH_PCI:
             {
                 const char* pAt = strchr(ValueUnion.psz, '@');
-                int32_t iHostAddr, iGuestAddr;
+                uint32_t uHostAddr, uGuestAddr;
 
-                iHostAddr = parsePci(ValueUnion.psz);
-                iGuestAddr = pAt != NULL ? parsePci(pAt + 1) : iHostAddr;
+                uHostAddr = parsePci(ValueUnion.psz);
+                uGuestAddr = pAt != NULL ? parsePci(pAt + 1) : uHostAddr;
 
-                if (iHostAddr == -1 || iGuestAddr == -1)
+                if (uHostAddr == UINT32_MAX || uGuestAddr == UINT32_MAX)
                 {
-                    errorArgument(ModifyVM::tr("Invalid --pciattach argument '%s' (valid: 'HB:HD.HF@GB:GD.GF' or just 'HB:HD.HF')"),
+                    errorArgument(ModifyVM::tr("Invalid --pciattach argument '%s' (valid: 'HDom:HB:HD.HF@GDom:GB:GD.GF' or just 'HDom:HB:HD.HF')"),
                                   ValueUnion.psz);
                     hrc = E_FAIL;
                 }
                 else
                 {
-                    CHECK_ERROR(sessionMachine, AttachHostPCIDevice(iHostAddr, iGuestAddr, TRUE));
+                    CHECK_ERROR(sessionMachine, AttachHostPCIDevice(uHostAddr, uGuestAddr, TRUE));
                 }
 
                 break;
             }
             case MODIFYVM_DETACH_PCI:
             {
-                int32_t iHostAddr;
+                uint32_t uHostAddr;
 
-                iHostAddr = parsePci(ValueUnion.psz);
-                if (iHostAddr == -1)
+                uHostAddr = parsePci(ValueUnion.psz);
+                if (uHostAddr == UINT32_MAX)
                 {
-                    errorArgument(ModifyVM::tr("Invalid --pcidetach argument '%s' (valid: 'HB:HD.HF')"), ValueUnion.psz);
+                    errorArgument(ModifyVM::tr("Invalid --pcidetach argument '%s' (valid: 'HDom:HB:HD.HF')"), ValueUnion.psz);
                     hrc = E_FAIL;
                 }
                 else
                 {
-                    CHECK_ERROR(sessionMachine, DetachHostPCIDevice(iHostAddr));
+                    CHECK_ERROR(sessionMachine, DetachHostPCIDevice(uHostAddr));
                 }
 
                 break;
             }
-#endif
 
 #ifdef VBOX_WITH_USB_CARDREADER
             case MODIFYVM_USBCARDREADER:
