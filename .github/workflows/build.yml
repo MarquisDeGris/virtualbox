@@ -57,6 +57,10 @@ on:
         description: "no (default), yes or linux. With yes a run with the simulation fails if a check of the simulation fails; with linux only if a check with the Linux guest fails, and the parts with Windows tell what they found; with no it tells what it found and succeeds, for setting the simulation up"
         required: false
         default: "no"
+      explore:
+        description: "no (default) or yes. With yes the run counts as passed whatever happens in it: for the first build of a branch or a base nothing is known about yet, where a failure is a finding about the workflow as likely as one about the code. The log tells what happened"
+        required: false
+        default: "no"
 
 permissions:
   contents: read
@@ -69,6 +73,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    continue-on-error: ${{ inputs.explore == 'yes' }}
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
@@ -157,18 +162,30 @@ jobs:
           done
           ls /usr/include/c++
           ./configure --help > configure-help.log 2>&1 || true
+          # The development line has a configure of its own kind (configure.py is
+          # its sign) which takes options for leaving the additions and the
+          # validation kit out.  The configure of the maintenance branches does
+          # not know these two; there LocalConfig.kmk below does it alone.  That
+          # configure gets told to leave Java and the kernel modules out, which
+          # nothing here needs.
+          opts="--ose --build-headless --disable-docs --disable-python --disable-hardening --disable-extpack --disable-sdl"
+          if [ -e configure.py ]; then
+            opts="$opts --disable-additions --disable-validationkit"
+          else
+            opts="$opts --disable-java --disable-kmods --disable-dxvk"
+          fi
+          echo "configure $opts"
           # The tool checks of configure run into their time limits now and then, so
           # it gets up to three attempts.
           configured=no
           for attempt in 1 2 3; do
-            if ./configure --ose --build-headless --disable-docs --disable-additions \
-                 --disable-validationkit --disable-python --disable-hardening \
-                 --disable-extpack --disable-sdl \
-                 > configure-run.log 2>&1; then
+            if ./configure $opts > configure-run.log 2>&1; then
               configured=yes
               break
             fi
-            echo "configure attempt $attempt failed:"; grep -E 'ERROR|failed' configure-run.log | head -5 || true
+            echo "configure attempt $attempt failed:"; grep -E 'ERROR|failed|Unrecognized' configure-run.log | head -5 || true
+            # Another attempt does not help against an option it does not know.
+            if grep -q 'Unrecognized option' configure-run.log; then break; fi
           done
           if [ "$configured" != yes ]; then cat configure-run.log; tail -100 configure.log || true; exit 1; fi
           cat configure-run.log
