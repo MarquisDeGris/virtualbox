@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-20
+Updated: 2026-11-21
 
 ## Where things are
 
@@ -1726,6 +1726,17 @@ harness since WP5, saved states since the fourth part of WP6.
    register: all 172 pass. Runs 262 and 263 had the sanitizers on the
    branches without the backend. Nothing is left of this item which a
    run of the workflow can show; what is left is in items 1 and 5.
+4c. A device with more than one function in the simulation, since
+   2026-11-21: what this work is for is a graphics card, which is a
+   device of several functions, and the simulation had a device of one.
+   A part of its own (`mfhost`) has two NVMe controllers at one address
+   behind the root port, in one IOMMU group, and goes through both
+   functions passed through together, the device of two functions in
+   the slot (taken out with the guest asked, put in by naming either
+   function, taken by force), a start without it, a device of which one
+   function is not to be had, a saved state, and the host taking both
+   functions back. Written without having run; the first run is for
+   finding out. Windows with such a device comes after that.
 5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259
    and 261 and stopped after the first removal in run 251, on the
    branches with the backend of Cyberus Technology; run 261 had an AMD
@@ -1835,6 +1846,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | The reworks which 7.2 has from 2025 and 7.1 never got (the buffers of USB requests, the command buffer interface of the TPM with the change to the VMM it needs, the E1000, the 3D graphics) are not ported to the branches for 7.1 | They are hundreds of lines each, depend on each other and on the VMM of 7.2, upstream itself did not take them to 7.1 while it supported it, and nothing here could show that a port of them is right. The notes name them as what separates 7.1 from 7.2, and who can choose takes 7.2 |
 | 2026-11-20 | The branches for 7.1 are built without the 2D video acceleration for guests (`VBOX_WITH_VIDEOHWACCEL` empty in `LocalConfig.kmk`) | The lines after 7.1 no longer have that code at all, a guest with a current Windows does not use it, and leaving it out is a switch of the build and no change to the source. Corrected after run 259: a headless build, which is what is built here, never had it; the switch is for a build with the user interface |
 | 2026-11-20 | The testcase of the guest control service, which cannot run as upstream has it, is rewritten on the branches for 7.1 instead of being taken off the list; and a testcase which is new to the workflow is tried for a run before it counts | The service is one of those the changes taken over from 7.2 touch, and nothing else here goes through it: no guest of the simulation has the Guest Additions. A testcase nobody has seen passing here may fail for the runner and not for the code, and a run which fails for that says the wrong thing |
+| 2026-11-21 | The simulation gets a device with two functions, as a part of its own next to the one with a device of one function, which stays as it is | A graphics card in an enclosure is a device with several functions which the host has in one IOMMU group, and that is what this work is for. Several functions were gone through by the testcase with its made-up kernel interface only; a real kernel, Main, `VBoxManage` and a guest had not seen such a device. It is the largest thing left which can be shown without hardware. The part with one function stays unchanged so that a failure in the new part does not take the old checks with it |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 

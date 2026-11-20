@@ -14,7 +14,11 @@ set -u
 : "${VBOX_BIN:?}" "${SIM_WORK:?}" "${SIM_OUT:?}" "${SIM_STAGES:?}" "${GUEST_RAW:?}"
 WHERE=${SIM_WHERE:-host}
 HOSTADDR=${SIM_HOSTADDR:-}
+# Every function of the device of the host, the first being $HOSTADDR.  Where
+# the device has two, the drive of the second has the checksum $SIM_MD5B.
+HOSTFUNCS=${SIM_HOSTFUNCS:-$HOSTADDR}
 EXPECT_MD5=${SIM_MD5:-none}
+EXPECT_MD5B=${SIM_MD5B:-none}
 BOOT_WAIT=${SIM_BOOT_WAIT:-240}
 # The waits for a line of the guest are this many times as long as written
 # down where they are made.  They are written down for the runner.  In the
@@ -359,38 +363,52 @@ check_log_quiet()
 {
     local log="$VMDIR/Logs/VBox.log" n
     local re='Failed to update command register|could not be reset|t be reset on its own|Failed to clear the command register'
-    n=$(grep -a -c -E "$re" "$log" 2> /dev/null)
+    # What the device says once of a function the host has no reset for by
+    # itself is no failure: devices with several functions are often so.
+    local note='a reset is going to affect everything on its bus'
+    n=$(grep -a -E "$re" "$log" 2> /dev/null | grep -a -c -v "$note")
     if [ "${n:-0}" = 0 ]; then
         stage "the log of the VM has no line about a failed reset or register write" ok
     else
         stage "the log of the VM has no line about a failed reset or register write" FAILED "$n"
-        grep -a -E "$re" "$log" | cut -c1-200 | sed 's/^/    | /'
+        grep -a -E "$re" "$log" | grep -a -v "$note" | cut -c1-200 | sed 's/^/    | /'
     fi
+    grep -a "$note" "$log" | cut -c1-200 | head -n 2 | sed 's/^/    | /'
     grep -a 'The device is not reset now' "$log" | cut -c1-200 | head -n 2 | sed 's/^/    | /'
 }
 
-# The device of the host and the driver it has to be bound to.
-bind_dev()
+# A function of the device of the host and the driver it has to be bound to.
+bind_one() # <address>
 {
-    local d=/sys/bus/pci/devices/$HOSTADDR i=0
+    local d=/sys/bus/pci/devices/$1 i=0
     while [ ! -e "$d" ] && [ "$i" -lt 10 ]; do
         sleep 1
         i=$((i + 1))
     done
     if [ ! -e "$d" ]; then
-        echo "    the device $HOSTADDR is not on the host"
+        echo "    the device $1 is not on the host"
         return 1
     fi
     local cur=
     [ -e "$d/driver" ] && cur=$(basename "$(readlink "$d/driver")")
     if [ "$cur" != vfio-pci ]; then
-        [ -n "$cur" ] && echo "$HOSTADDR" > "$d/driver/unbind"
+        [ -n "$cur" ] && echo "$1" > "$d/driver/unbind"
         echo vfio-pci > "$d/driver_override"
-        echo "$HOSTADDR" > /sys/bus/pci/drivers_probe
+        echo "$1" > /sys/bus/pci/drivers_probe
         cur=
         [ -e "$d/driver" ] && cur=$(basename "$(readlink "$d/driver")")
     fi
     [ "$cur" = vfio-pci ]
+}
+
+# The device of the host, which is all of its functions.
+bind_dev()
+{
+    local a rc=0
+    for a in $HOSTFUNCS; do
+        bind_one "$a" || rc=1
+    done
+    return $rc
 }
 
 # After a VM was powered off it takes a moment until its settings can be
@@ -409,7 +427,10 @@ settle()
 
 unbind_dev()
 {
-    echo "$HOSTADDR" > /sys/bus/pci/drivers/vfio-pci/unbind
+    local a
+    for a in $HOSTFUNCS; do
+        echo "$a" > /sys/bus/pci/drivers/vfio-pci/unbind
+    done
 }
 
 # Saves the state of the VM, which takes the slot being empty, and loads it.
@@ -987,6 +1008,341 @@ phase_startempty()
 }
 
 
+# The phases below are for a device of the host with more than one function:
+# two NVMe controllers at one address, each with a drive of its own, which the
+# host has in one IOMMU group (run.sh, l1.sh).  That is what a graphics card
+# with its audio function is.  Each function is attached to the VM by itself,
+# at its function number of guest device 01:00, and the device they make goes
+# into the slot and out of it as one.  The guest tells of the second function
+# in lines of their own (READ2, WROTE2, REREAD2), and says GONE when neither
+# controller is there any more.
+
+mf_wanted()
+{
+    [ "$HOSTFUNCS" != "$HOSTADDR" ] && return 0
+    stage "the device of the host has more than one function" skipped "it has one"
+    return 1
+}
+
+attach_funcs()
+{
+    local a
+    ATTACHED=
+    for a in $HOSTFUNCS; do
+        run modifyvm "$VM" --pci-attach "$a@0000:01:00.${a##*.}" && ATTACHED="$ATTACHED $a"
+    done
+}
+
+guest_reads2() # <round> <what> [<seconds>]
+{
+    if wait_serial "GUEST: READ2 $1 md5=$EXPECT_MD5B" "${3:-180}"; then
+        stage "$2" ok
+        return 0
+    fi
+    stage "$2" FAILED "last: $(serial_new | grep -a -E 'GUEST: (READ2|NODRIVE2|PRESENT2|GONE)' | tail -n 1 | cut -c1-70)"
+    diag
+    return 1
+}
+
+# The guest has read from both drives in the round given.
+guest_reads_both() # <round> <what>
+{
+    if    wait_serial "GUEST: READ $1 md5=$EXPECT_MD5" 180 \
+       && wait_serial "GUEST: READ2 $1 md5=$EXPECT_MD5B" 180; then
+        stage "$2" ok
+        return 0
+    fi
+    stage "$2" FAILED "last: $(serial_new | grep -a -E 'GUEST: (READ2?|NODRIVE2?|PRESENT2?|GONE) ' | tail -n 2 | cut -c1-70 | tr '\n' '|')"
+    diag
+    return 1
+}
+
+# What showvminfo tells of every function of the device: each has a line and
+# all of them say the same, a device being all of its functions.
+check_pcistate_all() # <hotplug|fixed>,<present|absent>,<inuse|unused>
+{
+    local all want=0 a
+    for a in $HOSTFUNCS; do
+        want=$((want + 1))
+    done
+    all=$(vbm showvminfo "$VM" --machinereadable 2> /dev/null | sed -n 's/^AttachedHostPCIState=[^,]*,\(.*\)$/\1/p')
+    if [ "$(echo "$all" | grep -c -x "$1")" = "$want" ] && [ "$(echo "$all" | grep -c .)" = "$want" ]; then
+        stage "showvminfo tells $1 for each function" ok
+    else
+        stage "showvminfo tells $1 for each function" FAILED "it tells '$(echo "$all" | tr '\n' ' ')'"
+    fi
+}
+
+# Both functions passed through, there when the VM starts, no hot-plug.
+phase_mfpassthrough()
+{
+    PHASE=mfpassthrough
+    reset_vm
+    mf_wanted || return
+    bind_dev || { stage "the functions of the device are bound to vfio-pci" FAILED; return; }
+    attach_funcs
+    if boot "a VM with both functions of the device passed through boots the guest"; then
+        guest_reads 1 "guest: reads from the drive of the first function"
+        guest_reads2 1 "guest: reads from the drive of the second function"
+        wait_serial 'GUEST: (WROTE2|WRITE2-FAILED|NODRIVE2) 1' 60
+        serial_show 'GUEST: (pci: 0000:01|PRESENT|READ|IRQ|WROTE|WRITE|NODRIVE)' 14
+        grep -a 'VFIO#' "$VMDIR/Logs/VBox.log" | cut -c1-200 | head -n 40 | sed 's/^/    | /'
+        if serial_has 'GUEST: WROTE 1' && serial_has 'GUEST: WROTE2 1'; then
+            stage "guest: writes to both drives" ok
+        else
+            stage "guest: writes to both drives" FAILED
+        fi
+        check_pcistate_all fixed,present,inuse
+
+        run controlvm "$VM" pause
+        sleep 3
+        run controlvm "$VM" resume
+        serial_mark
+        if    wait_serial "GUEST: REREAD [0-9]+ md5=$EXPECT_MD5" 150 \
+           && wait_serial "GUEST: REREAD2 [0-9]+ md5=$EXPECT_MD5B" 60; then
+            stage "guest: reads from both drives after pause and resume" ok
+        else
+            stage "guest: reads from both drives after pause and resume" FAILED
+            serial_show 'GUEST: REREAD' 6
+            diag
+        fi
+
+        VBM_TIMEOUT=120 run controlvm "$VM" savestate
+        if [ $? -eq 0 ]; then
+            stage "saving the state with the device in the VM is refused" FAILED "it was saved"
+        else
+            stage "saving the state with the device in the VM is refused" ok
+            sleep 3
+            [ "$(vmstate)" = paused ] && run controlvm "$VM" resume
+            guest_goes_on "the VM runs on after that" 60
+        fi
+    fi
+    end_phase
+}
+
+# The device with its two functions in the hot-plug capable slot: taken out
+# and put in while the VM runs, as one device, whichever of its functions the
+# command names.
+phase_mfhotplug()
+{
+    PHASE=mfhotplug
+    reset_vm
+    mf_wanted || return
+    bind_dev || { stage "the functions of the device are bound to vfio-pci" FAILED; return; }
+    local second=${HOSTFUNCS##* } a lay stored=0 want=0 t0
+    attach_funcs
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    if boot "a VM with the device of two functions in the hot-plug capable slot boots the guest"; then
+        guest_slot_checks
+        guest_reads_both 1 "guest: reads from both drives of the device in the slot"
+        check_pcistate_all hotplug,present,inuse
+        for a in $HOSTFUNCS; do
+            want=$((want + 1))
+            lay=$(vbm getextradata "$VM" "VBoxInternal2/HostPCILayout/$a" 2> /dev/null | sed -n 's/^Value: //p')
+            echo "    layout stored for $a: ${lay:-none}"
+            [ -n "$lay" ] && stored=$((stored + 1))
+        done
+        if [ "$stored" = "$want" ]; then
+            stage "the layout of each function is stored for a start without the device" ok
+        else
+            stage "the layout of each function is stored for a start without the device" FAILED "$stored of $want"
+        fi
+
+        serial_mark
+        t0=$(date +%s)
+        if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
+            stage "unplugpci: the guest is asked and lets go of the device" ok "$(( $(date +%s) - t0 )) s"
+        else
+            stage "unplugpci: the guest is asked and lets go of the device" FAILED
+            diag
+        fi
+        if wait_serial 'GUEST: GONE 1' 30; then
+            stage "guest: both drives are gone" ok
+        else
+            stage "guest: both drives are gone" FAILED
+        fi
+        serial_show 'pciehp|GUEST: GONE' 10
+        check_pcistate_all hotplug,absent,unused
+
+        # The command is given the second function this time: the device is
+        # all of its functions, and any of them names it.
+        serial_mark
+        if run controlvm "$VM" plugpci "$second"; then
+            stage "plugpci, naming the second function, puts the device into the slot" ok
+        else
+            stage "plugpci, naming the second function, puts the device into the slot" FAILED
+            diag
+        fi
+        guest_reads_both 2 "guest: takes the device in the slot and reads from both drives"
+        serial_show 'pciehp|GUEST: (PRESENT|READ)' 12
+        check_pcistate_all hotplug,present,inuse
+
+        serial_mark
+        if VBM_TIMEOUT=60 run controlvm "$VM" unplugpci "$second" --timeout=1000 --force; then
+            stage "unplugpci --force takes the device away from a guest which uses it" ok
+        else
+            stage "unplugpci --force takes the device away from a guest which uses it" FAILED
+            diag
+        fi
+        if wait_serial 'GUEST: GONE 2' 150; then
+            stage "guest: notices that both drives are gone" ok
+        else
+            stage "guest: notices that both drives are gone" FAILED
+        fi
+        guest_goes_on "the VM runs on after that" 150
+
+        serial_mark
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci after the forced removal" ok
+        else
+            stage "plugpci after the forced removal" FAILED
+            diag
+        fi
+        guest_reads_both 3 "guest: takes the device again and reads from both drives"
+        check_log_quiet
+    fi
+    end_phase
+}
+
+# The VM starts without the device of two functions, built from the layouts
+# stored by the phase before, and gets the device later; a device of which one
+# function is not to be had is not put in at all.
+phase_mfstartempty()
+{
+    PHASE=mfstartempty
+    reset_vm
+    mf_wanted || return
+    local second=${HOSTFUNCS##* }
+    attach_funcs
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    echo "+ unbinding $HOSTFUNCS from vfio-pci, the device is not to be had"
+    unbind_dev
+    if boot "a VM whose device of two functions is not there boots the guest"; then
+        if serial_has 'GUEST: PRESENT'; then
+            stage "guest: finds the slot empty" FAILED
+        else
+            stage "guest: finds the slot empty" ok
+        fi
+        check_pcistate_all hotplug,absent,unused
+
+        echo "+ binding $HOSTADDR to vfio-pci, and not $second"
+        bind_one "$HOSTADDR" || echo "    binding failed"
+        serial_mark
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci of a device of which one function is not bound to vfio-pci is refused" FAILED "it went through"
+        else
+            stage "plugpci of a device of which one function is not bound to vfio-pci is refused" ok
+        fi
+        grep -a -E 'VFIO#.*(No device was put|put into the slot)' "$VMDIR/Logs/VBox.log" | cut -c1-200 | tail -n 3 | sed 's/^/    | /'
+        sleep 8
+        if serial_has 'GUEST: PRESENT'; then
+            stage "guest: has nothing of the device after that" FAILED
+        else
+            stage "guest: has nothing of the device after that" ok
+        fi
+        check_pcistate_all hotplug,absent,unused
+        guest_goes_on "the VM runs on after that"
+
+        echo "+ binding $second to vfio-pci as well"
+        bind_dev || echo "    binding failed"
+        serial_mark
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci puts the device into the VM which started without it" ok
+        else
+            stage "plugpci puts the device into the VM which started without it" FAILED
+            diag
+        fi
+        guest_reads_both 1 "guest: takes the device and reads from both drives"
+        check_pcistate_all hotplug,present,inuse
+
+        serial_mark
+        if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
+            stage "unplugpci before the state is saved" ok
+        else
+            stage "unplugpci before the state is saved" FAILED
+            diag
+        fi
+        wait_serial 'GUEST: GONE 1' 30 || echo "    the guest has not said that the drives are gone"
+        if saved_state_round; then
+            guest_reads_both 2 "guest: gets the device back when the state is loaded with the device there, and reads from both drives"
+            check_pcistate_all hotplug,present,inuse
+        fi
+    fi
+    end_phase
+    bind_dev
+}
+
+# The host wants the device of two functions back while the guest uses it:
+# both functions are taken from the host at once, as when the device is
+# unplugged in an orderly way.
+phase_mfhostremove()
+{
+    PHASE=mfhostremove
+    reset_vm
+    mf_wanted || return
+    bind_dev || { stage "the functions of the device are bound to vfio-pci" FAILED; return; }
+    attach_funcs
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    if boot "a VM with the device of two functions in the hot-plug capable slot boots the guest"; then
+        guest_reads_both 1 "guest: reads from both drives of the device in the slot"
+        serial_mark
+        # The writes return when the functions were let go of.  They can not be
+        # interrupted while they wait, so they are left behind if that takes
+        # too long.
+        local t0 a i=0 pids= p waiting
+        t0=$(date +%s)
+        for a in $HOSTFUNCS; do
+            echo "+ echo 1 > /sys/bus/pci/devices/$a/remove"
+            ( echo 1 > "/sys/bus/pci/devices/$a/remove" ) &
+            pids="$pids $!"
+        done
+        while [ "$i" -lt 120 ]; do
+            waiting=no
+            for p in $pids; do
+                kill -0 "$p" 2> /dev/null && waiting=yes
+            done
+            [ "$waiting" = no ] && break
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ "$waiting" = yes ]; then
+            stage "host: gets both functions back when it asks for them" FAILED "kept waiting"
+            diag
+        else
+            stage "host: gets both functions back when it asks for them" ok "$(( $(date +%s) - t0 )) s"
+        fi
+        if wait_serial 'GUEST: GONE 1' 60; then
+            stage "guest: was asked and let go, both drives are gone" ok
+        else
+            stage "guest: was asked and let go, both drives are gone" FAILED
+        fi
+        serial_show 'pciehp|GUEST: GONE' 10
+        guest_goes_on "the VM runs on after that" 90
+        check_pcistate_all hotplug,absent,unused
+
+        echo "+ echo 1 > /sys/bus/pci/rescan"
+        echo 1 > /sys/bus/pci/rescan
+        if bind_dev; then
+            serial_mark
+            if run controlvm "$VM" plugpci "$HOSTADDR"; then
+                stage "plugpci of the device which came back" ok
+            else
+                stage "plugpci of the device which came back" FAILED
+                diag
+            fi
+            guest_reads_both 2 "guest: takes the device which came back and reads from both drives"
+        else
+            stage "host: the device is back after a rescan" FAILED
+        fi
+        check_log_quiet
+    fi
+    end_phase
+    # For the phases after this one.
+    [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
+    bind_dev
+}
+
+
 # win-phases.sh takes the functions above and has phases of its own.
 [ -n "${SIM_LIB_ONLY:-}" ] && return 0
 
@@ -1002,6 +1358,10 @@ if setup; then
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;
             startempty)  phase_startempty ;;
+            mfpassthrough) phase_mfpassthrough ;;
+            mfhotplug)     phase_mfhotplug ;;
+            mfstartempty)  phase_mfstartempty ;;
+            mfhostremove)  phase_mfhostremove ;;
             *)           echo "unknown phase $p" ;;
         esac
     done

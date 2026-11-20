@@ -8,6 +8,11 @@
 # workspace with the build), SIM_WHERE (the name of this machine in the
 # results), SIM_PHASES (comma separated, see vbox-phases.sh), SIM_BOOT_WAIT,
 # SIM_MD5 and, optionally, SIM_WARP.
+#
+# The machine can have a device with two functions instead, each an NVMe
+# controller with a drive of its own (SIM_MD5B is there then): what a graphics
+# card with its audio function is to the host, two functions which the IOMMU
+# does not keep apart and which go to a VM together.
 
 set -u
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -48,31 +53,54 @@ else
     stage "/dev/iommu is there" FAILED
 fi
 
+# The device: the first function which is an NVMe controller, and with it
+# every function at its address.
 addr=
 for d in /sys/bus/pci/devices/*; do
-    [ "$(cat "$d/class")" = 0x010802 ] && addr=${d##*/}
+    [ -z "$addr" ] && [ "$(cat "$d/class")" = 0x010802 ] && addr=${d##*/}
 done
+funcs=
+if [ -n "$addr" ]; then
+    for d in /sys/bus/pci/devices/"${addr%.*}".*; do
+        funcs="$funcs${funcs:+ }${d##*/}"
+    done
+fi
 lspci -nn 2> /dev/null || ls /sys/bus/pci/devices
 if [ -z "$addr" ]; then
     stage "the NVMe drive is on the PCI bus" FAILED
     exit 1
 fi
-echo "the drive is at $addr, its IOMMU group has: $(ls "/sys/bus/pci/devices/$addr/iommu_group/devices" 2>&1 | tr '\n' ' ')"
+echo "the drive is at $addr, the functions of the device are: $funcs"
+echo "its IOMMU group has: $(ls "/sys/bus/pci/devices/$addr/iommu_group/devices" 2>&1 | tr '\n' ' ')"
 if [ ! -e "/sys/bus/pci/devices/$addr/iommu_group" ]; then
     stage "the drive is behind the IOMMU" FAILED
     dmesg | tail -n 40
     exit 1
 fi
 stage "the drive is behind the IOMMU" ok
+if [ "$funcs" != "$addr" ]; then
+    # What makes the functions one device for the host: the IOMMU does not
+    # keep them apart, so they are in one group.
+    if [ "$(ls "/sys/bus/pci/devices/$addr/iommu_group/devices" | tr '\n' ' ')" = "$funcs " ]; then
+        stage "the functions of the device are in one IOMMU group, with nothing else" ok
+    else
+        stage "the functions of the device are in one IOMMU group, with nothing else" skipped "this host has them apart"
+    fi
+fi
 
-cur=
-[ -e "/sys/bus/pci/devices/$addr/driver" ] && cur=$(basename "$(readlink "/sys/bus/pci/devices/$addr/driver")")
-[ -n "$cur" ] && [ "$cur" != vfio-pci ] && echo "$addr" > "/sys/bus/pci/devices/$addr/driver/unbind"
-echo vfio-pci > "/sys/bus/pci/devices/$addr/driver_override"
-echo "$addr" > /sys/bus/pci/drivers_probe
-ls "/sys/bus/pci/devices/$addr/vfio-dev/" /dev/vfio/devices/ 2>&1 | tr '\n' ' '
+bound=yes
+for f in $funcs; do
+    cur=
+    [ -e "/sys/bus/pci/devices/$f/driver" ] && cur=$(basename "$(readlink "/sys/bus/pci/devices/$f/driver")")
+    [ -n "$cur" ] && [ "$cur" != vfio-pci ] && echo "$f" > "/sys/bus/pci/devices/$f/driver/unbind"
+    echo vfio-pci > "/sys/bus/pci/devices/$f/driver_override"
+    echo "$f" > /sys/bus/pci/drivers_probe
+    ls "/sys/bus/pci/devices/$f/vfio-dev/" 2>&1 | tr '\n' ' '
+    ls /sys/bus/pci/devices/"$f"/vfio-dev/vfio* > /dev/null 2>&1 || bound=no
+done
+ls /dev/vfio/devices/ 2>&1 | tr '\n' ' '
 echo
-if ls /sys/bus/pci/devices/"$addr"/vfio-dev/vfio* > /dev/null 2>&1 && ls /dev/vfio/devices/vfio* > /dev/null 2>&1; then
+if [ "$bound" = yes ] && ls /dev/vfio/devices/vfio* > /dev/null 2>&1; then
     stage "the drive is bound to vfio-pci and has its VFIO device node" ok
 else
     stage "the drive is bound to vfio-pci and has its VFIO device node" FAILED
@@ -80,8 +108,8 @@ else
     exit 1
 fi
 
-echo "==== $WHERE: the checklist of INSTALL.md for $addr"
-if sh "$SIM_DIR/../tools/pci-passthrough-check.sh" "$addr"; then
+echo "==== $WHERE: the checklist of INSTALL.md for $funcs"
+if sh "$SIM_DIR/../tools/pci-passthrough-check.sh" $funcs; then
     stage "the checklist script finds nothing missing for the drive" ok
 else
     stage "the checklist script finds nothing missing for the drive" FAILED
@@ -137,6 +165,7 @@ SIM_STAGES=$STAGES \
 GUEST_RAW=$SIM_WS/sim-work/guest-quiet.raw \
 SIM_WHERE=$WHERE \
 SIM_HOSTADDR=$addr \
+SIM_HOSTFUNCS="$funcs" \
 SIM_BOOT_WAIT=${SIM_BOOT_WAIT:-300} \
 SIM_PATIENCE=${SIM_PATIENCE:-3} \
     bash "$SIM_DIR/vbox-phases.sh" $PHASES

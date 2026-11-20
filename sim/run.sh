@@ -24,6 +24,11 @@
 #      whose virtualization extension QEMU emulates as well, was tried in run
 #      221: VirtualBox does not get a guest going on that, with or without a
 #      device.
+#   2b. The same with a device of two functions (SIM_PARTS has "mfhost"): two
+#      NVMe controllers at one address behind the root port, each with a drive
+#      of its own.  The host has them in one IOMMU group, and VirtualBox passes
+#      them on as the one device they are: what a graphics card with its audio
+#      function is.
 #   3. With Windows as the guest (SIM_PARTS has "win"): on the runner, a VM
 #      with an empty hot-plug capable slot into which Windows Server is
 #      installed from its evaluation image, see win-phases.sh.
@@ -40,7 +45,7 @@
 #      leaves the HPET alone (run 231).
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# win, winhost.  Without it: runner,simhost.
+# mfhost, win, winhost.  Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
 # its serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox
@@ -81,7 +86,7 @@ stage() # <what> <ok|FAILED|skipped> [<note>]
     echo "$line" >> "$STAGES"
 }
 
-has_part() # <runner|simhost|win|winhost>
+has_part() # <runner|simhost|mfhost|win|winhost>
 {
     case "$PARTS" in *",$1,"*) return 0 ;; esac
     return 1
@@ -96,6 +101,9 @@ finish()
     counted=$failed
     # A part which was asked for and did not get to its work counts as failed.
     if has_part simhost && ! grep -q '^simhost[^/]*/passthrough: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part mfhost && ! grep -q '^mfhost/mfpassthrough: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -295,6 +303,10 @@ make_guest_disk guest-quiet "console=ttyS0,115200 quiet loglevel=3 mitigations=o
 head -c 16M /dev/urandom > "$WORK/nvme.img"
 MD5=$(head -c 8M "$WORK/nvme.img" | md5sum | cut -d' ' -f1)
 echo "checksum of the first 8 MiB of the drive: $MD5"
+# The drive of the second function, where the device has two.
+head -c 16M /dev/urandom > "$WORK/nvme2.img"
+MD5B=$(head -c 8M "$WORK/nvme2.img" | md5sum | cut -d' ' -f1)
+echo "checksum of the first 8 MiB of the second drive: $MD5B"
 
 
 note "The checklist of INSTALL.md on the runner, which has no IOMMU"
@@ -339,9 +351,9 @@ part_simhost_prepare()
 }
 # Runs the virtual machine which stands in for the host until its script is
 # done or the time is up.
-run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds> [<disk image of a Windows guest>]
+run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds> [<disk image of a Windows guest or ""> [<functions of the device: 1 or 2>]]
 {
-    local where=$1 phases=$2 bootwait=$3 warp=$4 limit=$5 windisk=${6:-} t0 rc
+    local where=$1 phases=$2 bootwait=$3 warp=$4 limit=$5 windisk=${6:-} funcs=${7:-1} t0 rc
     local cmdline="console=ttyS0 loglevel=4 mitigations=off intel_iommu=on rdinit=/init panic=-1"
     cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
     [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
@@ -361,6 +373,17 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         # it has been.
         cpu=host,invtsc=on
     fi
+    # The device behind the root port: an NVMe controller with its drive, or
+    # two of them as the functions of one device.
+    local -a dev=(-drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw"
+                  -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1")
+    if [ "$funcs" = 2 ]; then
+        cmdline="$cmdline SIM_MD5B=$MD5B"
+        dev=(-drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw"
+             -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1,addr=00.0,multifunction=on"
+             -drive "file=$WORK/nvme2.img,if=none,id=nvm1,format=raw"
+             -device "nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1")
+    fi
     t0=$(date +%s)
     sudo timeout -k 30 "$limit" qemu-system-x86_64 \
         -machine q35,kernel-irqchip=split -accel kvm -cpu "$cpu" -smp 4 -m "$mem" \
@@ -370,8 +393,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         -virtfs "local,path=/,mount_tag=hostroot,security_model=none,readonly=on,multidevs=remap" \
         -virtfs "local,path=$OUT,mount_tag=simout,security_model=none" \
         -device pcie-root-port,id=rp1,chassis=1,slot=1 \
-        -drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw" \
-        -device nvme,drive=nvm0,serial=SIM0001,bus=rp1 \
+        "${dev[@]}" \
         "${extra[@]}" \
         < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/$where-console.log"
     rc=${PIPESTATUS[0]}
@@ -392,6 +414,22 @@ if has_part simhost; then
                   "$(grep -a -o 'written by the guest, round [0-9]*' "$WORK/nvme.img" | tail -n 1)"
         elif grep -q '^simhost[^/]*/passthrough: guest: writes to the drive: ok' "$STAGES"; then
             stage "what the guest wrote is on the drive of the simulated host" FAILED
+        fi
+    fi
+fi
+
+if has_part mfhost; then
+    note "Part 2b: the same with a device of two functions"
+    if part_simhost_prepare; then
+        # The first drive is the one of part 2 and has what that part wrote to
+        # it; what tells of this part is on the second drive.
+        run_simhost mfhost mfpassthrough,mfhotplug,mfstartempty,mfhostremove 600 5 3600 "" 2
+
+        if grep -q 'written by the guest to the second drive' "$WORK/nvme2.img"; then
+            stage "what the guest wrote to the second drive is on that drive of the simulated host" ok \
+                  "$(grep -a -o 'written by the guest to the second drive, round [0-9]*' "$WORK/nvme2.img" | tail -n 1)"
+        elif grep -q '^mfhost/mfpassthrough: guest: writes to both drives: ok' "$STAGES"; then
+            stage "what the guest wrote to the second drive is on that drive of the simulated host" FAILED
         fi
     fi
 fi
