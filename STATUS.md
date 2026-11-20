@@ -1066,8 +1066,10 @@ harness since WP5, saved states since the fourth part of WP6.
    with its description and HWTEST.md saying what they are for.
 4. The maintenance branches, see "The maintenance branches": the work is
    on 7.2 and 7.1 as far as it goes there without KVM. Left: the build
-   and the tests of the branch for 7.1, the sanitizers on both, and
-   INSTALL.md saying what the branches are and are not.
+   and the tests of the branch for 7.1 (the workflow is ready for 7.1 as
+   far as reading its scripts tells, with the place of kBuild given to
+   `configure` after run 243; no run was made with that yet), and the
+   sanitizers on both. Not on 2026-11-20 any more, see the decisions.
 4a. To be answered by who this is for: whether the hosts it is meant for
    can run VMs with KVM, or only with the VirtualBox kernel driver. The
    three ways in "The maintenance branches" hang on that.
@@ -1162,6 +1164,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | The first build of a branch or a base nothing is known about yet is started with `explore: yes`: the run counts as passed whatever happens in it, and what happened is read from its log and written down here | Run 234, the first build of the 7.2 branch, failed in `configure` for options of the workflow. That is a finding about the workflow, and a failed run says the code is broken. The same thought as `sim_strict: no` for the simulation, one level up |
 | 2026-11-20 | The KVM backend of the development line is not taken to the maintenance branches. The branches for 7.2 and 7.1 are kept as the work and its tests on those bases, building, and are not given an execution engine | What made that backend build and work is some forty changes to the VMM which upstream has not released. A maintenance branch with them is no longer the released line somebody chose it for, and nothing here can stand in for the testing upstream gives its VMM |
 | 2026-11-20 | Running the device on the VirtualBox kernel driver, which is what the maintenance branches offer, is not started before it is known that it is wanted | It gives up a security requirement as it stands (S11) for another way of meeting what it is for, in the memory management of VirtualBox, and it takes a simulation with the kernel driver loaded. That is weeks of the kind of work the last ones were, and the right thing only if the hosts this is for cannot have KVM |
+| 2026-11-20 | No further runs on 2026-11-20 unless asked for. Before the first run on a base which is new to the workflow, its `configure`, its checkout and its makefiles are read for what the workflow assumes, and all of it is put right in one go | Ten runs in one morning, six of them stopped by the workflow itself within two minutes, each for one thing which reading the scripts of 7.2 and 7.1 would have shown: the options of the older `configure`, the translations, files a branch deletes, kBuild without `.gitmodules`, an option only 7.2 has, the place of kBuild. One run per finding is what was not to happen again after 2026-11-15, and it did |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
