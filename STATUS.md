@@ -501,15 +501,41 @@ last release) and `VBox-7.1` (7.1.18).
 | What it lacks of the device as on `main` | four commits of June and July 2026: the capability pointer which may point backwards, the quirk for one graphics card, guest memory mapped in two ranges, a fix for the legacy interface | everything |
 | The management of upstream (host PCI devices in the API, `--pci-attach` with a domain, Main configuring the device) | not there: the old PCI passthrough code is still in the tree, the device is configured through extra data only. On `main` this is some twenty commits of February and March 2026 | not there |
 | The other files the 36 commits touch | differ from `main` in their headers only, apart from the I/O APIC, the time manager, `VBoxManage` and Main | all differ; the files of the VMM have other names |
-| KVM as execution engine | there | there (`NEMR3Native-linux.cpp`), how far it goes for this is not looked at yet |
-| Building it with the workflow here | should work as it is: the same `configure`, kBuild as a submodule | not looked at yet |
+| KVM as execution engine | the source is there and is **not built** for Linux on x86: `Config.kmk` builds the KVM backend for Linux on ARM only, and a VM does not start without the support driver. The development line builds it for x86 since 2026-02-02 (r172508) and has changed it with 58 commits since, none of which is here: on this branch the APIC is emulated in VirtualBox, not in the kernel | the same as 7.2, with a backend which differs from that of 7.2 in some 80 lines |
+| What the device of upstream runs on | the VirtualBox kernel driver, as everything on this branch: the changes it came with reach into ring-0 for that | |
+| Building it with the workflow here | works since run 236, with a `configure` which takes other options and translations which have to be switched off | not tried yet |
+| Releases | 7.2.22 of 2026-10-19, a release with security fixes | 7.1.18 of 2026-04-21 is the last one. The branch got commits until 2026-09-25 and no release since April, while 7.2 had 7.2.20 and 7.2.22 in September and October |
 
-So for 7.2 it is: the commits of upstream which are missing, as they
-are, then the 36 commits, then what differs in the testcase and in
-Main. That is being done on `pci-passthrough-hotplug-7.2`. For 7.1 it
-would be the device itself and its footing in the VMM on top of that,
-across a year and a half of changes; whether that is worth it is decided
-when 7.2 is done and it is known what it took.
+What this means for the work, which takes KVM as execution engine and a
+VM process without the support driver (security requirement S11: the
+memory of the guest has to stay where it is while a device can reach
+it): on the maintenance branches it does not run as they are built. It
+takes the change which builds the KVM backend there, and that backend is
+an older one which upstream did not build for anybody on x86. Whether it
+carries the simulation is what run 240 is for.
+
+State of `pci-passthrough-hotplug-7.2` (pushed): the 7.2 branch of
+upstream, then one commit with 24 revisions of upstream (the management
+in the API, `VBoxManage` and Main, the PCI domain in host addresses, the
+removal of the old passthrough code, four changes to the device; without
+the list of PCI IDs, a data file this fork does not copy, so that Main
+has no names for the PCI devices of the host), then 35 of the 36 commits
+(all but the one about the I/O APIC, which is about the KVM backend of
+the development line and does not fit this one), then r172508, which
+builds the KVM backend. The device, its testcase and the configuration
+of the VM in Main are line for line what the merge request has. It
+builds without a warning in a file the work changes and the 56 tests
+pass (run 238). `IConsole` keeps its UUID there: the three new methods
+take the place of three of its reserved ones.
+
+State of `pci-passthrough-hotplug-7.1` (local, not built yet): the 7.1
+branch of upstream, the device as upstream took it to 7.2 (without what
+that changed in the kernel module and its runtime: on 7.1 an MMIO2
+region with an existing backing is refused in a VM which runs on the
+ring-0 hypervisor), and the management of upstream (without the removal
+of the old passthrough code, which is switched off there as it is). The
+35 commits are next, if run 240 says that the older KVM backend is worth
+building on.
 
 ### The management and the review, 13 to 15 November
 
@@ -1280,5 +1306,7 @@ slot.
 | 235 | `VBox-7.2` @ `edfe7955` | baseline, exploring | passed (the build failed) | 5 minutes. `configure` passes with its own options. The build stops after a minute and a half at the translations of Main, which take a tool of Qt the runner does not have; the `configure` of the development line switches them off by itself in that case, the older one does not. The workflow does it for it now |
 | 236 | `VBox-7.2` @ `edfe7955` | baseline, exploring | passed | 10 minutes. The maintenance branch 7.2 as upstream has it builds here, in 7 minutes 41 seconds; its output is kept for the builds of the branch with this work |
 | 237 | `pci-passthrough-hotplug-7.2` @ `7374d28c` | tests, exploring | passed (stopped before the build) | 1 minute. The workflow marks the files which differ from the base as new and stumbled over the ones the branch deletes. Fixed in the workflow |
+| 238 | `pci-passthrough-hotplug-7.2` @ `7374d28c` | tests, exploring | passed | 12 minutes. The first build of the work on the maintenance branch 7.2: the tree builds without a compiler warning in a file the work changes, the 56 tests and the three random tests pass, the ACPI table check passes |
+| 239 | `pci-passthrough-hotplug-7.2` @ `7374d28c` | allsim, exploring | passed (no VM started) | 12 minutes. Builds, the tests pass. No VM of the simulation starts, on the runner or in the virtual machine standing in for a host: VirtualBox asks for its kernel driver. The 7.2 branch does not build its KVM backend for Linux on x86 and does not let a VM start without the support driver there; the development line does both since February 2026 (see "The maintenance branches") |
 
 Run numbers are those GitHub shows for the `build` workflow.
