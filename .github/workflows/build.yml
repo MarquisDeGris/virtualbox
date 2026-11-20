@@ -201,6 +201,15 @@ jobs:
             echo "VBOX_WITH_WEBSERVICES :="
             echo "VBOX_WITH_UPDATE_AGENT :="
             echo "VBOX_WITH_TESTCASES :="
+            # The configure of the development line switches the translations off
+            # when there is no Qt, whose lrelease builds them.  The older one
+            # leaves them on (run 235).
+            if [ ! -e configure.py ]; then
+              echo "override VBOX_WITH_NLS :="
+              echo "VBOX_WITH_MAIN_NLS :="
+              echo "VBOX_WITH_PUEL_NLS :="
+              echo "VBOX_WITH_VBOXMANAGE_NLS :="
+            fi
           } > LocalConfig.kmk
           cat LocalConfig.kmk
           touch -d @1577836800 LocalConfig.kmk AutoConfig.kmk env.sh
