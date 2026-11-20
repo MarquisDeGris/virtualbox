@@ -230,6 +230,11 @@ DECLHIDDEN(void) VUSBSnifferDestroy(VUSBSNIFFER hSniffer)
  */
 DECLHIDDEN(int) VUSBSnifferRecordEvent(VUSBSNIFFER hSniffer, PVUSBURB pUrb, VUSBSNIFFEREVENT enmEvent)
 {
+    if (   (   pUrb->enmType == VUSBXFERTYPE_CTRL
+            || pUrb->enmType == VUSBXFERTYPE_MSG)
+        && pUrb->cbData < sizeof(VUSBSETUP))
+        return VERR_BUFFER_OVERFLOW;
+
     int rc = VINF_SUCCESS;
     PVUSBSNIFFERINT pThis = hSniffer;
 

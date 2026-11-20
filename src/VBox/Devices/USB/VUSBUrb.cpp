@@ -915,11 +915,10 @@ static int vusbUrbSubmitCtrl(PVUSBURB pUrb)
                 vusbUrbCompletionRh(pUrb);
                 break;
             }
-            if (pPipe->pCtrl != pExtra)
-            {
-                pExtra = pPipe->pCtrl;
-                pSetup = pExtra->pMsg;
-            }
+
+            /* vusbMsgSetup() may have reallocated just pMsg or the entire extra struct. */
+            pExtra = pPipe->pCtrl;
+            pSetup = pExtra->pMsg;
 
             /* pre-buffer our output if it's device-to-host */
             if (pSetup->bmRequestType & VUSB_DIR_TO_HOST)
@@ -960,11 +959,15 @@ static int vusbUrbSubmitCtrl(PVUSBURB pUrb)
                     LogFlow(("%s: vusbUrbSubmitCtrl: Adjusting DATA request: %d -> %d\n", pUrb->pszDesc, pUrb->cbData, cbLeft));
                     pUrb->cbData = cbLeft >= 0 ? (uint32_t)cbLeft : 0;
                 }
-                /* In the host -> direction it's undefined what happens if the host provides
-                   more data than what wLength inidicated.  However, in 2007, iPhone detection
-                   via iTunes would issue wLength=0 but provide a data URB which we needed to
-                   pass on to the device anyway, so we'll just quietly adjust wLength if it's
-                   zero and get on with the work.
+                /* In the host -> device direction it's "undefined" what happens if the host
+                   provides more data than what wLength indicated. The USB specification is
+                   clear that the data phase length must match wLength, but this does not appear
+                   to have been enforced. The xHCI specification explicitly says that that the
+                   spec may need to be violated for compatibility with some devices.
+                    The Apple Mobile Device support version 1.1.1.1 (shipped with iTunes 7.4.3)
+                   is one known offender; as soon as an iPhone is plugged in, the guest issues
+                   a control transfer with wLength=0 but an 8-byte data buffer. We'll just quietly
+                   adjust wLength if it's zero and get on with life.
 
                    What confuses me (bird) here, though, is that we've already sent the SETUP
                    URB to the device when we received it, and all we end up doing is an
@@ -976,7 +979,7 @@ static int vusbUrbSubmitCtrl(PVUSBURB pUrb)
                    P.S.  We used to have a very strange (pUrb->cbData % pSetup->wLength) == 0
                          thing too that joined the pUrb->cbData adjusting above. */
                 else if (   pSetup->wLength == 0
-                         && pUrb->cbData <= pExtra->cbMax)
+                         && pUrb->cbData <= (pExtra->cbMax - sizeof(VUSBSETUP)))
                 {
                     Log(("%s: vusbUrbSubmitCtrl: pAdjusting wLength: %u -> %u (iPhone hack)\n",
                          pUrb->pszDesc, pSetup->wLength, pUrb->cbData));

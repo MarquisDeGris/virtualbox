@@ -381,7 +381,35 @@ HRESULT Appliance::interpret()
             /* The NVRAM file does not have a <vbox:Machine> entry so we only need to check the OVF details. */
             if (vsysThis.strNvramPath.isNotEmpty())
                 pNewDesc->i_addEntry(VirtualSystemDescriptionType_NVRAM, "", vsysThis.strNvramPath, vsysThis.strNvramPath);
-
+            if (vsysThis.pelmVBoxMachine)
+            {
+                /* Check if any of the serial ports is configured with mode raw file. */
+                settings::SerialPortsList const &llSerialPorts =
+                pNewDesc->m->pConfig->hardwareMachine.llSerialPorts;
+                for (settings::SerialPortsList::const_iterator port_it = llSerialPorts.begin();
+                        port_it != llSerialPorts.end();
+                    ++port_it)
+                {
+                    if (port_it->portMode == PortMode_RawFile)
+                    {
+                        i_addWarning(tr("Virtual appliance \"%s\" was configured with serial port(s) "
+                                        "with \"raw file\" mode. This setting will not be imported."), vsysThis.strName.c_str());
+                        break;
+                    }
+                }
+                /* Check if shared folders are configured. */
+                if (!pNewDesc->m->pConfig->hardwareMachine.llSharedFolders.empty())
+                {
+                    i_addWarning(tr("Virtual appliance \"%s\" was configured with machine shared folder(s) "
+                                     "This setting will not be imported."), vsysThis.strName.c_str());
+                }
+                  /* Check if a custom NVRAM file path is configured. */
+                if (pNewDesc->m->pConfig->hardwareMachine.nvramSettings.strNvramPath.isNotEmpty())
+                {
+                    i_addWarning(tr("Virtual appliance \"%s\" was configured with a custom NVRAM file path. "
+                                    "This setting will not be imported."), vsysThis.strName.c_str());
+                }
+            }
             /* Audio */
             Utf8Str strSoundCard;
             Utf8Str strSoundCardOrig;
@@ -1975,7 +2003,7 @@ HRESULT Appliance::i_importCloudImpl(TaskCloud *pTask)
                             if (RT_FAILURE(vrc))
                                 throw  setErrorVrc(vrc, tr("Could not read the file '%s' (%Rrc)"), strAbsSrcPath.c_str(), vrc);
 
-                            Utf8StrFmt strAbsDstPath("%s%s%s", strMachineFolder.c_str(), RTPATH_SLASH_STR, pszName);
+                            Utf8StrFmt strAbsDstPath("%s%s%s", strMachineFolder.c_str(), RTPATH_SLASH_STR, RTPathFilename(pszName));
 
                             /* Simple logic - just try to get dir info, in case of absent try to create one.
                                No deep errors analysis */
@@ -5572,7 +5600,6 @@ void Appliance::i_importVBoxMachine(ComObjPtr<VirtualSystemDescription> &vsdescT
             strSrcFilePath.append(RTPATH_SLASH_STR);
             strSrcFilePath.append(stack.strNvramPath);
         }
-
         /* The basename of the destination filename needs to be the VM's name in
          * order to match the VM's INvramStore::nonVolatileStorageFile attribute so
          * that EFI can find it when booting the VM. */
@@ -6107,6 +6134,9 @@ l_skipped:
     ComObjPtr<Machine> pNewMachine;
     hrc = pNewMachine.createObject();
     if (FAILED(hrc)) throw hrc;
+    config.sanitizeImportedSerialPorts();
+    config.sanitizeSharedFolderSettings();
+    config.sanitizeImportedNvramSettings();
 
     // this magic constructor fills the new machine object with the MachineConfig
     // instance that we created from the vbox:Machine

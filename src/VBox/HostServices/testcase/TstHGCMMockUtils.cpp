@@ -261,8 +261,8 @@ int TstHGCMUtilsHostThreadStart(PTSTHGCMUTILSCTX pCtx, PTSTHGCMUTILSHOSTCALLBACK
     memcpy(&pCtx->Host.Callbacks, pCallbacks, sizeof(TSTHGCMUTILSHOSTCALLBACKS));
     pCtx->Host.pvUser = pvUser;
 
-    int rc = RTThreadCreate(&pCtx->Host.hThread, tstHGCMUtilsHostThreadWorker, pCtx, 0, RTTHREADTYPE_DEFAULT, RTTHREADFLAGS_WAITABLE,
-                            "tstShClHst");
+    int rc = RTThreadCreate(&pCtx->Host.hThread, tstHGCMUtilsHostThreadWorker, pCtx, 0, RTTHREADTYPE_DEFAULT,
+                            RTTHREADFLAGS_WAITABLE | RTTHREADFLAGS_COM_MTA, "tstShClHst");
     if (RT_SUCCESS(rc))
         rc = RTThreadUserWait(pCtx->Host.hThread, RT_MS_30SEC);
 
