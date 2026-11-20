@@ -41,9 +41,11 @@ test without waiting for it: there is time for development now and
 there will not be later. Nothing is written down as tested on hardware
 because of that. First of it: the same work on the maintenance lines 7.2
 and 7.1, see "The maintenance branches". On those lines the simulation
-runs with the KVM backend of Cyberus Technology, and there Windows has
-taken a drive of the host in the hot-plug capable slot, let go of it and
-taken it again (run 250, on 7.1).
+runs with the KVM backend of Cyberus Technology: all checks with the
+Linux guest pass on both (runs 248 and 251), and Windows has taken a
+drive of the host in the hot-plug capable slot, let go of it and taken
+it again (run 250, on 7.1). In the run after that one Windows stopped
+after letting go of the drive, which is not understood yet (run 251).
 
 ### Installation and the simulation, from 16 November
 
@@ -740,6 +742,55 @@ has to be refused, leave no snapshot and a VM which runs on); a Windows
 which says nothing after the load is switched off and started once more,
 as one which stops later already was.
 
+**Run 251** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.1-kvm` @ `3b085eca`, 124 minutes, Intel Xeon
+Platinum 8573C): the same with `Console::i_saveState` returning its
+result and with the changed scripts. 148 passed, 12 failed.
+
+- **The slot with the Linux guest passes on the 7.1 line**: all 67
+  checks inside the virtual machine standing in for a host, in 405
+  seconds. After the refused save the VM runs on. The three new checks
+  pass: a snapshot of the running VM with the device in it is refused
+  with the message of the device, no snapshot is left, the VM runs on.
+  Then the drive in the slot taken out with the guest asked, put in,
+  taken by force, put in again; a start without the device; saved states
+  with the empty slot, loaded with and without the device there; the
+  host asking for the device back.
+- Windows on the runner: installed in 337 seconds, started in 30. After
+  its saved state was loaded it went on this time and wrote its lines;
+  the power button, which reached it (the pin of the I/O APIC shows the
+  interrupt taken and done with), did not get it shut down in 150
+  seconds, and neither did telling it to (two failed checks). Each of
+  the three runs with a loaded state on this backend went wrong in
+  another way. What reading the backend had shown by then, see the
+  decisions: it saves and loads the registers of the Hyper-V interface
+  of the first CPU only, and this VM has two.
+- **Windows where the drive is stopped after the drive was taken out
+  the first time** (ten failed checks). It starts with the drive in the
+  slot (298 seconds), reads from it, and when asked lets go of it as in
+  run 250: the attention button, six seconds, the slot switched off, the
+  device let go of. From then on the guest writes nothing any more, with
+  its VM running and its screen as it was. The registers of the slot
+  show where it stands: Windows has switched the power of the slot off
+  and has not yet switched the power indicator from blinking to off,
+  which it did in run 250, and the three events of that moment (command
+  completed, link state changed, presence changed) are still waiting to
+  be taken note of. The port sends its message when the first of them
+  comes up and none was waiting, as the specification has it, and
+  Windows did not come for them. Whether the message did not arrive, or
+  Windows could not take it, the logs do not tell; the VM left the guest
+  some 66 times a second for an interrupt of the machine under it and
+  hardly for anything else, which is a guest that executes and not one
+  that waits. The same code passed all of this in run 250, on another
+  processor. Not understood yet. The rest of that part then waited 70
+  minutes for a guest which said nothing.
+
+Changed in the simulation after it: when the guest says nothing any more
+after a device was taken out, the part ends there, and before it does it
+tells what the VM shows of the guest: the slot with the message of the
+port and what the guest has masked of it, where the CPU is and whether
+it moves, its interrupt flag and priority, the interrupt controllers.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -750,9 +801,54 @@ State of `pci-passthrough-hotplug-7.1-kvm` (pushed): the 7.1 branch as
 above, the backend in its last version for the 7.1 line (2025-11-03, two
 places merged by hand), the same two commits about the register, and the
 7.1 branch merged in again for the change to `Console::i_saveState`. It
-builds since run 249. Since run 250 a device of the host has run in a VM
-on it, and Windows has had the drive in the slot, out and in again; the
-phases with the Linux guest and the slot are still to be seen.
+builds since run 249. A device of the host runs in a VM on it and all 67
+checks with the Linux guest pass (run 251). Windows has had the drive in
+the slot, out and in again in run 250 and stopped after the first
+removal in run 251, which is not understood yet.
+
+### The 7.1 line and what the 7.2 line received after it (2026-11-20)
+
+Upstream ended its support for 7.1 with 7.1.18 in April 2026. The
+security updates it has published since then (July, September and
+October 2026) are releases of 7.2 only. Its 7.1 branch in git went on
+until 2026-09-25, with 115 commits after 7.1.18, most of them taken over
+from the development line; the branches of this work for 7.1 are on the
+head of that branch and so have them, which no release of 7.1 does.
+
+What the 7.2 branch got from March 2026 on and the 7.1 branch did not
+was looked up by the revisions the commits of both name, and each change
+which is about code a Linux host runs was then tried on 7.1:
+
+- Taken over to the 7.1 branch (work branch `scratch/71-hardening`, not
+  built yet): 25 changes as they are, to devices (VirtIO, USB, audio),
+  the host services a guest talks to, the image formats (VMDK, VDI, GPT,
+  ISO), the import of appliances and the console, two of them adapted in
+  one place each; and r175241, with which the VMM keeps a device from
+  reaching its own MMIO region by way of guest memory, 18 files, one
+  place adapted. One further change was on the branch already under
+  another revision. The commits list them with their revisions.
+- Not taken:
+  - Three changes to the execution engine in the kernel driver (r174867,
+    r174869, r174871): 240 lines of the assembly which enters the guest,
+    with a conflict, and nothing here runs that engine, so it could not
+    be tried. They are for VMs on the kernel driver of VirtualBox, on
+    which the device of this work does not run.
+  - The NAT library. 7.2 went from libslirp 4.8.0 to 4.9.5 and has
+    changes of its own in it (r175239 is about code 7.1 does not have);
+    7.1 has 4.8.0. The simulation has no VM with a network, so the move
+    could not be tried either.
+  - What the source tree of 7.1 does not have: the remote desktop
+    server and the USB webcam, card reader and network devices, which
+    were in the extension pack then.
+  - Windows hosts, the Guest Additions, the user interface, and the
+    other libraries the tree carries, which a Linux build takes from the
+    distribution.
+- What this does not make of 7.1: the line which has what 7.2.22 has.
+  Upstream does not say which change belongs to which of its advisories,
+  the comparison goes by commit messages, and a change can depend on
+  others in ways only its authors know. The line which gets the updates
+  is 7.2. The branches of this work for 7.2 are on the newest state of
+  that branch (after 7.2.22; upstream had nothing newer on 2026-11-20).
 
 ### The management and the review, 13 to 15 November
 
@@ -1260,24 +1356,26 @@ harness since WP5, saved states since the fourth part of WP6.
    far as reading its scripts tells, with the place of kBuild given to
    `configure` after run 243; no run was made with that yet), and the
    sanitizers on both. Not on 2026-11-20 any more, see the decisions.
-4a. To be answered by who this is for: whether the hosts it is meant for
-   can run VMs with KVM, or only with the VirtualBox kernel driver. The
-   ways in "The maintenance branches" hang on that.
+4a. Whether the hosts this is meant for can run VMs with KVM, or only
+   with the VirtualBox kernel driver: not answered yet. Since 2026-11-20
+   the work goes on as if they can, on the word of who this is for and
+   until the answer is there (see the decisions). The branches with the
+   KVM backend are what it goes on with then.
 4b. The branches with the KVM backend of Cyberus Technology: 7.2 runs the
-   simulation with the device (run 248); on 7.1 a device runs in a VM and
-   Windows takes the drive in the slot, lets go of it and takes it again
-   (run 250). Left: the slot with the Linux guest on the one for 7.1,
-   with the change to `Console::i_saveState` (the run after 250); Windows
-   where the drive is on the one for 7.2, and whether Windows with the
-   Hyper-V interface goes on after a saved state there; a run on an AMD
-   processor with the second change about the register; the sanitizers
-   on both; then merge requests in the fork for them, and what
-   [INSTALL.md](INSTALL.md) and [HWTEST.md](HWTEST.md) say differently
-   for these branches (a saved state of a Windows guest among it).
-5. Windows where the drive is: passed in run 250, on the 7.1 branch with
-   the backend of Cyberus Technology and an Intel processor. On the
-   development line it runs when a run for something else gets an AMD
-   processor; no runs for it alone.
+   simulation with the device (run 248), and so does 7.1, with all
+   checks of the Linux guest (run 251). Left, in this order: the build
+   of what was taken over from 7.2 for the 7.1 branch; the change to the
+   backend about the Hyper-V registers in a saved state, on 7.2 and then
+   on 7.1 (local, not built); Windows where the drive is on the one for
+   7.2; a run on an AMD processor with the second change about the
+   register; the sanitizers on both; then merge requests in the fork for
+   them.
+5. Windows where the drive is: passed in run 250 and stopped after the
+   first removal in run 251, same code, on the 7.1 branch with the
+   backend of Cyberus Technology, Intel processors. Every run on a
+   branch with that backend goes through it again and tells what the VM
+   shows of the guest when it stops; until it is understood, the
+   hardware test is where a Windows guest letting go of a device counts.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
 7. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
@@ -1374,6 +1472,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | A Windows guest which does not go on after a saved state was loaded, with the Hyper-V interface on that backend, is written down as found and not looked into further for now. The simulation switches such a VM off, starts Windows once more and goes on | It is the backend's handling of that interface across a saved state, in a version of the backend which is a year old, and has nothing to do with the slot: the Linux guest and Windows without the interface go through the same round. The parts of the simulation which come after it need a Windows which was shut down properly |
 | 2026-11-20 | On the branches for 7.1 `Console::i_saveState` returns its result, which is one line taken from the lines after 7.1 and the one change there to code which is not about the device or the engine | Run 250: the device refuses to have the state of the VM saved while it is in the VM, and on 7.1 a save which does not work out leaves the machine in a state nothing gets it out of, and a snapshot of a running VM without its state. That is how 7.1 is with any failed save; with this work a failed save is something a user meets, so the work has to bring what makes it end well |
 | 2026-11-20 | The simulation tries a snapshot of the running VM with the device in it next to the saved state, and it ends the process of a VM which does not let itself be powered off | The snapshot goes the same way through the device and another way through Main, and that other way is where 7.1 differed. A VM stuck in a state cost the three phases after it in run 250, which were the ones the run was for |
+| 2026-11-20 | The work goes on under the assumption that the hosts it is meant for can run VMs with KVM. Running the device on the VirtualBox kernel driver stays unstarted, and the branches with the KVM backend of Cyberus Technology are the ones the next steps are for | Who this is for has no answer to that question yet and said to assume it. It is an assumption: should the answer be the other one, what was done for these branches stays right for hosts with KVM, and the decision of the same day about the kernel driver is taken up again |
+| 2026-11-20 | The Windows guest which does not go on after a saved state is loaded, on the KVM backend of Cyberus Technology, is looked into after all, which takes back the decision of the same day | Reading the backend showed where it comes from in a few lines: it saves and loads the registers of the Hyper-V interface as the first virtual CPU has them, and the reference time starts anew in the VM a state is loaded into. A VM with an empty slot can be saved and loaded, which is part of this work, and Windows is the guest it is for |
+| 2026-11-20 | The branches for 7.1 take over from the 7.2 branch what upstream put there and not on 7.1, as far as it is about code a Linux host runs, applies, and can be built here; what was not taken is listed with the reason | 7.1 is the line this was asked for, upstream has ended its support, and its security updates since April 2026 are for 7.2 only. Nobody outside upstream can make 7.1 the equal of 7.2 in that, and the notes say so; what can be had by taking over single changes is had |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1563,5 +1664,6 @@ slot.
 | 248 | `pci-passthrough-hotplug-7.2-kvm` @ `e45e74e1` | allsim, exploring | passed (one check of the simulation fails) | 74 minutes, Intel Xeon 6975P-C. With the change after run 247. Inside the virtual machine standing in for a host all 64 checks with the Linux guest pass on the backend of Cyberus Technology: the device passed through, in the slot, taken out and put in, a start without it, saved states with the empty slot. The 20 checks with the Linux guest on the runner pass. Windows does not get through its setup in 50 minutes there, keeping its time by the HPET (57 million reads), so Windows where the drive is was skipped. 87 passed, 1 failed, 1 skipped; see "Run 248" |
 | 249 | `pci-passthrough-hotplug-7.1-kvm` @ `160d83a6` | allsim, exploring | passed (ten checks of the simulation fail) | 36 minutes, AMD EPYC 9V45. The first build of the 7.1 branch with the KVM backend of Cyberus Technology: it builds in 6 minutes 52 seconds, the tests of the device pass, the 19 checks with the Linux guest on the runner pass. Windows with the Hyper-V interface is installed in 276 seconds and does not go on after a saved state is loaded. Every VM inside the virtual machine standing in for a host stops at its first step, as in run 247, and the log names the register now. 67 passed, 10 failed; see "Run 249" |
 | 250 | `pci-passthrough-hotplug-7.1-kvm` @ `2aaddf20` | allsim, exploring | passed (six checks of the simulation fail) | 54 minutes, Intel Xeon 6975P-C. Windows where the drive is passes for the first time, all 35 checks: Windows starts with the drive in the hot-plug capable slot, reads from it, lets go of it when asked, takes it again, has it taken by force and takes it once more. With the Linux guest the device runs passed through on the 7.1 line. After the refused save of the state the VM stays in the state Saving on that line and the three phases after it do not start (four checks); Windows on the runner says nothing after its saved state is loaded (two checks). 95 passed, 6 failed; see "Run 250" |
+| 251 | `pci-passthrough-hotplug-7.1-kvm` @ `3b085eca` | allsim, exploring | passed (twelve checks of the simulation fail) | 124 minutes, Intel Xeon Platinum 8573C. With `Console::i_saveState` returning its result: all 67 checks with the Linux guest inside the virtual machine standing in for a host pass on the 7.1 line, the three new ones about a snapshot among them. Windows on the runner goes on after its saved state is loaded and does not shut down (two checks). Windows where the drive is starts, reads from the drive, lets go of it when asked and then says nothing any more (ten checks, 70 minutes of waiting); not understood. 148 passed, 12 failed; see "Run 251" |
 
 Run numbers are those GitHub shows for the `build` workflow.

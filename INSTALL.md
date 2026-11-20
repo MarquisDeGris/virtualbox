@@ -23,7 +23,7 @@ What of this was done by somebody or something, and what was not:
 | `pci-passthrough-hotplug-7.2` | the maintenance branch of 7.2 (7.2.22) | The same work on that base. It builds and its tests pass. **No VM with a passed through device runs on it**, see below |
 | `pci-passthrough-hotplug-7.1` | the maintenance branch of 7.1 (7.1.18) | As for 7.2: it builds and its tests pass, no VM with a device runs on it |
 | `pci-passthrough-hotplug-7.2-kvm` | the branch for 7.2 with the KVM backend Cyberus Technology publishes for VirtualBox | The released line 7.2 with an engine the device runs on. The simulation ran on it with a device and a Linux guest. Not what Oracle ships: see below |
-| `pci-passthrough-hotplug-7.1-kvm` | the branch for 7.1 with that backend in its last version for 7.1 | The same for 7.1. See [STATUS.md](STATUS.md) for how far it has been built and run |
+| `pci-passthrough-hotplug-7.1-kvm` | the branch for 7.1 with that backend in its last version for 7.1 | The same for 7.1. The simulation ran on it with a device and a Linux guest, all checks passing, and twice with Windows and the drive in the hot-plug capable slot: once Windows let go of it and took it again, once it stopped after letting go. See [STATUS.md](STATUS.md) for how far it has been built and run |
 
 Why the two branches for the released lines do not run a VM with a
 device: the work takes KVM as execution engine, so that the memory of the
@@ -66,12 +66,28 @@ does. They are built like this, with the packages of part 2:
     kmk -j"$(nproc)" KBUILD_TYPE=release
 
 This is what the workflow does for these branches; nobody has done it by
-hand. Two things differ on them from what is said for the development
+hand. Three things differ on them from what is said for the development
 line: a Windows guest is left at its default paravirtualization
 interface ([HWTEST.md](HWTEST.md) says `--paravirt-provider none`, which
 is for the backend of the development line; STATUS.md says what has run
-which way), and the readme of the backend calls AMD processors
-experimental.
+which way); a Windows guest at that default did not go on after its
+saved state was loaded, in the simulation on the branch for 7.1, so do
+not count on saved states of Windows guests there; and the readme of the
+backend calls AMD processors experimental.
+
+The branches for 7.1 have one change to Main which is not about the
+device: saving the state of a VM tells its caller when it did not work
+out, as on the lines after 7.1. Without it a refused save, which is what
+a VM with a device of the host answers, left the VM in a state it could
+not be got out of.
+
+About the 7.1 line itself: upstream ended its support with 7.1.18 in
+April 2026 and has published its security updates for 7.2 only since
+then. The branches for 7.1 here are on the head of upstream's 7.1 branch,
+which went on for five months after that release, and
+[STATUS.md](STATUS.md), "The 7.1 line and what the 7.2 line received
+after it", says what was taken over from 7.2 beyond that and what was
+not. Who can choose takes a branch for 7.2.
 
 ## 1. Checklist: what has to be switched on
 

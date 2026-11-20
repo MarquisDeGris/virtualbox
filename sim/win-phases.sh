@@ -700,6 +700,31 @@ win_drive_gone() # <what> [<seconds>]
     return 1
 }
 
+# A guest which has stopped telling anything while its VM runs (run 251: from
+# the moment it had switched the slot off, with the events of the slot left
+# unanswered).  What shows of it from the outside: the slot and the message
+# the port interrupts with, where CPU 0 is and whether the guest still leaves
+# for VirtualBox (a guest which waits does not move, one which spins does),
+# the interrupt controllers, and a picture.
+frozen_note()
+{
+    local i what
+    echo "    ---- the guest says nothing any more; what the VM shows of it:"
+    vbm debugvm "$VM" info pci verbose 2> /dev/null | perl "$SIMLIB/slotregs.pl" 1 | head -n 1 | cut -c1-500 | sed 's/^/    | /'
+    for i in 1 2 3 4 5; do
+        echo "    | exits $(exits_now), $(VBM_TIMEOUT=30 vbm debugvm "$VM" getregisters --cpu=0 rip rflags cr8 2>&1 | tr -d '\r' | grep -a -E '^(rip|rflags|cr8)|rror' | tr -s ' ' | tr '\n' ' ' | cut -c1-160)"
+        sleep 3
+    done
+    for what in apic lapic ioapic; do
+        echo "    ---- debugvm info $what:"
+        VBM_TIMEOUT=60 vbm debugvm "$VM" info "$what" 2>&1 | tr -d '\r' | grep -a -v '^ *$' | head -n 45 | cut -c1-160 | sed 's/^/    | /'
+    done
+    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/NEM/CPU0/Exit*|/Devices/ioapic/*|/Public/Storage/AHCI0/Port0/Reqs*' 2> /dev/null \
+        | grep -a -o -E '<Counter c="[1-9][0-9]*"[^>]*name="[^"]*"' \
+        | sed -E 's/^<Counter c="([0-9]+)".*name="([^"]*)"$/\2: \1/' | head -n 40 | sed 's/^/    | /'
+    shot
+}
+
 # The drive in the hot-plug capable slot of a VM with Windows: there when
 # Windows starts, then taken out and put in while it runs, with the guest
 # being asked and without.
@@ -728,7 +753,14 @@ phase_hotplug()
     win_drive_gone "guest: the drive is gone"
     check_pcistate hotplug,absent,unused
     slot_registers_check
-    guest_goes_on "the guest keeps running" 300
+    if ! guest_goes_on "the guest keeps running" 300; then
+        # Nothing of what follows can be told of a guest which says nothing,
+        # and waiting for it took 70 minutes of run 251.  It is looked at, and
+        # the phase ends; the VM is powered off without asking the guest.
+        frozen_note
+        WIN_UP=no
+        return
+    fi
 
     if [ "$(pcistate)" = hotplug,absent,unused ]; then
         serial_mark
@@ -752,7 +784,11 @@ phase_hotplug()
         diag
     fi
     win_drive_gone "guest: notices that the drive is gone" 420
-    guest_goes_on "the VM runs on after that" 300
+    if ! guest_goes_on "the VM runs on after that" 300; then
+        frozen_note
+        WIN_UP=no
+        return
+    fi
 
     serial_mark
     if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$HOSTADDR"; then

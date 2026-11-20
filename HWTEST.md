@@ -10,10 +10,18 @@ through most of these steps with a Linux guest, an emulated NVMe drive and
 an emulated IOMMU of the Intel kind, with the kernel, Main and `VBoxManage`
 as they are, and a Windows guest has met the hot-plug capable slot while it
 was empty: its PCI driver runs the port and the slot, a saved state is
-loaded, the power button works before and after. No Windows has had a
-device in the slot yet, and nothing was
-tried with a graphics card, with Thunderbolt, with a device of several
-functions or with an IOMMU of AMD.
+loaded, the power button works before and after. On the branch for the
+7.1 line with the KVM backend of Cyberus Technology the simulation has
+had Windows with the emulated drive in the slot as well, twice. Once
+Windows started with it, read from it, let go of it when asked, took it
+again, had it taken by force and took it once more (run 250 in
+STATUS.md). Once, with the same code, Windows let go of it when asked
+and then did nothing any more, with the events of the slot left
+unanswered (run 251); why is not known yet, so parts F to H with a
+Windows guest are where to look closely. On the branch of the merge
+request no Windows has had a device in the slot yet, and nothing was
+tried anywhere with a graphics card, with Thunderbolt, with a device of
+several functions or with an IOMMU of AMD.
 
 ## 1. What is needed
 
@@ -45,6 +53,24 @@ functions or with an IOMMU of AMD.
   Minimal mode`), and Windows then keeps its time by the emulated HPET. In
   the simulation setup of Windows took five times as long that way and a
   start three times.
+
+The test can be done with one of the branches for a released line
+instead, `pci-passthrough-hotplug-7.2-kvm` or `-7.1-kvm`
+([INSTALL.md](INSTALL.md), part 0): the list is the same. What differs
+there:
+
+- A Windows guest is left at its default paravirtualization interface,
+  the line above about `--paravirt-provider none` does not apply. That
+  backend shows the guest the interface of Hyper-V.
+- Part J with a Windows guest: in the simulation on the 7.1 one, Windows
+  at that default did not go on after its saved state was loaded (the
+  screen stays as it was, the guest does nothing). A Linux guest goes
+  on, and so does Windows without the interface. Note down what happens;
+  it is about that backend and that interface, not about the slot, and
+  a VM cannot be saved with the device in it anyway.
+- The readme of the backend calls AMD processors experimental and has a
+  note about split lock detection on Intel processors; the log of the VM
+  says when the second applies to the host.
 
 The branch has two commits which are not about the device. Every VM with
 KVM as execution engine on a Linux host gets them, and a Windows guest in

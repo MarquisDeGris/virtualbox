@@ -77,12 +77,22 @@ for my $d (@devs) {
     my $pdce    = $slotctl >> 3 & 1;
     my $dllsce  = $slotctl >> 12 & 1;
     my $taken   = ($hpie && ($abpe || $pdce || $dllsce)) ? 1 : 0;
+    # The message the port interrupts with: its data (the vector is the low
+    # byte), and, where the capability has them, which messages the guest has
+    # masked and which are waiting for being unmasked.
+    my $msiinfo = '';
+    if (defined $msi) {
+        my $mf  = u16($c, $msi + 2);
+        my $o64 = $mf & 0x80 ? 4 : 0;
+        $msiinfo = sprintf(" msiflags=0x%04x msidata=0x%04x", $mf, u16($c, $msi + 8 + $o64));
+        $msiinfo .= sprintf(" msimask=0x%x msipending=0x%x", u32($c, $msi + 0xc + $o64), u32($c, $msi + 0x10 + $o64)) if $mf & 0x100;
+    }
     printf "SLOT port=%s name=%s secondary=%d porttype=%d slotcap=0x%08x hotplug=%d surprise=%d button=%d powerctl=%d "
          . "slotctl=0x%04x hpie=%d abpe=%d pdce=%d ccie=%d dllsce=%d poweroff=%d "
-         . "slotsta=0x%04x present=%d lnksta=0x%04x linkup=%d cmd=0x%04x msi=%s intpin=%d taken=%d\n",
+         . "slotsta=0x%04x present=%d lnksta=0x%04x linkup=%d cmd=0x%04x msi=%s%s intpin=%d taken=%d\n",
            $d->{addr}, $d->{name}, $want, $flags >> 4 & 0xf, $slotcap, $slotcap >> 6 & 1, $slotcap >> 5 & 1, $slotcap & 1,
            $slotcap >> 1 & 1, $slotctl, $hpie, $abpe, $pdce, $slotctl >> 4 & 1, $dllsce, $slotctl >> 10 & 1,
            $slotsta, $slotsta >> 6 & 1, $lnksta, $lnksta >> 13 & 1, u16($c, 0x04),
-           !defined $msi ? 'none' : (u16($c, $msi + 2) & 1 ? 'on' : 'off'), $c->[0x3d], $taken;
+           !defined $msi ? 'none' : (u16($c, $msi + 2) & 1 ? 'on' : 'off'), $msiinfo, $c->[0x3d], $taken;
 }
 exit($found ? 0 : 1);
