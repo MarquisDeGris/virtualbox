@@ -449,7 +449,8 @@ jobs:
           # this step is to run whatever these tell; the last step of the run
           # fails for one which counts.  One which is here for the first time,
           # or which the test driver of the tree itself leaves out, is tried:
-          # what it does is told and does not count.
+          # what it does is told and does not count.  All of them passed in
+          # run 260.
           errpat='error:|undefined reference|multiple definition|ld returned|[*][*][*] '
           ( time kmk -C src/VBox/HostServices -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 ) > build-hostsvc-tests.log 2>&1 \
             || { echo "NOT EVERYTHING WAS BUILT (host services)"; grep -n -E "$errpat" build-hostsvc-tests.log | head -80; }
@@ -488,7 +489,7 @@ jobs:
             return 0
           }
           hs=src/VBox/HostServices
-          # The services.  These seven passed in run 259.
+          # The services.
           run_tc counts tstHGCMSvc              $hs/testcase/tstHGCMSvc.cpp "$bin"
           run_tc counts tstGuestPropSvc         $hs/GuestProperties/testcase/tstGuestPropSvc.cpp "$bin"
           run_tc counts tstClipboardServiceHost $hs/SharedClipboard/testcase/tstClipboardServiceHost.cpp "$bin"
@@ -504,21 +505,22 @@ jobs:
           if [ -e "$gc" ] && ! grep -q 'cbClient' "$gc"; then
             echo "TESTCASE tstGuestControlSvc: not run: this tree has it as upstream does, and that one cannot run"
           else
-            run_tc tried tstGuestControlSvc $gc "$bin"
+            run_tc counts tstGuestControlSvc $gc "$bin"
           fi
-          run_tc tried tstGuestControlMockHGCM $hs/GuestControl/testcase/tstGuestControlMockHGCM.cpp "$bin"
-          run_tc tried tstClipboardTransfers   $hs/SharedClipboard/testcase/tstClipboardTransfers.cpp "$bin"
+          run_tc counts tstGuestControlMockHGCM $hs/GuestControl/testcase/tstGuestControlMockHGCM.cpp "$bin"
+          run_tc counts tstClipboardTransfers  $hs/SharedClipboard/testcase/tstClipboardTransfers.cpp "$bin"
           # The image formats; these write their images into the directory they run in.
           st=src/VBox/Storage/testcase
-          run_tc tried tstVD-2   $st/tstVD-2.cpp "$work"
-          run_tc tried tstVDIo   $st/tstVDIo.cpp "$work"
-          run_tc tried tstVDSnap $st/tstVDSnap.cpp "$work"
+          run_tc counts tstVD-2   $st/tstVD-2.cpp "$work"
+          run_tc counts tstVDIo   $st/tstVDIo.cpp "$work"
+          run_tc counts tstVDSnap $st/tstVDSnap.cpp "$work"
           # Devices; the step before this one built them.  The test driver of
-          # the tree leaves the one of the internal network out.
+          # the tree leaves the one of the internal network out, which measures
+          # a throughput for a minute: it stays one which is tried.
           dv=src/VBox/Devices
-          run_tc tried tstAudioMixBuffer $dv/Audio/testcase/tstAudioMixBuffer.cpp "$bin"
-          run_tc tried tstUsbMouse       $dv/Input/testcase/tstUsbMouse.cpp "$bin"
-          run_tc tried tstIntNetR0       $dv/Network/testcase/tstIntNetR0.cpp "$bin"
+          run_tc counts tstAudioMixBuffer $dv/Audio/testcase/tstAudioMixBuffer.cpp "$bin"
+          run_tc counts tstUsbMouse       $dv/Input/testcase/tstUsbMouse.cpp "$bin"
+          run_tc tried  tstIntNetR0       $dv/Network/testcase/tstIntNetR0.cpp "$bin"
           rm -rf "$work"
 
       - name: Result of the build of the tree

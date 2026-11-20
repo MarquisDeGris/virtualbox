@@ -935,7 +935,7 @@ see the second point.
   difference only for a build with the user interface, which nobody has
   made here.
 
-After run 259, not built yet:
+After run 259:
 
 - `tstGuestControlSvc` rewritten, as commit 7 on `backports-7.1` and on
   the two branches which carry its commits. It gives its client the
@@ -946,15 +946,38 @@ After run 259, not built yet:
   of parameters, with a parameter of another type or with a buffer which
   is too small), and a client fetching it the way of older guests, which
   is the code the change taken over from 7.2 is in. Written by reading
-  the service, without a compiler; the next run is its first build.
+  the service, without a compiler; run 260 was its first build.
 - The step of the workflow runs more of the testcases the tree has:
   three for the image formats (`tstVD-2`, `tstVDIo`, `tstVDSnap`), and
   of those which were built all along and not run `tstAudioMixBuffer`,
   `tstUsbMouse`, `tstIntNetR0`, `tstGuestControlMockHGCM` and
-  `tstClipboardTransfers`. The seven which passed in run 259 count: the
-  last step of a run fails if one of them does. The others are tried
-  first: the run tells what they do and does not fail for them, until
-  they have been seen passing.
+  `tstClipboardTransfers`. A testcase which is new to the step is tried
+  first: the run tells what it does and does not fail for it, until it
+  has been seen passing.
+
+**Run 260** (2026-11-20, `tests`, which is the build and the testcases
+without the simulation, `pci-passthrough-hotplug-7.1-kvm` @ `7f324666`,
+15 minutes, AMD EPYC 7763): **all 16 testcases of the step pass**, and
+the device testcase with its 56 tests.
+
+- The rewritten `tstGuestControlSvc` builds without a warning and its
+  three tests pass: the messages of the host, a client fetching a
+  message, a client fetching a message the old way. One of its checks
+  is there for the change taken over from 7.2 (with a parameter of
+  another type the client gets none of the parameters before it); that
+  this check fails on the service as it was before is what reading the
+  two versions says, and was not run.
+- The seven testcases of the host services which passed in run 259 pass
+  again; `tstGuestControlMockHGCM`, `tstClipboardTransfers`, `tstVD-2`,
+  `tstVDIo` (its six built-in scripts, on VDI, VMDK and VHD images in
+  memory), `tstVDSnap` (VMDK images with differencing images written,
+  merged and compared), `tstAudioMixBuffer`, `tstUsbMouse` and
+  `tstIntNetR0` pass.
+- All of them count from now on, but for `tstIntNetR0`, which upstream's
+  test driver leaves out and which measures a throughput for a minute:
+  it stays one which is tried.
+- This run happened to have an AMD processor and no simulation in it;
+  the VMs with a device have still not had one on these branches.
 
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
@@ -974,7 +997,8 @@ it. Windows has had the drive in the slot, out and in again in runs 250,
 254, 258 and 259 and stopped after the first removal in run 251, which
 is not understood yet. Run 259 had the head `9e858a53`, with everything
 taken over from 7.2 and the size check in the ACPI device; one commit
-came after it, which changes a testcase only (`tstGuestControlSvc`).
+came after it, which changes a testcase only (`tstGuestControlSvc`) and
+is built, with the testcase passing, in run 260.
 Merge request [#4](https://github.com/MarquisDeGris/virtualbox/pull/4).
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
@@ -1091,20 +1115,21 @@ which is about code a Linux host runs was then tried on 7.1:
   is merge request [#3](https://github.com/MarquisDeGris/virtualbox/pull/3)
   in the fork. It builds from nothing with its first five commits (run
   256); the sixth is built as part of the branch with the KVM backend
-  (run 259), the seventh not yet. Who is on 7.1 and does not want the
+  (run 259), the seventh too (run 260). Who is on 7.1 and does not want the
   passthrough work can take these alone.
 - What has gone through what, on the branch with the KVM backend: the
   NAT library and the VirtIO network device with a VM behind NAT (runs
   258 and 259); the import of appliances with a VM exported and imported
   (run 259); the guest properties, the shared clipboard, the shared
   folders and the code the services share with the testcases of the tree
-  (run 259); VDI with the disk of every VM of the simulation, VMDK with
-  the appliance. Not gone through by anything here: the changes to drag
-  and drop, to the host channel, to the audio devices, to VUSB and the
-  USB capture, to the internal network, to GPT and ISO, and the guest
-  control service before its testcase is built. The testcases the
-  workflow tries from its next run on reach some of that code (the audio
-  mixing buffer, the internal network, the image formats).
+  (run 259); the guest control service with its rewritten testcase, the
+  audio mixing buffer and the switch of the internal network with theirs
+  (run 260); VDI with the disk of every VM of the simulation, VMDK with
+  the appliance, and both with the testcases of the image formats (run
+  260). Not gone through by anything here: the changes to drag and
+  drop, to the host channel, to the HDA and SB16 devices, to VUSB and
+  the USB capture, to GPT and ISO. The tree has no testcase for these
+  which runs without a guest.
 - For trying it: the simulation has a VM with a virtio network adapter
   behind NAT since then (an address by DHCP, a ping to the gateway, a
   file fetched from the runner and compared), which goes through the
@@ -1642,9 +1667,9 @@ harness since WP5, saved states since the fourth part of WP6.
    Run 259 was the first with the size check in the ACPI device, with
    the testcases of the host services, with an appliance exported and
    imported, and with Windows in a VM with a TPM 2.0: all 172 checks
-   pass. Left, in this order: a run on the 7.1 branch with the rewritten
-   testcase of the guest control service and the testcases the workflow
-   tries since; the same checks once on the branch for 7.2; the
+   pass, and run 260 built the rewritten testcase of the guest control
+   service and ran 16 testcases of the tree, which all pass. Left, in
+   this order: the same checks once on the branch for 7.2; the
    sanitizers on the branches without the backend; a run on an AMD
    processor, which no VM with a device has had on these branches yet.
 5. Windows where the drive is: passed in runs 250, 253, 254, 258 and 259
@@ -1954,5 +1979,6 @@ slot.
 | 257 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed (nothing was built) | One minute. The workflow takes the revision of the product from the newest commit of upstream it finds among the newest 50 of the branch, and this branch has 51 of its own since the last ones were merged in. A limit of the workflow, raised to 300 after it; nothing about the code |
 | 258 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed | 42 minutes, Intel Xeon Platinum 8573C. The same head as run 257. Every check passes, 155 of them: the five new ones with a VM behind NAT (address, ping, a file fetched through the NAT library with the fixes taken over from 7.2), the Linux guest with the device, Windows with the empty slot, and Windows where the drive is, which passes for the fourth time in five runs. See "Run 258" |
 | 259 | `pci-passthrough-hotplug-7.1-kvm` @ `9e858a53` | allsim, exploring | passed; one testcase outside of the simulation did not run | 57 minutes, Intel Xeon 6975P-C. With the size check in the ACPI device. Every check of the simulation passes, 172 of them: new are an appliance exported and imported (8) and Windows in a VM with a TPM 2.0 (9); Windows where the drive is passes for the fifth time in six runs. Seven of the eight testcases of the host services pass; `tstGuestControlSvc` ends in its first connect, as it does on every branch of upstream, and was rewritten after the run. See "Run 259" |
+| 260 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | tests, exploring | passed | 15 minutes, AMD EPYC 7763. The build and the testcases, no simulation. The first build of the rewritten `tstGuestControlSvc`: it passes. All 16 testcases of the tree which the workflow runs since this run pass (host services, image formats, the audio mixing buffer, the USB mouse, the switch of the internal network), and the device testcase. See "Run 260" |
 
 Run numbers are those GitHub shows for the `build` workflow.
