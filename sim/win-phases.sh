@@ -41,7 +41,16 @@ SHOTS=0
 BUTTON_WORKS=unknown
 # Whether the Windows of the VM which was started last got as far as its report.
 WIN_UP=no
-PARAVIRT=${WIN_PARAVIRT:-none}
+# The paravirtualization interface Windows gets, see create_vm.  It depends
+# on the KVM backend the tree was built with: a build with the backend of
+# Cyberus Technology says so in what configure wrote (--with-kvm).
+if [ -n "${WIN_PARAVIRT:-}" ]; then
+    PARAVIRT=$WIN_PARAVIRT
+elif grep -q -s -E '^VBOX_WITH_KVM +:= +1' "$VBOX_BIN/../../../../AutoConfig.kmk"; then
+    PARAVIRT=default
+else
+    PARAVIRT=none
+fi
 STALL_EVERY=${WIN_STALL_EVERY:-60}
 STALL_T=0
 STALL_N=
@@ -292,6 +301,13 @@ create_vm() # <cpus> <MiB> <disk> <DVD or emptydrive> <DVD or emptydrive> <host 
     # by the HPET of VirtualBox instead and takes several times as long for
     # everything (run 228: 62 million reads of the HPET during setup).  With
     # no such interface it takes the time stamp counter (run 226).
+    # That is the KVM backend of the development line.  The one of Cyberus
+    # Technology gives the guest the Hyper-V interface with the help of KVM,
+    # so there the VM is left at its default, as somebody creating a VM for
+    # Windows has it.  Without the interface Windows kept its time by the
+    # HPET on that backend too and did not get through setup in 50 minutes on
+    # an Intel processor (run 248: 57 million reads).
+    echo "    paravirtualization interface of the VM: $PARAVIRT"
     run modifyvm "$VM" --paravirt-provider "$PARAVIRT"
     run storagectl "$VM" --name sata --add sata --controller IntelAhci --portcount 3
     if    ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$3" \

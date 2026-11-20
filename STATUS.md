@@ -551,9 +551,9 @@ interrupt controller of KVM with the I/O APIC in VirtualBox, keeps the
 memory of the guest in the VM process in one piece, and makes the
 process do without the support driver, which is what the passthrough
 device asks of an engine. `pci-passthrough-hotplug-7.2-kvm` is the branch
-for 7.2 with that patch on top (one place merged by hand). Whether it
-builds and whether the simulation runs on it is the next thing to find
-out. Its readme calls AMD processors experimental.
+for 7.2 with that patch on top (one place merged by hand). It builds,
+and the simulation runs on it with the device (runs 247 and 248 below).
+Its readme calls AMD processors experimental.
 
 State of `pci-passthrough-hotplug-7.2` (pushed): the 7.2 branch of
 upstream, then one commit with 24 revisions of upstream (the management
@@ -576,7 +576,81 @@ that changed in the kernel module and its runtime: on 7.1 an MMIO2
 region with an existing backing is refused in a VM which runs on the
 ring-0 hypervisor), the management of upstream (without the removal of
 the old passthrough code, which is switched off there as it is), and the
-same 35 commits, which went on with one conflict of a line.
+same 35 commits, which went on with one conflict of a line. It builds
+and its tests pass since run 246.
+
+**Run 247** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `2139a88e`, 27 minutes, AMD EPYC
+9V74): the first build and the first simulation of the 7.2 branch with
+the backend of Cyberus Technology.
+
+- It builds with `configure --with-kvm` (7 minutes 18 seconds, every
+  file again because the option changes the defines of all of them), and
+  the tests of the device pass.
+- On the runner all of it passes: the Linux guest with the empty slot,
+  with a saved state and the power button, and Windows (installed in 546
+  seconds, a start takes 45, the slot is run by its hot-plug driver, the
+  power button works after a loaded state). The same processor with the
+  backend of the development line had 414 and 37 seconds in run 230.
+  This is the first time VMs of this work run on a released line of
+  VirtualBox.
+- Inside the virtual machine standing in for a host no VM gets anywhere:
+  each stops a millisecond after it was started, with
+  `Guru Meditation -6893 (VERR_NEM_IPE_3)` and no line saying what
+  failed. So nothing with a device was tried on this backend yet.
+
+What was found about the last point by reading: the status is what the
+backend returns when one of the calls fails with which it hands the
+state of the CPU to KVM, and a release build keeps quiet about which.
+Other than the backend of the development line this one hands over two
+registers more, `IA32_ARCH_CAPABILITIES` and `IA32_SPEC_CTRL`. The
+second is one whose value the kernel tries on the processor of the host
+before it takes it, and the processor of that host is a virtual one
+which has no such register; the two levels differ in nothing else that
+the logs show. Changed on both `-kvm` branches, as a commit after the
+backend: the register is handed over for a guest processor which has it
+only, and the checks of these calls write to the release log.
+
+**Run 248** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `e45e74e1`, 74 minutes, Intel Xeon
+6975P-C): the same with that change.
+
+- **The device runs on the released line 7.2.** Inside the virtual
+  machine standing in for a host all 64 checks with the Linux guest pass
+  on the backend of Cyberus Technology, in 608 seconds: the drive passed
+  through and read and written, pause and resume, a saved state refused
+  while the device is in the VM; the drive in the hot-plug capable slot,
+  taken out with the guest asked, put in, taken by force, put in again; a
+  start without the device and the device put in later; saved states
+  with the empty slot, loaded with and without the device there; the
+  host asking for the device back. No assertion and no unexpected error
+  in the logs of the six VMs, and no VM was behind with its timers.
+- On the runner the 20 checks with the Linux guest pass.
+- Windows on the runner did not get through its setup in 50 minutes
+  (it was at the second of its three stages): 87 million exits, 57
+  million of them reads of the HPET counter. The VM had no
+  paravirtualization interface, which is what the backend of the
+  development line wants (see run 228). This backend gives a guest the
+  interface of Hyper-V with the help of KVM, and Windows without it
+  takes the HPET for its clock on this processor. On the AMD processor
+  of run 247 the same setting cost 28 million exits and setup got
+  through. The simulation leaves the VM at its default on a build with
+  this backend from here on.
+- What it does not tell: whether the change after run 247 is what the
+  VMs of that run needed. That was an AMD processor; on this one the
+  host inside has the register. It is known when a run gets an AMD
+  processor again.
+
+State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
+above, the backend of Cyberus Technology in its version of 2026-10-21 as
+one commit (source, licence and the one place merged by hand are in its
+message), and the commit about the register. It is built with
+`configure --with-kvm`.
+
+State of `pci-passthrough-hotplug-7.1-kvm` (pushed, being built): the
+7.1 branch as above, the backend in its last version for the 7.1 line
+(2025-11-03, two places merged by hand) and the same commit about the
+register.
 
 ### The management and the review, 13 to 15 November
 
@@ -1086,10 +1160,19 @@ harness since WP5, saved states since the fourth part of WP6.
    sanitizers on both. Not on 2026-11-20 any more, see the decisions.
 4a. To be answered by who this is for: whether the hosts it is meant for
    can run VMs with KVM, or only with the VirtualBox kernel driver. The
-   three ways in "The maintenance branches" hang on that.
+   ways in "The maintenance branches" hang on that.
+4b. The branches with the KVM backend of Cyberus Technology: 7.2 runs the
+   simulation with the device (run 248). Left: the first build and
+   simulation of the one for 7.1; Windows on that backend with the
+   Hyper-V interface, on the runner and where the drive is; the
+   sanitizers on both; a run on an AMD processor for the change after
+   run 247; then merge requests in the fork for them, and what
+   [INSTALL.md](INSTALL.md) and [HWTEST.md](HWTEST.md) say differently
+   for these branches.
 5. Windows where the drive is: what was changed after run 231 runs when
-   a run for something else gets an AMD processor. No runs for it alone
-   until then; it stays with the hardware test.
+   a run for something else gets an AMD processor, or on any processor
+   with a build which has the backend of Cyberus Technology. No runs for
+   it alone until then; it stays with the hardware test.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
 7. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
@@ -1179,6 +1262,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | The KVM backend of the development line is not taken to the maintenance branches. The branches for 7.2 and 7.1 are kept as the work and its tests on those bases, building, and are not given an execution engine | What made that backend build and work is some forty changes to the VMM which upstream has not released. A maintenance branch with them is no longer the released line somebody chose it for, and nothing here can stand in for the testing upstream gives its VMM |
 | 2026-11-20 | Running the device on the VirtualBox kernel driver, which is what the maintenance branches offer, is not started before it is known that it is wanted | It gives up a security requirement as it stands (S11) for another way of meeting what it is for, in the memory management of VirtualBox, and it takes a simulation with the kernel driver loaded. That is weeks of the kind of work the last ones were, and the right thing only if the hosts this is for cannot have KVM |
 | 2026-11-20 | No further runs on 2026-11-20 unless asked for. Before the first run on a base which is new to the workflow, its `configure`, its checkout and its makefiles are read for what the workflow assumes, and all of it is put right in one go | Ten runs in one morning, six of them stopped by the workflow itself within two minutes, each for one thing which reading the scripts of 7.2 and 7.1 would have shown: the options of the older `configure`, the translations, files a branch deletes, kBuild without `.gitmodules`, an option only 7.2 has, the place of kBuild. One run per finding is what was not to happen again after 2026-11-15, and it did |
+| 2026-11-20 | The KVM backend Cyberus Technology publishes for VirtualBox is put onto branches of their own (`pci-passthrough-hotplug-7.2-kvm`, `-7.1-kvm`), as one commit which is their patch as it is, and whatever this work changes in it comes as commits after that one | It is the one KVM backend there is for the released lines, it is maintained by somebody else, and it gives the device what it asks of an engine. Kept apart, it can be replaced by a newer version of theirs, and what is theirs and what is not stays plain to see. The branches without it remain what the merge request would be against upstream's maintenance branches |
+| 2026-11-20 | On a build with that backend the Windows guest of the simulation is left at its default paravirtualization interface (Hyper-V), and Windows where the drive is is tried on every processor, not on AMD only | Run 248: without the interface Windows keeps its time by the HPET on that backend and does not get through setup on an Intel processor. The backend gives a guest the interface through KVM, and a VM somebody creates for Windows has it. The reason for trying AMD only was that clock |
+| 2026-11-20 | The change to that backend after run 247 (a register handed to the kernel for a guest processor which has it only) stays on the branches although run 248 could not show it is what was missing; no run is started for the sake of getting an AMD processor | It is right by itself: a guest processor without the register has nothing to hand over. Which processor a runner has cannot be chosen, and every run on these branches tells when it has one. Should the VMs stop there again, the log now names the call |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1362,5 +1448,9 @@ slot.
 | 242 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped in `configure`) | 2 minutes. kBuild is there. The `configure` of 7.1 does not know one of the options the one of 7.2 takes. The workflow asks the script which of them it knows now |
 | 243 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed (stopped in `configure`) | 2 minutes. The `configure` of 7.1 looks for kBuild one directory above where its repository has it. The workflow tells it where it is |
 | 244 | `VBox-7.1` @ `e307f442` | baseline, exploring | passed | 13 minutes. The maintenance branch 7.1 as upstream has it builds here, in 10 minutes 55 seconds; its output is kept for the builds of the branch with this work |
+| 245 | `pci-passthrough-hotplug-7.1` @ `ddd0b06f` | tests, exploring | passed (one file does not compile, one test fails) | 7 minutes. The first build of the work on the 7.1 branch. One file does not compile: the part taken from 7.2 uses a name for the page size of the host which 7.1 does not have. 58 of the 59 tests of the device pass; the one for a start without the device fails with a device whose MSI-X table has a BAR of its own, because two changes to the helpers of the device which the 7.2 branch has were not taken over (they do not touch the file of the device). Both put right on the branch |
+| 246 | `pci-passthrough-hotplug-7.1` @ `bbf47bc0` | tests, exploring | passed | 7 minutes. The work on the 7.1 branch builds, the 56 tests and the three random tests pass, the ACPI table check passes |
+| 247 | `pci-passthrough-hotplug-7.2-kvm` @ `2139a88e` | allsim, exploring | passed (seven checks of the simulation fail) | 27 minutes, AMD EPYC 9V74. The first build of the 7.2 branch with the KVM backend of Cyberus Technology: it builds with `--with-kvm` in 7 minutes 18 seconds and the tests of the device pass. On the runner every check with the Linux guest and with Windows passes on that backend (60 passed, 7 failed, none skipped). Every VM inside the virtual machine standing in for a host stops at its first step with `VERR_NEM_IPE_3` and nothing more in its log; see "Run 247" |
+| 248 | `pci-passthrough-hotplug-7.2-kvm` @ `e45e74e1` | allsim, exploring | passed (one check of the simulation fails) | 74 minutes, Intel Xeon 6975P-C. With the change after run 247. Inside the virtual machine standing in for a host all 64 checks with the Linux guest pass on the backend of Cyberus Technology: the device passed through, in the slot, taken out and put in, a start without it, saved states with the empty slot. The 20 checks with the Linux guest on the runner pass. Windows does not get through its setup in 50 minutes there, keeping its time by the HPET (57 million reads), so Windows where the drive is was skipped. 87 passed, 1 failed, 1 skipped; see "Run 248" |
 
 Run numbers are those GitHub shows for the `build` workflow.

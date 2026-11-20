@@ -21,7 +21,9 @@ What of this was done by somebody or something, and what was not:
 |--------|---------------|---------------------|
 | `pci-passthrough-hotplug-v1` | the development line of VirtualBox (`main`) | **The one to build and try.** Everything in this file and in HWTEST.md is about it |
 | `pci-passthrough-hotplug-7.2` | the maintenance branch of 7.2 (7.2.22) | The same work on that base. It builds and its tests pass. **No VM with a passed through device runs on it**, see below |
-| `pci-passthrough-hotplug-7.1` | the maintenance branch of 7.1 (7.1.18) | As for 7.2. See [STATUS.md](STATUS.md) for whether it has been built |
+| `pci-passthrough-hotplug-7.1` | the maintenance branch of 7.1 (7.1.18) | As for 7.2: it builds and its tests pass, no VM with a device runs on it |
+| `pci-passthrough-hotplug-7.2-kvm` | the branch for 7.2 with the KVM backend Cyberus Technology publishes for VirtualBox | The released line 7.2 with an engine the device runs on. The simulation ran on it with a device and a Linux guest. Not what Oracle ships: see below |
+| `pci-passthrough-hotplug-7.1-kvm` | the branch for 7.1 with that backend in its last version for 7.1 | The same for 7.1. See [STATUS.md](STATUS.md) for how far it has been built and run |
 
 Why the two branches for the released lines do not run a VM with a
 device: the work takes KVM as execution engine, so that the memory of the
@@ -32,6 +34,44 @@ it does not compile; upstream made it work on the development line in
 driver of VirtualBox, and the passthrough device as this work leaves it
 refuses that engine. STATUS.md, "The maintenance branches", has the
 details and what could be done about it.
+
+The two `-kvm` branches are one of the things which can be done about
+it. They add the KVM backend which Cyberus Technology publishes for
+VirtualBox
+([virtualbox-kvm](https://github.com/cyberus-technology/virtualbox-kvm),
+GPL version 3) to the released lines, as one commit, and one small
+change to it after that. A VirtualBox built from them runs its VMs on
+KVM without the kernel modules of VirtualBox, as the development line
+does. They are built like this, with the packages of part 2:
+
+    git clone -b pci-passthrough-hotplug-7.2-kvm \
+        https://github.com/MarquisDeGris/virtualbox.git
+    cd virtualbox
+    # The 7.1 branch names its kBuild without saying where it is from:
+    # there, clone https://github.com/VirtualBox/kbuild.git into kBuild
+    # and check out the commit "git ls-tree HEAD kBuild" tells.
+    git submodule update --init --recursive
+    export VBOX_SVN_REV=...                     # as in part 2
+    export KBUILD_PATH="$PWD/kBuild/kBuild"
+    # 7.1 does not know --disable-dxvk: leave it out there.
+    ./configure --ose --build-headless --disable-docs --disable-python \
+        --disable-hardening --disable-extpack --disable-sdl --disable-java \
+        --disable-kmods --disable-dxvk --with-kvm --with-kbuild="$KBUILD_PATH"
+    # What this build leaves out; the translations need tools of Qt.
+    printf '%s :=\n' VBOX_WITH_DOCS VBOX_WITH_ADDITIONS VBOX_WITH_VALIDATIONKIT \
+        VBOX_WITH_WEBSERVICES VBOX_WITH_UPDATE_AGENT VBOX_WITH_TESTCASES \
+        'override VBOX_WITH_NLS' VBOX_WITH_MAIN_NLS VBOX_WITH_PUEL_NLS \
+        VBOX_WITH_VBOXMANAGE_NLS > LocalConfig.kmk
+    . ./env.sh
+    kmk -j"$(nproc)" KBUILD_TYPE=release
+
+This is what the workflow does for these branches; nobody has done it by
+hand. Two things differ on them from what is said for the development
+line: a Windows guest is left at its default paravirtualization
+interface ([HWTEST.md](HWTEST.md) says `--paravirt-provider none`, which
+is for the backend of the development line; STATUS.md says what has run
+which way), and the readme of the backend calls AMD processors
+experimental.
 
 ## 1. Checklist: what has to be switched on
 

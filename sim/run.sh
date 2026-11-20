@@ -459,7 +459,8 @@ if has_part winhost; then
     note "Part 4: Windows with the drive in the slot, in a virtual machine with an IOMMU and a PCIe device"
     if ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES" || ! sudo test -s /tmp/sim-win/win.vdi; then
         stage "Windows with the drive in the slot" skipped "there is no installed Windows"
-    elif ! grep -q AuthenticAMD /proc/cpuinfo && [ "${WIN_NESTED_ALWAYS:-no}" != yes ]; then
+    elif    ! grep -q AuthenticAMD /proc/cpuinfo && [ "${WIN_NESTED_ALWAYS:-no}" != yes ] \
+         && ! grep -q -s -E '^VBOX_WITH_KVM +:= +1' "$WS/AutoConfig.kmk"; then
         # Runs 228 and 229 had runners with Intel processors.  Windows has its
         # tick from the HPET of VirtualBox there, some 800 times a second, and
         # where an exit takes a millisecond it did not get through a start in
@@ -467,6 +468,10 @@ if has_part winhost; then
         # from the local APIC, which the kernel emulates, and a start took
         # half a million exits.  Which processor a runner has is not ours to
         # choose.
+        # That is the KVM backend of the development line.  A build with the
+        # one of Cyberus Technology (the third condition) gives Windows the
+        # Hyper-V interface, with which it does not need the HPET for its
+        # time, so there it is tried on every processor.
         stage "Windows with the drive in the slot" skipped "no AMD processor here, and Windows does not get through a start at this depth on others"
     elif part_simhost_prepare; then
         sudo ls -l /tmp/sim-win/win.vdi
