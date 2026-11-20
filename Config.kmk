@@ -558,11 +558,11 @@ endif
 # Enable the IEM arm64 interpreter.
 VBOX_WITH_IEM_TARGETING_ARM := 1
 # Enable native NEM on windows and macOS.
-if1of ($(KBUILD_TARGET), win darwin linux)
+if1of ($(KBUILD_TARGET), win darwin)
  VBOX_WITH_NATIVE_NEM = 1
 endif
 # Enable NEM fallback if the driver is not available.
-if1of ($(KBUILD_TARGET).$(KBUILD_TARGET_ARCH), darwin.amd64 darwin.arm64 linux.amd64 linux.arm64 win.arm64)
+if1of ($(KBUILD_TARGET).$(KBUILD_TARGET_ARCH), darwin.amd64 darwin.arm64 linux.arm64 win.arm64)
  VBOX_WITH_DRIVERLESS_NEM_FALLBACK = 1
 endif
 # Enable forced driverless mode by default.
