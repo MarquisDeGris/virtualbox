@@ -13,6 +13,7 @@ Updated: 2026-11-20
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
+| Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. The one for `pci-passthrough-hotplug-7.1-kvm` follows the run which is under way |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -915,7 +916,8 @@ which is about code a Linux host runs was then tried on 7.1:
   them, put into the copy of 4.8.0 as 7.2 has them in its copy of 4.9.5
   (urgent data of TCP, the header length of reassembled IP fragments,
   the length of IPv6 packets, OEM commands of NC-SI, the DHCPv6 reply).
-  Not built yet.
+  Built in run 256, where the copy of the library in the tree is what
+  gets compiled, without a warning in a file which was changed.
 - One more from Main, found on a second pass through what had been set
   aside by its subject line: r175077, with which the extra data of an
   appliance is imported only when the new import option `KeepExtraData`
@@ -925,8 +927,9 @@ which is about code a Linux host runs was then tried on 7.1:
   nothing but compiler warnings, or new features.
 - The same without the passthrough work: branch `backports-7.1`, five
   commits on upstream's 7.1 branch (the 25 changes, r175241, the result
-  of `Console::i_saveState`, the NAT library, r175077), for a merge
-  request of its own in the fork. Who is on 7.1 and does not want the passthrough
+  of `Console::i_saveState`, the NAT library, r175077), which is merge
+  request [#3](https://github.com/MarquisDeGris/virtualbox/pull/3) in
+  the fork. It builds from nothing (run 256). Who is on 7.1 and does not want the passthrough
   work can take these alone.
 - For trying it: the simulation has a VM with a virtio network adapter
   behind NAT since then (an address by DHCP, a ping to the gateway, a
@@ -1762,5 +1765,6 @@ slot.
 | 253 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 39 minutes, Intel Xeon 6975P-C. With the change to the KVM backend of Cyberus Technology about the Hyper-V registers in a saved state. Every check passes, 150 of them: the Linux guest on the runner and inside the virtual machine standing in for a host (67 there), Windows on the runner, which now goes on after its saved state is loaded and shuts down on the power button, and Windows where the drive is (35), which takes the drive, lets go of it, takes it again, has it taken by force and takes it once more. See "Run 253" |
 | 254 | `pci-passthrough-hotplug-7.1-kvm` @ `65feb364` | allsim, exploring | passed | 63 minutes, Intel Xeon 6975P-C. The 7.1 branch with the same change to the backend and with the 26 changes taken over from the 7.2 branch. Every check passes here too, 150 of them: what was taken over has run in VMs, Windows goes on after a loaded state and shuts down, Windows where the drive is passes. See "Run 254" |
 | 255 | `backports-7.1` @ `0bf9d4e6` | baseline, exploring | cancelled in its first minute | By mistake: the new way of reading the processor of the runner through the API was tried on this run with the option which cancels a run on the wrong kind of processor. Nothing was built. It showed that the reading and the cancelling work |
+| 256 | `backports-7.1` @ `0bf9d4e6` | baseline, exploring | passed | 10 minutes. The 7.1 branch with the five commits taken over from the 7.2 line and nothing of the passthrough work builds from nothing (7 minutes 22 seconds), every part is linked. The copy of libslirp in the tree is compiled, without a warning in the files which were changed. The first run of the workflow with the steps which tell the processor of the runner |
 
 Run numbers are those GitHub shows for the `build` workflow.
