@@ -7590,7 +7590,7 @@ HRESULT Console::i_saveState(Reason_T aReason, const ComPtr<IProgress> &aProgres
     }
 
     LogFlowFuncLeave();
-    return S_OK;
+    return hrc;
 }
 
 /**
