@@ -193,7 +193,11 @@ jobs:
           if [ -e configure.py ]; then
             opts="$opts --disable-additions --disable-validationkit"
           else
-            opts="$opts --disable-java --disable-kmods --disable-dxvk"
+            # Of these it gets the ones it knows: 7.1 has no DXVK to leave out
+            # (run 242).
+            for o in --disable-java --disable-kmods --disable-dxvk; do
+              if grep -q -E "^ +${o}\)|\|${o}\)|^ +${o}\|" configure; then opts="$opts $o"; fi
+            done
           fi
           echo "configure $opts"
           # The tool checks of configure run into their time limits now and then, so

@@ -15,6 +15,24 @@ What of this was done by somebody or something, and what was not:
 | 4. Thunderbolt and USB4 | From the documentation of the kernel, **never tried** |
 | A build with the graphical user interface, packages, an installer | **Not built** by anything here |
 
+## 0. Which branch
+
+| Branch | What it is on | What it is good for |
+|--------|---------------|---------------------|
+| `pci-passthrough-hotplug-v1` | the development line of VirtualBox (`main`) | **The one to build and try.** Everything in this file and in HWTEST.md is about it |
+| `pci-passthrough-hotplug-7.2` | the maintenance branch of 7.2 (7.2.22) | The same work on that base. It builds and its tests pass. **No VM with a passed through device runs on it**, see below |
+| `pci-passthrough-hotplug-7.1` | the maintenance branch of 7.1 (7.1.18) | As for 7.2. See [STATUS.md](STATUS.md) for whether it has been built |
+
+Why the two branches for the released lines do not run a VM with a
+device: the work takes KVM as execution engine, so that the memory of the
+guest stays where it is while the device can reach it, and the released
+lines have no KVM for Linux on x86. It is not built there, and switched on
+it does not compile; upstream made it work on the development line in
+2026 and has not released that yet. A VM on 7.1 or 7.2 runs on the kernel
+driver of VirtualBox, and the passthrough device as this work leaves it
+refuses that engine. STATUS.md, "The maintenance branches", has the
+details and what could be done about it.
+
 ## 1. Checklist: what has to be switched on
 
 Everything in this list has to be there. On a PC with a current
