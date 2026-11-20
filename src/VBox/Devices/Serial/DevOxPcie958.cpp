@@ -37,7 +37,6 @@
 #include <VBox/pci.h>
 #include <VBox/msi.h>
 #include <VBox/vmm/pdm.h>
-#include <VBox/vmm/pdmpci.h>
 #include <VBox/err.h>
 #include <VBox/log.h>
 #include <iprt/assert.h>

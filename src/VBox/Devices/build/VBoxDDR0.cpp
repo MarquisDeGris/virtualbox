@@ -109,9 +109,6 @@ static PCPDMDEVREGR0 g_apVBoxDDR0DevRegs[] =
 #ifdef VBOX_WITH_VIRTIO_SCSI
     &g_DeviceVirtioSCSI,
 #endif
-#ifdef VBOX_WITH_PCI_PASSTHROUGH_IMPL
-    &g_DevicePciRaw,
-#endif
     &g_DeviceGIMDev,
 #ifdef VBOX_WITH_NEW_LPC_DEVICE
     &g_DeviceLPC,

@@ -739,13 +739,6 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
   VBoxDD_SOURCES        += EFI/DevEFI.cpp
  endif
 
- if defined(VBOX_WITH_PCI_PASSTHROUGH_IMPL) && !defined(VBOX_WITH_EXTPACK_PUEL)
-  VBoxDD_DEFS           += VBOX_WITH_PCI_PASSTHROUGH_IMPL
-  VBoxDD_SOURCES        += \
-  	Bus/DevPciRaw.cpp \
-  	Bus/DrvPciRaw.cpp
- endif
-
  if defined(VBOX_WITH_VFIO_PCI_PASSTHROUGH)
   VBoxDD_DEFS           += VBOX_WITH_VFIO_PCI_PASSTHROUGH
   VBoxDD_SOURCES        += \
@@ -1275,11 +1268,6 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
   VBoxDDR0_SOURCES      += EFI/DevEFI.cpp
  endif
 
- if defined(VBOX_WITH_PCI_PASSTHROUGH_IMPL) && !defined(VBOX_WITH_EXTPACK_PUEL)
-  VBoxDDR0_SOURCES      += \
-  	Bus/DevPciRaw.cpp
- endif
-
  ifdef VBOX_WITH_AHCI
   VBoxDDR0_DEFS         += VBOX_WITH_AHCI IN_AHCI_R0
   VBoxDDR0_SOURCES      += \
@@ -1348,11 +1336,9 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
  #
  ServicesR0_TEMPLATE  = VBoxR0
  ServicesR0_DEFS      = VBOX_IN_VMM IN_INTNET_R0 IN_RT_R0 $(VMM_COMMON_DEFS) \
- 	$(if $(VBOX_WITH_PCI_PASSTHROUGH),IN_PCIRAW_R0,) \
  	$(if $(VBOX_WITH_NAT_SERVICE),VBOX_WITH_NAT_SERVICE,)
  ServicesR0_SOURCES   = \
  	Network/SrvIntNetR0.cpp
- #        $(if $(VBOX_WITH_PCI_PASSTHROUGH),Bus/SrvPciRawR0.cpp,)
  Network/SrvIntNetR0.cpp_CXXFLAGS := $(if-expr $(KBUILD_TARGET) == "win",,$(VBOX_GCC_Wno-array_bounds))
 
 
@@ -1449,28 +1435,6 @@ endif # !VBOX_ONLY_EXTPACKS && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SUPPOR
 
 
 if defined(VBOX_WITH_EXTPACK) && defined(VBOX_WITH_EXTPACK_PUEL) && defined(VBOX_WITH_EXTPACK_PUEL_BUILD) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SUPPORTED_HOST_ARCHS))" != ""
- if defined(VBOX_WITH_PCI_PASSTHROUGH_IMPL)
-  DLLS += VBoxPciRawR3
-  VBoxPciRawR3_TEMPLATE     = VBoxR3ExtPackPuel
-  VBoxPciRawR3_SOURCES      = Bus/DevPciRaw.cpp
-  $(call VBOX_SET_VER_INFO_DLL,VBoxPciRawR3,PUEL Extension Pack - PCI Passthrough Device)
-
-  DLLS += VBoxPciRawDrv
-  VBoxPciRawDrv_TEMPLATE    = VBoxR3ExtPackPuel
-  VBoxPciRawDrv_SOURCES     = Bus/DrvPciRaw.cpp
-  $(call VBOX_SET_VER_INFO_DLL,VBoxPciRawDrv,PUEL Extension Pack - PCI Passthrough Driver)
-
-  $(if-expr defined(VBOX_WITH_VBOXR0_AS_DLL),DLLS,SYSMODS) += VBoxPciRawR0
-  VBoxPciRawR0_TEMPLATE     = VBoxR0ExtPackPuel
-  VBoxPciRawR0_SOURCES      = Bus/DevPciRaw.cpp
-  if defined(VBOX_WITH_R0_MODULES) && !defined(VBOX_WITH_MINIMAL_R0)
-   $(call VBOX_SET_VER_INFO_R0,VBoxPciRawR0,PUEL Extension Pack - PCI Passthrough Driver$(COMMA) ring-0)
-  endif
-
-  Bus/DevPciRaw.cpp_INCS    = Bus
- endif
-
-
  #
  # The Intel PXE ROM.
  #

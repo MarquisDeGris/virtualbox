@@ -67,12 +67,6 @@ if   !defined(VBOX_ONLY_DOCS) \
   include $(PATH_SUB_CURRENT)/$(KBUILD_TARGET)/Makefile.kmk
  endif
 
- if1of ($(KBUILD_TARGET), linux)
-  ifdef VBOX_WITH_PCI_PASSTHROUGH
-   include $(PATH_SUB_CURRENT)/VBoxPci/Makefile.kmk
-  endif
- endif
-
 endif # !defined(VBOX_ONLY_DOCS) && !defined(VBOX_ONLY_VALIDATIONKIT)
 
 # Let kBuild generate the rules.

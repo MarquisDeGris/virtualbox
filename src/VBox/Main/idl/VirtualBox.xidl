@@ -6631,52 +6631,8 @@
   </interface>
 
   <interface
-    name="IPCIAddress" extends="$unknown"
-    uuid="c984d15f-e191-400b-840e-970f3dad7296"
-    wsmap="managed"
-    rest="managed"
-    >
-
-    <desc>
-      Address on the PCI bus.
-    </desc>
-
-    <attribute name="bus" type="short">
-      <desc>
-        Bus number.
-      </desc>
-    </attribute>
-
-    <attribute name="device" type="short">
-      <desc>
-        Device number.
-      </desc>
-    </attribute>
-
-    <attribute name="devFunction" type="short">
-      <desc>
-        Device function number.
-      </desc>
-    </attribute>
-
-    <method name="asLong">
-      <desc>
-        Convert PCI address into long.
-      </desc>
-      <param name="result" type="long" dir="return" />
-    </method>
-
-    <method name="fromLong">
-      <desc>
-        Make PCI address from long.
-      </desc>
-      <param name="number" type="long" dir="in" />
-    </method>
-  </interface>
-
-  <interface
     name="IPCIDeviceAttachment" extends="$unknown"
-    uuid="91f33d6f-e621-4f70-a77e-15f0e3c714d5"
+    uuid="989d0e07-fac7-42ed-9709-8fbe2a52bd64"
     wsmap="struct"
     rest="managed"
     >
@@ -6697,15 +6653,153 @@
       </desc>
     </attribute>
 
-    <attribute name="hostAddress" type="long" readonly="yes">
+    <attribute name="hostAddress" type="unsigned long" readonly="yes">
       <desc>
         Address of device on the host, applicable only to host devices.
       </desc>
     </attribute>
 
-    <attribute name="guestAddress" type="long" readonly="yes">
+    <attribute name="guestAddress" type="unsigned long" readonly="yes">
       <desc>
         Address of device in the guest.
+      </desc>
+    </attribute>
+
+  </interface>
+
+  <!--
+  // IHostPCIDevice
+  /////////////////////////////////////////////////////////////////////////
+  -->
+
+  <enum
+    name="PCIDeviceState"
+    uuid="d56b0c97-a4ab-4663-afa0-d69685dca57a"
+    >
+    <desc>
+      PCI device state. This enumeration represents all possible states
+      of the PCI device physically attached to the host computer regarding
+      its state on the host computer and availability to guest computers.
+
+      <see><link to="IHostPCIDevice"/></see>
+    </desc>
+
+    <const name="NotSupported"          value="0">
+      <desc>
+        Not supported by the VirtualBox server, not available to guests.
+      </desc>
+    </const>
+    <const name="Unavailable"           value="1">
+      <desc>
+        Being used by the host computer exclusively,
+        not available to guests.
+      </desc>
+    </const>
+    <const name="Busy"                  value="2">
+      <desc>
+        Being used by the host computer, potentially available to guests.
+
+        <note>
+          This is currently not being implemented, as it would require
+          being able to detach the currently used driver on the host,
+          and reconfigure the device to be available for the guest.
+        </note>
+      </desc>
+    </const>
+    <const name="AccessDenied"          value="3">
+      <desc>
+        Access to the device is denied due to insufficient permissions.
+      </desc>
+    </const>
+    <const name="Available"             value="4">
+      <desc>
+        Not used by the host computer, available to guests (the host computer
+        can also start using the device at any time).
+      </desc>
+    </const>
+    <const name="Captured"              value="5">
+      <desc>
+        Captured by one of the guest computers, not available
+        to anybody else.
+      </desc>
+    </const>
+  </enum>
+
+  <interface
+    name="IHostPCIDevice" extends="$unknown"
+    uuid="7ee979fe-790a-405a-abff-059f942bb8e5"
+    wsmap="managed"
+    rest="managed"
+    reservedAttributes="4"
+    >
+    <desc>
+      The IHostPCIDevice interface represents a physical host PCI device which
+      may be available for passthrough to a VM.
+
+      A collection of objects implementing this interface is stored in the
+      <link to="IHost::PCIDevices"/> attribute which lists all accessible PCI
+      devices of the host.
+    </desc>
+
+    <attribute name="state" type="PCIDeviceState" readonly="yes">
+      <desc>The PCI device state</desc>
+    </attribute>
+
+    <attribute name="vendorId" type="unsigned short" readonly="yes">
+      <desc>Vendor ID.</desc>
+    </attribute>
+
+    <attribute name="deviceId" type="unsigned short" readonly="yes">
+      <desc>Device ID.</desc>
+    </attribute>
+
+    <attribute name="revisionId" type="unsigned short" readonly="yes">
+      <desc>Revision ID.</desc>
+    </attribute>
+
+    <attribute name="deviceClass" type="unsigned long" readonly="yes">
+      <desc>
+        PCI device base class, sub class and interface bytes lumped into
+        one integer.
+      </desc>
+    </attribute>
+
+    <attribute name="manufacturer" type="wstring" readonly="yes">
+      <desc>Manufacturer string.</desc>
+    </attribute>
+
+    <attribute name="product" type="wstring" readonly="yes">
+      <desc>Product string.</desc>
+    </attribute>
+
+    <attribute name="domain" type="unsigned short" readonly="yes">
+      <desc>
+        PCI domain number this device belongs to.
+      </desc>
+    </attribute>
+
+    <attribute name="bus" type="unsigned short" readonly="yes">
+      <desc>
+        Bus number the device is attached to.
+      </desc>
+    </attribute>
+
+    <attribute name="device" type="unsigned short" readonly="yes">
+      <desc>
+        Device number the device is attached to.
+      </desc>
+    </attribute>
+
+    <attribute name="devFunction" type="unsigned short" readonly="yes">
+      <desc>
+        Device function number.
+      </desc>
+    </attribute>
+
+    <attribute name="address" type="wstring" readonly="yes">
+      <desc>
+        Host-specific address of the device, uniquely
+        identifying a physically connected device in the system.
       </desc>
     </attribute>
 
@@ -9377,10 +9471,10 @@
           Hardware or host OS doesn't allow PCI device passthrough.
         </result>
       </desc>
-      <param name="hostAddress" type="long" dir="in">
+      <param name="hostAddress" type="unsigned long" dir="in">
         <desc>Address of the host PCI device.</desc>
       </param>
-      <param name="desiredGuestAddress" type="long" dir="in">
+      <param name="desiredGuestAddress" type="unsigned long" dir="in">
         <desc>Desired position of this device on guest PCI bus.</desc>
       </param>
       <param name="tryToUnbind" type="boolean" dir="in">
@@ -9411,7 +9505,7 @@
           Hardware or host OS doesn't allow PCI device passthrough.
         </result>
       </desc>
-      <param name="hostAddress" type="long" dir="in">
+      <param name="hostAddress" type="unsigned long" dir="in">
         <desc>Address of the host PCI device.</desc>
       </param>
     </method>
@@ -12596,7 +12690,7 @@
 
   <interface
     name="IHost" extends="$unknown"
-    uuid="d5dcece0-b202-4416-a138-03502784cc07"
+    uuid="6bc99ee3-0fd2-43a3-892e-d290a5f7a117"
     wsmap="managed"
     rest="managed"
     reservedMethods="6" reservedAttributes="12"
@@ -12708,6 +12802,19 @@
 
     <attribute name="hostDrives" type="IHostDrive" readonly="yes" safearray="yes">
       <desc>List of the host drive available to use in the VirtualBox.</desc>
+    </attribute>
+
+    <attribute name="PCIDevices" type="IHostPCIDevice" readonly="yes" safearray="yes">
+      <desc>
+        List of PCI devices currently attached to the host.
+        Once a new device is physically attached to the host computer,
+        it appears in this list and remains there until detached.
+
+        <note>
+          If PCI passthrough functionality is not available on the host,
+          this method will set the result code to @c E_NOTIMPL.
+        </note>
+      </desc>
     </attribute>
 
     <method name="getProcessorSpeed">

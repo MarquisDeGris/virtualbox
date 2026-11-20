@@ -638,9 +638,6 @@ endif
 VBOX_WITH_AUDIO_DEBUG = 1
 # Enables the audio endpoint detection on Windows hosts.
 VBOX_WITH_AUDIO_MMNOTIFICATION_CLIENT = 1
-# Enable PCI passthrough support.
-# (disabled with 6.1, since it's not complete/useful enough)
-VBOX_WITH_PCI_PASSTHROUGH =
 # Enable statically linked dbus support.
 if1of ($(KBUILD_TARGET), linux solaris)
  VBOX_WITH_DBUS = 1
@@ -731,10 +728,6 @@ ifdef VBOX_WITH_USB
 endif
 ifdef VBOX_WITH_EHCI
  VBOX_WITH_EHCI_IMPL = 1
-endif
-ifdef VBOX_WITH_PCI_PASSTHROUGH
- ## @bugref{9218}: Disabled awaiting conversion of the device to new PDM device style.
- #VBOX_WITH_PCI_PASSTHROUGH_IMPL = 1
 endif
 ifndef VBOX_WITHOUT_HOSTWEBCAM
  VBOX_WITH_USB_VIDEO_IMPL = 1
@@ -838,6 +831,13 @@ if1of ($(KBUILD_TARGET).$(KBUILD_TARGET_ARCH), solaris.amd64 win.amd64)
 endif
 # Whether to generate a database of USB vendor IDs and device IDs into VBoxSVC.
 VBOX_WITH_MAIN_USB_ID_DATABASE = 1
+# Whether to generate a database of PCI vendor IDs and device IDs into VBoxSVC.
+# The list it is generated from (pci.ids of the pciutils project) is not part
+# of this branch.  With a copy at the place below the database is generated,
+# without one VBoxSVC has no names for the PCI devices of the host.
+ifneq ($(wildcard $(PATH_ROOT)/src/VBox/Main/src-server/pci.ids),)
+ VBOX_WITH_MAIN_PCI_ID_DATABASE = 1
+endif
 # Whether to enable error message translation in Main.
 ifndef VBOX_ONLY_BUILD
  VBOX_WITH_MAIN_NLS = 1
@@ -1548,7 +1548,6 @@ endif
 ifdef VBOX_OSE
  VBOX_WITH_EXTPACK_PUEL =
  VBOX_WITH_EXTPACK_PUEL_BUILD =
- VBOX_WITH_PCI_PASSTHROUGH_IMPL =
  VBOX_WITH_OS2_ADDITIONS_BIN =
  VBOX_WITH_LIBSSH =
  # not yet

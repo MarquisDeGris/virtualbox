@@ -56,9 +56,6 @@
 #endif
 #include "VMMDev.h"
 #include "Global.h"
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
-# include "PCIRawDevImpl.h"
-#endif
 
 // generated header
 #include "SchemaDefs.h"
@@ -4795,7 +4792,7 @@ int Console::i_configNetworkCtrls(ComPtr<IMachine> pMachine, ComPtr<IPlatformPro
             else /* Platforms other than x86 just use the auto assignment, no slot swap hack there. */
                 iPCIDeviceNo = -1;
 
-            PCIBusAddress PCIAddr = PCIBusAddress(0, iPCIDeviceNo, 0);
+            PCIBusAddress PCIAddr = PCIBusAddress(0, 0, iPCIDeviceNo, 0);
             hrc = pBusMgr->assignPCIDevice(pszAdapterName, pInst, PCIAddr);                 H();
 
             InsertConfigNode(pInst, "Config", &pCfg);

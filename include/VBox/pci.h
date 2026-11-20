@@ -717,8 +717,7 @@ typedef uint32_t PCIPASID;
  */
 struct PCIBusAddress
 {
-    /** @todo: think if we'll need domain, which is higher
-     *  word of the address. */
+    uint16_t mu16Domain;
     int  miBus;
     int  miDevice;
     int  miFn;
@@ -728,39 +727,45 @@ struct PCIBusAddress
         clear();
     }
 
-    PCIBusAddress(int iBus, int iDevice, int iFn)
+    PCIBusAddress(uint16_t u16Domain, int iBus, int iDevice, int iFn)
     {
-        init(iBus, iDevice, iFn);
+        init(u16Domain, iBus, iDevice, iFn);
     }
 
-    PCIBusAddress(int32_t iAddr)
+    PCIBusAddress(uint32_t uAddr)
     {
         clear();
-        fromLong(iAddr);
+        fromLong(uAddr);
     }
 
     PCIBusAddress& clear()
     {
+        mu16Domain = UINT16_MAX;
         miBus = miDevice = miFn = -1;
         return *this;
     }
 
-    void init(int iBus, int iDevice, int iFn)
+    void init(uint16_t u16Domain, int iBus, int iDevice, int iFn)
     {
-        miBus    = iBus;
-        miDevice = iDevice;
-        miFn     = iFn;
+        mu16Domain = u16Domain;
+        miBus      = iBus;
+        miDevice   = iDevice;
+        miFn       = iFn;
     }
 
     void init(const PCIBusAddress &a)
     {
-        miBus    = a.miBus;
-        miDevice = a.miDevice;
-        miFn     = a.miFn;
+        mu16Domain = a.mu16Domain;
+        miBus      = a.miBus;
+        miDevice   = a.miDevice;
+        miFn       = a.miFn;
     }
 
     bool operator<(const PCIBusAddress &a) const
     {
+        if (mu16Domain < a.mu16Domain)
+            return true;
+
         if (miBus < a.miBus)
             return true;
 
@@ -784,54 +789,56 @@ struct PCIBusAddress
 
     bool operator==(const PCIBusAddress &a) const
     {
-        return     (miBus    == a.miBus)
-                && (miDevice == a.miDevice)
-                && (miFn     == a.miFn);
+        return     (mu16Domain == a.mu16Domain)
+                && (miBus      == a.miBus)
+                && (miDevice   == a.miDevice)
+                && (miFn       == a.miFn);
     }
 
     bool operator!=(const PCIBusAddress &a) const
     {
-        return     (miBus    != a.miBus)
-                || (miDevice != a.miDevice)
-                || (miFn     != a.miFn);
+        return     (mu16Domain != a.mu16Domain)
+                || (miBus      != a.miBus)
+                || (miDevice   != a.miDevice)
+                || (miFn       != a.miFn);
     }
 
     bool valid() const
     {
-        return (miBus    != -1)
-            && (miDevice != -1)
-            && (miFn     != -1);
+        return    (mu16Domain != UINT16_MAX)
+               && (miBus    != -1)
+               && (miDevice != -1)
+               && (miFn     != -1);
     }
 
-    int32_t asLong() const
+    uint32_t asLong() const
     {
         Assert(valid());
-        return (miBus << 8) | (miDevice << 3) | miFn;
+        return ((uint32_t)mu16Domain << 16) | ((uint32_t)miBus << 8) | ((uint32_t)miDevice << 3) | (uint32_t)miFn;
     }
 
-    PCIBusAddress& fromLong(int32_t value)
+    PCIBusAddress& fromLong(uint32_t value)
     {
-        miBus = (value >> 8) & 0xff;
-        miDevice = (value & 0xff) >> 3;
-        miFn = (value & 7);
+        mu16Domain = (uint16_t)(value >> 16);
+        miBus      = (value >> 8) & 0xff;
+        miDevice   = (value & 0xff) >> 3;
+        miFn       = (value & 7);
         return *this;
     }
 
     /** Create string representation of this PCI address. */
     bool format(char* szBuf, size_t cBufSize)
     {
-        if (cBufSize < (/* bus */ 2 + /* : */ 1 + /* device */ 2 + /* . */ 1 + /* function*/ 1 + /* \0 */1))
+        if (cBufSize < (/* domain */ 4 + /* : */ 1 + /* bus */ 2 + /* : */ 1 + /* device */ 2 + /* . */ 1 + /* function*/ 1 + /* \0 */1))
             return false;
 
         if (valid())
-            RTStrPrintf(szBuf, cBufSize, "%02x:%02x.%01x", miBus, miDevice, miFn);
+            RTStrPrintf(szBuf, cBufSize, "%04x:%02x:%02x.%01x", mu16Domain, miBus, miDevice, miFn);
         else
             RTStrPrintf(szBuf, cBufSize, "%s", "<bad>");
 
         return true;
     }
-
-    static const size_t cMaxAddrSize = 10;
 };
 
 #endif /* __cplusplus && IN_RING3 */

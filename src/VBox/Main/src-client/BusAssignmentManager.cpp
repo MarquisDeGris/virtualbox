@@ -678,6 +678,7 @@ HRESULT BusAssignmentManager::State::autoAssign(const char *pszName, PCIBusAddre
     {
         const DeviceAssignmentRule *rule = matchingRules[iRule];
 
+        Address.mu16Domain = 0;
         Address.miBus = rule->iBus;
         Address.miDevice = rule->iDevice;
         Address.miFn = rule->iFn;
@@ -766,6 +767,16 @@ DECLINLINE(HRESULT) InsertConfigNode(PCVMMR3VTABLE pVMM, PCFGMNODE pNode, const 
 }
 
 
+DECLINLINE(HRESULT) InsertConfigString(PCVMMR3VTABLE pVMM, PCFGMNODE pNode, const char *pcszName, const char *pcszValue)
+{
+    int vrc = pVMM->pfnCFGMR3InsertString(pNode, pcszName, pcszValue);
+    if (RT_FAILURE(vrc))
+        return E_INVALIDARG;
+
+    return S_OK;
+}
+
+
 HRESULT BusAssignmentManager::assignPCIDeviceImpl(const char *pszDevName,
                                                   PCFGMNODE pCfg,
                                                   PCIBusAddress& GuestAddress,
@@ -836,6 +847,19 @@ HRESULT BusAssignmentManager::assignPCIDeviceImpl(const char *pszDevName,
                 PCFGMNODE pInst;
                 InsertConfigNode(pVMM, pBridges, Utf8StrFmt("%d", iBridge).c_str(), &pInst);
                 InsertConfigInteger(pVMM, pInst, "Trusted", 1);
+
+                /* Need to make the bridge PCI express if a host PCIe device is passed through. */
+                if (HostAddress.valid())
+                {
+                    PCFGMNODE pBridgeCfg;
+                    hrc = InsertConfigNode(pVMM, pInst, "Config", &pBridgeCfg);
+                    if (FAILED(hrc)) return hrc;
+                    hrc = InsertConfigInteger(pVMM, pBridgeCfg, "ExpressEnabled", 1);
+                    if (FAILED(hrc)) return hrc;
+                    hrc = InsertConfigString(pVMM, pBridgeCfg, "ExpressPortType", "RootCmplxRootPort");
+                    if (FAILED(hrc)) return hrc;
+                }
+
                 hrc = assignPCIDevice(pState->mpszBridgeName, pInst);
                 if (FAILED(hrc))
                     return hrc;

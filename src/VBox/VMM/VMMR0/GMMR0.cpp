@@ -173,7 +173,6 @@
 *   Header Files                                                                                                                 *
 *********************************************************************************************************************************/
 #define LOG_GROUP LOG_GROUP_GMM
-#include <VBox/rawpci.h>
 #include <VBox/vmm/gmm.h>
 #include "GMMR0Internal.h"
 #include <VBox/vmm/vmcc.h>
