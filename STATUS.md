@@ -13,7 +13,7 @@ Updated: 2026-11-20
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
-| Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. The one for `pci-passthrough-hotplug-7.1-kvm` follows the run which is under way |
+| Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -43,7 +43,8 @@ there will not be later. Nothing is written down as tested on hardware
 because of that. First of it: the same work on the maintenance lines 7.2
 and 7.1, see "The maintenance branches". On those lines the simulation
 runs with the KVM backend of Cyberus Technology, and every check of it
-passes on both (runs 253 and 254, 150 checks each): the Linux guest
+passes on both (runs 253 and 254, 150 checks each, and run 258 with
+155 on 7.1): the Linux guest
 with the device, and Windows, which takes a drive of the host in the
 hot-plug capable slot, lets go of it and takes it again. In one earlier
 run Windows stopped after letting go of the drive, which is not
@@ -849,6 +850,35 @@ on 7.2 in the run before.
   asked). That part has now passed in three runs out of four, on both
   branches; the stop of run 251 has not come again and is not explained.
 
+**Run 258** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b`, 42 minutes, Intel Xeon
+Platinum 8573C): the 7.1 branch with what came after run 254, the fixes
+to the NAT library and the change about the extra data of an appliance,
+and the first run of the check with a VM behind NAT. **155 passed, none
+failed, none skipped.**
+
+- It builds (10 minutes for all of the tree).
+- **A VM behind NAT**: the guest has the virtio network adapter, gets
+  the address 10.0.2.15 from the NAT engine, its gateway answers a ping,
+  and the file of two megabytes it fetches through the gateway from the
+  runner has the right checksum. That goes through the NAT library with
+  the fixes and through the VirtIO network device with what was taken
+  over from 7.2. The VM has to be allowed to reach the loopback
+  interface of its host for it (`--nat-localhostreachable1 on`), which a
+  new VM is not; the check sets that since a correction made while the
+  run was building.
+- The 67 checks inside the virtual machine standing in for a host pass,
+  the 27 with Windows on the runner pass (Windows installs in 422
+  seconds, goes on after its saved state is loaded, shuts down on the
+  power button), and **Windows where the drive is passes**, all 35
+  (Windows starts in 243 seconds, lets go of the drive 6 seconds after
+  being asked). That part has now passed in four runs out of five on the
+  two branches; the stop of run 251 has not come again.
+- Not gone through by this run: the import of an appliance (a check for
+  it was written while the run was under way and comes with the next
+  one), and the commit about the size of a custom ACPI table, which came
+  after it.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -863,9 +893,12 @@ places merged by hand), the same two commits about the register, and the
 builds since run 249. Since run 254 it also has the change to the
 backend about the Hyper-V registers in a saved state and what was taken
 over from the 7.2 branch, and every check of the simulation passes on
-it. Windows has had the drive in the slot, out and in again in runs 250
-and 254 and stopped after the first removal in run 251, which is not
-understood yet.
+it. Windows has had the drive in the slot, out and in again in runs 250,
+254 and 258 and stopped after the first removal in run 251, which is not
+understood yet. Run 258 had the head `1bfd163b`, with the fixes to the
+NAT library and the change about the extra data of an appliance; one
+commit came after it (the size of a custom ACPI table). Merge request
+[#4](https://github.com/MarquisDeGris/virtualbox/pull/4).
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -926,7 +959,8 @@ which is about code a Linux host runs was then tried on 7.1:
   (urgent data of TCP, the header length of reassembled IP fragments,
   the length of IPv6 packets, OEM commands of NC-SI, the DHCPv6 reply).
   Built in run 256, where the copy of the library in the tree is what
-  gets compiled, without a warning in a file which was changed.
+  gets compiled, without a warning in a file which was changed, and run
+  with a VM behind NAT in run 258.
 - One more from Main, found on a second pass through what had been set
   aside by its subject line: r175077, with which the extra data of an
   appliance is imported only when the new import option `KeepExtraData`
@@ -980,7 +1014,8 @@ which is about code a Linux host runs was then tried on 7.1:
 - For trying it: the simulation has a VM with a virtio network adapter
   behind NAT since then (an address by DHCP, a ping to the gateway, a
   file fetched from the runner and compared), which goes through the
-  NAT library and the VirtIO network device. A branch without an
+  NAT library and the VirtIO network device; it passes on the branch
+  with the KVM backend in run 258. A branch without an
   execution engine cannot run VMs in the workflow, so what is on
   `backports-7.1` is run as part of `pci-passthrough-hotplug-7.1-kvm`,
   which has the same commits.
@@ -1813,5 +1848,6 @@ slot.
 | 255 | `backports-7.1` @ `0bf9d4e6` | baseline, exploring | cancelled in its first minute | By mistake: the new way of reading the processor of the runner through the API was tried on this run with the option which cancels a run on the wrong kind of processor. Nothing was built. It showed that the reading and the cancelling work |
 | 256 | `backports-7.1` @ `0bf9d4e6` | baseline, exploring | passed | 10 minutes. The 7.1 branch with the five commits taken over from the 7.2 line and nothing of the passthrough work builds from nothing (7 minutes 22 seconds), every part is linked. The copy of libslirp in the tree is compiled, without a warning in the files which were changed. The first run of the workflow with the steps which tell the processor of the runner |
 | 257 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed (nothing was built) | One minute. The workflow takes the revision of the product from the newest commit of upstream it finds among the newest 50 of the branch, and this branch has 51 of its own since the last ones were merged in. A limit of the workflow, raised to 300 after it; nothing about the code |
+| 258 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed | 42 minutes, Intel Xeon Platinum 8573C. The same head as run 257. Every check passes, 155 of them: the five new ones with a VM behind NAT (address, ping, a file fetched through the NAT library with the fixes taken over from 7.2), the Linux guest with the device, Windows with the empty slot, and Windows where the drive is, which passes for the fourth time in five runs. See "Run 258" |
 
 Run numbers are those GitHub shows for the `build` workflow.
