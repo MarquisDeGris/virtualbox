@@ -43,8 +43,8 @@ there will not be later. Nothing is written down as tested on hardware
 because of that. First of it: the same work on the maintenance lines 7.2
 and 7.1, see "The maintenance branches". On those lines the simulation
 runs with the KVM backend of Cyberus Technology, and every check of it
-passes on both (runs 253 and 254, 150 checks each, and run 258 with
-155 on 7.1): the Linux guest
+passes on both (runs 253 and 254, 150 checks each, and on 7.1 run 258
+with 155 and run 259 with 172): the Linux guest
 with the device, and Windows, which takes a drive of the host in the
 hot-plug capable slot, lets go of it and takes it again. In one earlier
 run Windows stopped after letting go of the drive, which is not
@@ -879,6 +879,83 @@ failed, none skipped.**
   one), and the commit about the size of a custom ACPI table, which came
   after it.
 
+**Run 259** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.1-kvm` @ `9e858a53`, 57 minutes, Intel Xeon
+6975P-C): the first run with the size check in the ACPI device, with the
+testcases of the host services, with an appliance exported and imported,
+and with Windows in a VM with a TPM 2.0. **172 passed, none failed, none
+skipped.** One testcase outside of the simulation did not run through,
+see the second point.
+
+- It builds (7 minutes on top of the cached build of upstream's 7.1
+  branch).
+- **The testcases of the host services**: seven of eight pass
+  (`tstHGCMSvc`, `tstGuestPropSvc`, `tstClipboardServiceHost`,
+  `tstClipboardServiceImpl`, `tstSharedFolderService`, `tstShflCase`,
+  `tstShflSizes`); the changes taken over from 7.2 had extended two of
+  them. The eighth, `tstGuestControlSvc`, ended in its first step with a
+  segmentation fault. That is the testcase and not the service: it
+  connects its client without the memory in which the service keeps the
+  state of a client, it is the same file on upstream's 7.1, 7.2 and
+  development branches, and the test driver of upstream's validation kit
+  has it on the list of testcases it leaves out. The step of the run
+  which reports these testcases shows as failed for it, the only step
+  which does. The testcase was rewritten after the run, see below.
+- **An appliance exported and imported** (8 checks): the VM of the
+  simulation is given a serial port which writes to a file, a shared
+  folder and an extra data item, and is exported. `VBoxManage import`
+  warns that the setting of the serial port is not imported; the VM
+  which was imported has no file for its serial port, no shared folder
+  and none of the extra data; imported with `--options KeepExtraData` it
+  has the extra data; and it boots the guest from the disk which was
+  imported. That goes through the changes to the import in Main and
+  through the VMDK code, both with what was taken over.
+- **Windows in a VM with a TPM 2.0** (9 checks): the installed Windows
+  Server 2025 starts with the TPM added (41 seconds), reports a TPM of
+  specification 2.0 which is enabled and activated, runs it with its own
+  driver without a problem (`ACPI\MSFT0101`), goes on after a saved
+  state is loaded and shuts down. This is the TPM device of 7.1 as it
+  is, with the command buffer interface which 7.2 has reworked.
+- What passed before passes: the VM behind NAT, the 67 checks inside the
+  virtual machine standing in for a host, the 27 with Windows on the
+  runner (Windows installs in 329 seconds), and **Windows where the
+  drive is**, all 35 (Windows starts in 429 seconds, lets go of the
+  drive 7 seconds after being asked). That part has now passed in five
+  runs out of six on the two branches.
+- The size check in the ACPI device is built and every VM of the run
+  starts with it. No VM here names a table as a file, so the check
+  itself was not gone through.
+- **A correction.** The build without the 2D video acceleration for
+  guests is nothing new: `configure --build-headless`, which the
+  workflow and the recipe in [INSTALL.md](INSTALL.md) use, switches it
+  off on 7.1 together with OpenGL, and has done so in every run. What
+  these notes and the description of merge request 3 said before this
+  run, that the runs so far had it in, was wrong and is taken back. The
+  line in `LocalConfig.kmk` says the same once more and makes a
+  difference only for a build with the user interface, which nobody has
+  made here.
+
+After run 259, not built yet:
+
+- `tstGuestControlSvc` rewritten, as commit 7 on `backports-7.1` and on
+  the two branches which carry its commits. It gives its client the
+  memory the service asks for, and tests messages of the host which the
+  service has to refuse, a client fetching a message with
+  `GUEST_MSG_PEEK_NOWAIT` and `GUEST_MSG_GET` (what it is told, and that
+  it gets nothing when it asks for another message, with another number
+  of parameters, with a parameter of another type or with a buffer which
+  is too small), and a client fetching it the way of older guests, which
+  is the code the change taken over from 7.2 is in. Written by reading
+  the service, without a compiler; the next run is its first build.
+- The step of the workflow runs more of the testcases the tree has:
+  three for the image formats (`tstVD-2`, `tstVDIo`, `tstVDSnap`), and
+  of those which were built all along and not run `tstAudioMixBuffer`,
+  `tstUsbMouse`, `tstIntNetR0`, `tstGuestControlMockHGCM` and
+  `tstClipboardTransfers`. The seven which passed in run 259 count: the
+  last step of a run fails if one of them does. The others are tried
+  first: the run tells what they do and does not fail for them, until
+  they have been seen passing.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -894,11 +971,11 @@ builds since run 249. Since run 254 it also has the change to the
 backend about the Hyper-V registers in a saved state and what was taken
 over from the 7.2 branch, and every check of the simulation passes on
 it. Windows has had the drive in the slot, out and in again in runs 250,
-254 and 258 and stopped after the first removal in run 251, which is not
-understood yet. Run 258 had the head `1bfd163b`, with the fixes to the
-NAT library and the change about the extra data of an appliance; one
-commit came after it (the size of a custom ACPI table). Merge request
-[#4](https://github.com/MarquisDeGris/virtualbox/pull/4).
+254, 258 and 259 and stopped after the first removal in run 251, which
+is not understood yet. Run 259 had the head `9e858a53`, with everything
+taken over from 7.2 and the size check in the ACPI device; one commit
+came after it, which changes a testcase only (`tstGuestControlSvc`).
+Merge request [#4](https://github.com/MarquisDeGris/virtualbox/pull/4).
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -993,10 +1070,12 @@ which is about code a Linux host runs was then tried on 7.1:
     why 7.1 with everything on these branches is still not what 7.2 is.
   - Taken: one check in the ACPI device, of the size of a table which
     the configuration of a VM names as a file, which on 7.1 was made and
-    not acted on; and the 2D video acceleration for guests, which 7.2 no
-    longer has at all, is left out of the build of the 7.1 branches by a
-    switch (`VBOX_WITH_VIDEOHWACCEL`), see [INSTALL.md](INSTALL.md).
-    Built for the first time in the run after 258.
+    not acted on. Built in run 259.
+  - The 2D video acceleration for guests, which 7.2 no longer has at
+    all, is not in what is built here: `configure --build-headless`
+    leaves it out on 7.1, in every run so far. `LocalConfig.kmk` has the
+    switch (`VBOX_WITH_VIDEOHWACCEL`) as well since run 259, for whoever
+    builds with the user interface; see [INSTALL.md](INSTALL.md).
 - The KVM backend of the two lines compared (2026-11-20): the version
   for 7.1 is of 2025-11-03, the one for 7.2 of 2026-10-21, and its
   authors have published nothing newer. What the two patches add and
@@ -1005,12 +1084,27 @@ which is about code a Linux host runs was then tried on 7.1:
   a blank in a makefile. So the backend for 7.1 lacks no change which
   the one for 7.2 has, and the three changes of this work to the backend
   are on both branches.
-- The same without the passthrough work: branch `backports-7.1`, five
+- The same without the passthrough work: branch `backports-7.1`, seven
   commits on upstream's 7.1 branch (the 25 changes, r175241, the result
-  of `Console::i_saveState`, the NAT library, r175077), which is merge
-  request [#3](https://github.com/MarquisDeGris/virtualbox/pull/3) in
-  the fork. It builds from nothing (run 256). Who is on 7.1 and does not want the passthrough
-  work can take these alone.
+  of `Console::i_saveState`, the NAT library, r175077, the size check in
+  the ACPI device, and the testcase of the guest control service), which
+  is merge request [#3](https://github.com/MarquisDeGris/virtualbox/pull/3)
+  in the fork. It builds from nothing with its first five commits (run
+  256); the sixth is built as part of the branch with the KVM backend
+  (run 259), the seventh not yet. Who is on 7.1 and does not want the
+  passthrough work can take these alone.
+- What has gone through what, on the branch with the KVM backend: the
+  NAT library and the VirtIO network device with a VM behind NAT (runs
+  258 and 259); the import of appliances with a VM exported and imported
+  (run 259); the guest properties, the shared clipboard, the shared
+  folders and the code the services share with the testcases of the tree
+  (run 259); VDI with the disk of every VM of the simulation, VMDK with
+  the appliance. Not gone through by anything here: the changes to drag
+  and drop, to the host channel, to the audio devices, to VUSB and the
+  USB capture, to the internal network, to GPT and ISO, and the guest
+  control service before its testcase is built. The testcases the
+  workflow tries from its next run on reach some of that code (the audio
+  mixing buffer, the internal network, the image formats).
 - For trying it: the simulation has a VM with a virtio network adapter
   behind NAT since then (an address by DHCP, a ping to the gateway, a
   file fetched from the runner and compared), which goes through the
@@ -1545,15 +1639,16 @@ harness since WP5, saved states since the fourth part of WP6.
    Done since: `backports-7.1` builds (run 256), the 7.1 one has run
    with the NAT library and a VM with a network (run 258), and the
    three branches have their merge requests in the fork (#2, #3, #4).
-   Left, in this order: the run which is under way since 18:10 UTC on
-   2026-11-20 (the first with the size check in the ACPI device, without
-   the 2D video acceleration, with the testcases of the host services,
-   with an appliance exported and imported, and with Windows in a VM
-   with a TPM 2.0); the same checks once on the branch for 7.2; the
+   Run 259 was the first with the size check in the ACPI device, with
+   the testcases of the host services, with an appliance exported and
+   imported, and with Windows in a VM with a TPM 2.0: all 172 checks
+   pass. Left, in this order: a run on the 7.1 branch with the rewritten
+   testcase of the guest control service and the testcases the workflow
+   tries since; the same checks once on the branch for 7.2; the
    sanitizers on the branches without the backend; a run on an AMD
    processor, which no VM with a device has had on these branches yet.
-5. Windows where the drive is: passed in runs 250, 253, 254 and 258 and
-   stopped after the first removal in run 251, on the branches with the
+5. Windows where the drive is: passed in runs 250, 253, 254, 258 and 259
+   and stopped after the first removal in run 251, on the branches with the
    backend of Cyberus Technology, Intel processors. Every run on such a
    branch goes through it again and tells what the VM shows of the guest
    when it stops; until it is understood, the hardware test is where a
@@ -1658,7 +1753,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | The Windows guest which does not go on after a saved state is loaded, on the KVM backend of Cyberus Technology, is looked into after all, which takes back the decision of the same day | Reading the backend showed where it comes from in a few lines: it saves and loads the registers of the Hyper-V interface as the first virtual CPU has them, and the reference time starts anew in the VM a state is loaded into. A VM with an empty slot can be saved and loaded, which is part of this work, and Windows is the guest it is for |
 | 2026-11-20 | The branches for 7.1 take over from the 7.2 branch what upstream put there and not on 7.1, as far as it is about code a Linux host runs, applies, and can be built here; what was not taken is listed with the reason | 7.1 is the line this was asked for, upstream has ended its support, and its security updates since April 2026 are for 7.2 only. Nobody outside upstream can make 7.1 the equal of 7.2 in that, and the notes say so; what can be had by taking over single changes is had |
 | 2026-11-20 | The reworks which 7.2 has from 2025 and 7.1 never got (the buffers of USB requests, the command buffer interface of the TPM with the change to the VMM it needs, the E1000, the 3D graphics) are not ported to the branches for 7.1 | They are hundreds of lines each, depend on each other and on the VMM of 7.2, upstream itself did not take them to 7.1 while it supported it, and nothing here could show that a port of them is right. The notes name them as what separates 7.1 from 7.2, and who can choose takes 7.2 |
-| 2026-11-20 | The branches for 7.1 are built without the 2D video acceleration for guests (`VBOX_WITH_VIDEOHWACCEL` empty in `LocalConfig.kmk`) | The lines after 7.1 no longer have that code at all, a guest with a current Windows does not use it, and leaving it out is a switch of the build and no change to the source |
+| 2026-11-20 | The branches for 7.1 are built without the 2D video acceleration for guests (`VBOX_WITH_VIDEOHWACCEL` empty in `LocalConfig.kmk`) | The lines after 7.1 no longer have that code at all, a guest with a current Windows does not use it, and leaving it out is a switch of the build and no change to the source. Corrected after run 259: a headless build, which is what is built here, never had it; the switch is for a build with the user interface |
+| 2026-11-20 | The testcase of the guest control service, which cannot run as upstream has it, is rewritten on the branches for 7.1 instead of being taken off the list; and a testcase which is new to the workflow is tried for a run before it counts | The service is one of those the changes taken over from 7.2 touch, and nothing else here goes through it: no guest of the simulation has the Guest Additions. A testcase nobody has seen passing here may fail for the runner and not for the code, and a run which fails for that says the wrong thing |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -1857,5 +1953,6 @@ slot.
 | 256 | `backports-7.1` @ `0bf9d4e6` | baseline, exploring | passed | 10 minutes. The 7.1 branch with the five commits taken over from the 7.2 line and nothing of the passthrough work builds from nothing (7 minutes 22 seconds), every part is linked. The copy of libslirp in the tree is compiled, without a warning in the files which were changed. The first run of the workflow with the steps which tell the processor of the runner |
 | 257 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed (nothing was built) | One minute. The workflow takes the revision of the product from the newest commit of upstream it finds among the newest 50 of the branch, and this branch has 51 of its own since the last ones were merged in. A limit of the workflow, raised to 300 after it; nothing about the code |
 | 258 | `pci-passthrough-hotplug-7.1-kvm` @ `1bfd163b` | allsim, exploring | passed | 42 minutes, Intel Xeon Platinum 8573C. The same head as run 257. Every check passes, 155 of them: the five new ones with a VM behind NAT (address, ping, a file fetched through the NAT library with the fixes taken over from 7.2), the Linux guest with the device, Windows with the empty slot, and Windows where the drive is, which passes for the fourth time in five runs. See "Run 258" |
+| 259 | `pci-passthrough-hotplug-7.1-kvm` @ `9e858a53` | allsim, exploring | passed; one testcase outside of the simulation did not run | 57 minutes, Intel Xeon 6975P-C. With the size check in the ACPI device. Every check of the simulation passes, 172 of them: new are an appliance exported and imported (8) and Windows in a VM with a TPM 2.0 (9); Windows where the drive is passes for the fifth time in six runs. Seven of the eight testcases of the host services pass; `tstGuestControlSvc` ends in its first connect, as it does on every branch of upstream, and was rewritten after the run. See "Run 259" |
 
 Run numbers are those GitHub shows for the `build` workflow.

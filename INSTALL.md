@@ -92,9 +92,11 @@ which went on for five months after that release, and
 [STATUS.md](STATUS.md), "The 7.1 line and what the 7.2 line received
 after it", says what was taken over from 7.2 beyond that and what was
 not. Who can choose takes a branch for 7.2. The last name in the list for
-`LocalConfig.kmk` above is for 7.1: it leaves the 2D video acceleration
-for guests out of the build, which the lines after 7.1 no longer have at
-all and which a guest with a current Windows does not use.
+`LocalConfig.kmk` above is for 7.1: the 2D video acceleration for
+guests, which the lines after 7.1 no longer have at all and which a
+guest with a current Windows does not use. A headless build as above
+leaves it out by itself; the line keeps it out of a build with the user
+interface too, which nobody has made here.
 
 ## 1. Checklist: what has to be switched on
 

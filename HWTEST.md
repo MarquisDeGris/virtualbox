@@ -47,6 +47,13 @@ AMD.
   `VBoxManage modifyvm <vm> --vm-execution-engine native-api`.
 - A VM with the ICH9 chipset and EFI. Guests to try: a current Linux, and
   Windows 10 or 11.
+- Windows 11 asks for a TPM 2.0: `VBoxManage modifyvm <vm> --tpm-type 2.0`.
+  In the simulation Windows Server 2025 ran in a VM with the hot-plug
+  capable slot and that TPM: it used the TPM with its own driver, went
+  on after a saved state was loaded and shut down (run 259, on the
+  branch for 7.1 with the KVM backend, the slot being empty). A TPM in a
+  VM which has a device in the slot has not been tried anywhere, and
+  neither has Secure Boot, which Windows 11 asks for as well.
 - For a Windows guest: `VBoxManage modifyvm <vm> --paravirt-provider none`.
   With KVM VirtualBox cannot show a Windows guest the interface of Hyper-V,
   which is what it shows such a guest otherwise. It shows a minimal one

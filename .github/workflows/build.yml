@@ -438,41 +438,88 @@ jobs:
           grep -E 'Name \(_CID, EisaId \("PNP0A03"\)' dsdt.dsl
           echo "ACPI table check passed"
 
-      - name: Testcases of the host services
+      - name: Testcases of the tree
         if: inputs.flavor != 'baseline'
         run: |
           . ./env.sh
-          # The testcases the tree has for the services a guest talks to and for
-          # the code they share.  The branches for 7.1 took changes to these
-          # services over from 7.2, and changes to two of the tests with them.
-          # A testcase which fails does not end the run here, what comes after
+          # Testcases which the tree has for code the branches for 7.1 took
+          # changes to from 7.2: the services a guest talks to and the code
+          # they share, the image formats, and some of the devices.  A
+          # testcase which fails does not end the run here, what comes after
           # this step is to run whatever these tell; the last step of the run
-          # fails for it.
+          # fails for one which counts.  One which is here for the first time,
+          # or which the test driver of the tree itself leaves out, is tried:
+          # what it does is told and does not count.
+          errpat='error:|undefined reference|multiple definition|ld returned|[*][*][*] '
           ( time kmk -C src/VBox/HostServices -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 ) > build-hostsvc-tests.log 2>&1 \
-            || { echo "NOT EVERYTHING WAS BUILT"; grep -n -E 'error:|undefined reference|multiple definition|ld returned|[*][*][*] ' build-hostsvc-tests.log | head -80; }
+            || { echo "NOT EVERYTHING WAS BUILT (host services)"; grep -n -E "$errpat" build-hostsvc-tests.log | head -80; }
           tail -4 build-hostsvc-tests.log
-          for t in tstHGCMSvc tstGuestPropSvc tstGuestControlSvc tstClipboardServiceHost tstClipboardServiceImpl tstSharedFolderService tstShflCase tstShflSizes; do
-            log="$GITHUB_WORKSPACE/test-hostsvc-$t.log"
-            src=$(ls src/VBox/HostServices/testcase/$t.cpp src/VBox/HostServices/*/testcase/$t.cpp 2> /dev/null | head -n 1 || true)
-            if [ -z "$src" ]; then
-              echo "HOSTSVC $t: this tree does not have it"
-              continue
+          ( time kmk -C src/VBox/Storage -k -j"$(nproc)" KBUILD_TYPE=release VBOX_WITH_TESTCASES=1 ) > build-storage-tests.log 2>&1 \
+            || { echo "NOT EVERYTHING WAS BUILT (storage)"; grep -n -E "$errpat" build-storage-tests.log | head -80; }
+          tail -4 build-storage-tests.log
+          bin="$GITHUB_WORKSPACE/out/linux.amd64/release/bin/testcase"
+          work="$GITHUB_WORKSPACE/tc-work"
+          mkdir -p "$work"
+          # run_tc <counts|tried> <name> <its source file> <directory to run it in>
+          run_tc() {
+            kind=$1; t=$2; src=$3; dir=$4
+            log="$GITHUB_WORKSPACE/test-tc-$t.log"
+            if [ ! -e "$src" ]; then
+              echo "TESTCASE $t: this tree does not have it"
+              return 0
             fi
-            if [ ! -x "out/linux.amd64/release/bin/testcase/$t" ]; then
-              echo "HOSTSVC $t: NOT BUILT"
-              echo "$t (not built)" >> hostsvc-failed
-              continue
+            if [ ! -x "$bin/$t" ]; then
+              echo "TESTCASE $t: NOT BUILT ($kind)"
+              if [ "$kind" = counts ]; then echo "$t (not built)" >> testcases-failed; fi
+              return 0
             fi
             rc=0
-            ( cd out/linux.amd64/release/bin/testcase && timeout -k 5 300 "./$t" ) > "$log" 2>&1 || rc=$?
+            ( cd "$dir" && timeout -k 5 300 "$bin/$t" ) > "$log" 2>&1 || rc=$?
             if [ "$rc" = 0 ]; then
-              echo "HOSTSVC $t: passed: $(grep -v '^$' "$log" | tail -n 1 | cut -c1-120)"
-            else
-              echo "HOSTSVC $t: FAILED with exit code $rc"
+              echo "TESTCASE $t: passed ($kind): $(grep -v '^$' "$log" | tail -n 1 | cut -c1-120)"
+            elif [ "$kind" = counts ]; then
+              echo "TESTCASE $t: FAILED with exit code $rc"
               tail -n 40 "$log"
-              echo "$t (exit code $rc)" >> hostsvc-failed
+              echo "$t (exit code $rc)" >> testcases-failed
+            else
+              echo "TESTCASE $t: failed with exit code $rc (tried, does not count)"
+              tail -n 25 "$log"
             fi
-          done
+            return 0
+          }
+          hs=src/VBox/HostServices
+          # The services.  These seven passed in run 259.
+          run_tc counts tstHGCMSvc              $hs/testcase/tstHGCMSvc.cpp "$bin"
+          run_tc counts tstGuestPropSvc         $hs/GuestProperties/testcase/tstGuestPropSvc.cpp "$bin"
+          run_tc counts tstClipboardServiceHost $hs/SharedClipboard/testcase/tstClipboardServiceHost.cpp "$bin"
+          run_tc counts tstClipboardServiceImpl $hs/SharedClipboard/testcase/tstClipboardServiceImpl.cpp "$bin"
+          run_tc counts tstSharedFolderService  $hs/SharedFolders/testcase/tstSharedFolderService.cpp "$bin"
+          run_tc counts tstShflCase             $hs/SharedFolders/testcase/tstShflCase.cpp "$bin"
+          run_tc counts tstShflSizes            $hs/SharedFolders/testcase/tstShflSizes.cpp "$bin"
+          # The testcase of the guest control service as upstream has it ends in
+          # its first connect, on every branch, and the test driver of the tree
+          # leaves it out.  The branches for 7.1 have it repaired; the repaired
+          # one gives its client the memory whose size the service tells.
+          gc=$hs/GuestControl/testcase/tstGuestControlSvc.cpp
+          if [ -e "$gc" ] && ! grep -q 'cbClient' "$gc"; then
+            echo "TESTCASE tstGuestControlSvc: not run: this tree has it as upstream does, and that one cannot run"
+          else
+            run_tc tried tstGuestControlSvc $gc "$bin"
+          fi
+          run_tc tried tstGuestControlMockHGCM $hs/GuestControl/testcase/tstGuestControlMockHGCM.cpp "$bin"
+          run_tc tried tstClipboardTransfers   $hs/SharedClipboard/testcase/tstClipboardTransfers.cpp "$bin"
+          # The image formats; these write their images into the directory they run in.
+          st=src/VBox/Storage/testcase
+          run_tc tried tstVD-2   $st/tstVD-2.cpp "$work"
+          run_tc tried tstVDIo   $st/tstVDIo.cpp "$work"
+          run_tc tried tstVDSnap $st/tstVDSnap.cpp "$work"
+          # Devices; the step before this one built them.  The test driver of
+          # the tree leaves the one of the internal network out.
+          dv=src/VBox/Devices
+          run_tc tried tstAudioMixBuffer $dv/Audio/testcase/tstAudioMixBuffer.cpp "$bin"
+          run_tc tried tstUsbMouse       $dv/Input/testcase/tstUsbMouse.cpp "$bin"
+          run_tc tried tstIntNetR0       $dv/Network/testcase/tstIntNetR0.cpp "$bin"
+          rm -rf "$work"
 
       - name: Result of the build of the tree
         if: inputs.flavor != 'baseline'
@@ -514,8 +561,9 @@ jobs:
             build.log
             build-tests.log
             build-hostsvc-tests.log
+            build-storage-tests.log
             test-tstDevPciVfio.log
-            test-hostsvc-*.log
+            test-tc-*.log
             configure.log
             configure-run.log
             configure-help.log
@@ -526,12 +574,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Result of the testcases of the host services
+      - name: Result of the testcases of the tree
         if: inputs.flavor != 'baseline'
         run: |
-          if [ -e hostsvc-failed ]; then
-            echo "Testcases of the host services which failed or were not built:"
-            cat hostsvc-failed
+          if [ -e testcases-failed ]; then
+            echo "Testcases which failed or were not built:"
+            cat testcases-failed
             exit 1
           fi
-          echo "No testcase of the host services failed."
+          echo "No testcase which counts failed."
