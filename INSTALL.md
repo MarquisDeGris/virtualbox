@@ -62,7 +62,7 @@ does. They are built like this, with the packages of part 2:
     printf '%s :=\n' VBOX_WITH_DOCS VBOX_WITH_ADDITIONS VBOX_WITH_VALIDATIONKIT \
         VBOX_WITH_WEBSERVICES VBOX_WITH_UPDATE_AGENT VBOX_WITH_TESTCASES \
         'override VBOX_WITH_NLS' VBOX_WITH_MAIN_NLS VBOX_WITH_PUEL_NLS \
-        VBOX_WITH_VBOXMANAGE_NLS > LocalConfig.kmk
+        VBOX_WITH_VBOXMANAGE_NLS VBOX_WITH_VIDEOHWACCEL > LocalConfig.kmk
     . ./env.sh
     kmk -j"$(nproc)" KBUILD_TYPE=release
 
@@ -85,11 +85,16 @@ not be got out of.
 
 About the 7.1 line itself: upstream ended its support with 7.1.18 in
 April 2026 and has published its security updates for 7.2 only since
-then. The branches for 7.1 here are on the head of upstream's 7.1 branch,
+then: four of them from July to October 2026, with 62 CVE numbers which
+each name a version of 7.2 and say nothing about 7.1. The branches for
+7.1 here are on the head of upstream's 7.1 branch,
 which went on for five months after that release, and
 [STATUS.md](STATUS.md), "The 7.1 line and what the 7.2 line received
 after it", says what was taken over from 7.2 beyond that and what was
-not. Who can choose takes a branch for 7.2.
+not. Who can choose takes a branch for 7.2. The last name in the list for
+`LocalConfig.kmk` above is for 7.1: it leaves the 2D video acceleration
+for guests out of the build, which the lines after 7.1 no longer have at
+all and which a guest with a current Windows does not use.
 
 ## 1. Checklist: what has to be switched on
 

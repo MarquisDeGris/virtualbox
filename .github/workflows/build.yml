@@ -264,6 +264,10 @@ jobs:
             echo "VBOX_WITH_WEBSERVICES :="
             echo "VBOX_WITH_UPDATE_AGENT :="
             echo "VBOX_WITH_TESTCASES :="
+            # The 2D video acceleration for guests, which the lines after 7.1 no
+            # longer have.  The 7.1 branches are built without it as well; on
+            # the others the switch is about nothing.
+            echo "VBOX_WITH_VIDEOHWACCEL :="
             # The configure of the development line switches the translations off
             # when there is no Qt, whose lrelease builds them.  The older one
             # leaves them on (run 235).

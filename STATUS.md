@@ -870,8 +870,17 @@ understood yet.
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
 Upstream ended its support for 7.1 with 7.1.18 in April 2026. The
-security updates it has published since then (July, September and
-October 2026) are releases of 7.2 only. Its 7.1 branch in git went on
+security updates it has published since then (July, August, September
+and October 2026) are releases of 7.2 only. The public CVE database
+(NVD, asked on 2026-11-20) has 62 numbers of Oracle for VirtualBox from
+those four dates: 16, 21, 19 and 6, each naming a version of 7.2 as the
+supported version affected and none saying anything about 7.1, which is
+what "not supported" means and not that 7.1 is free of them. All have
+the component "Core"; four are reached "via RDP", which on 7.1 is code
+of the extension pack and not in the source tree. One more number of
+that time, from another source, is about the PCnet device before 7.2.8;
+that file is the same on upstream's 7.1 and 7.2 branches. Its 7.1 branch
+in git went on
 until 2026-09-25, with 115 commits after 7.1.18, most of them taken over
 from the development line; the branches of this work for 7.1 are on the
 head of that branch and so have them, which no release of 7.1 does.
@@ -925,6 +934,35 @@ which is about code a Linux host runs was then tried on 7.1:
   does not apply to 7.1 as it is and is not built here. The rest of
   that second pass was on 7.1 already under another revision, or about
   nothing but compiler warnings, or new features.
+- A second pass on 2026-11-20, by the files and not by the commits: the
+  sources of the devices on `backports-7.1` and on upstream's 7.2 branch
+  were compared file by file, the lines about revision and copyright
+  left aside (storage, bus, input, serial, VMMDev, VirtIO, audio, the
+  TPM, USB, the PC devices, VGA and the smaller network devices, and
+  outside of the devices the image formats and the host services; of
+  the E1000, VMSVGA and the NAT driver only the history). What it
+  showed:
+  - Nothing among the changes since March 2026 which the first pass
+    missed. The changes to graphics and to the firmware configuration
+    device which 7.2 got from April to September are on upstream's own
+    7.1 branch under the same revisions: upstream went on taking fixes
+    to that branch after its last release of 7.1.
+  - What 7.2 has beyond that is older than 2026 and was never taken to
+    7.1 by upstream while it supported 7.1: the buffers of USB requests
+    reworked (August 2025), the command buffer interface of the TPM
+    reworked together with a change to how MMIO accesses of odd sizes
+    reach a device (September 2025), a new variant of the E1000, the
+    graphics device for 3D with DirectX 11, and many changes for
+    compiler warnings. They are reworks of hundreds of lines which
+    depend on each other and on the VMM of 7.2, not fixes which can be
+    lifted out, and they are not taken here. This is the main reason
+    why 7.1 with everything on these branches is still not what 7.2 is.
+  - Taken: one check in the ACPI device, of the size of a table which
+    the configuration of a VM names as a file, which on 7.1 was made and
+    not acted on; and the 2D video acceleration for guests, which 7.2 no
+    longer has at all, is left out of the build of the 7.1 branches by a
+    switch (`VBOX_WITH_VIDEOHWACCEL`), see [INSTALL.md](INSTALL.md).
+    Built for the first time in the run after 258.
 - The KVM backend of the two lines compared (2026-11-20): the version
   for 7.1 is of 2025-11-03, the one for 7.2 of 2026-10-21, and its
   authors have published nothing newer. What the two patches add and
