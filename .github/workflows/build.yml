@@ -91,8 +91,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 50
+
+      - name: Check out kBuild
+        run: |
+          # kBuild is a submodule.  The 7.1 branch has its commit in the tree and
+          # no .gitmodules which says where it is from (run 241), so the checkout
+          # action cannot get it; it is the same repository as for the others.
+          if [ -f .gitmodules ] && grep -q 'kBuild' .gitmodules; then
+            git submodule update --init --recursive
+          else
+            sha=$(git ls-tree HEAD kBuild | awk '{ print $3 }')
+            echo "kBuild commit of this tree: $sha"
+            rm -rf kBuild
+            git clone -q https://github.com/VirtualBox/kbuild.git kBuild
+            if ! git -C kBuild checkout -q "$sha"; then
+              echo "that commit is not in the kBuild repository, using its head: $(git -C kBuild rev-parse HEAD)"
+            fi
+          fi
+          git -C kBuild log -1 --format='kBuild %H %cs'
 
       - name: Source facts
         id: src
