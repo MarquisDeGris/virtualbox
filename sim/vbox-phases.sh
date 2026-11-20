@@ -155,16 +155,39 @@ keep_logs() # [<suffix>]
     return 0
 }
 
+# Powers the VM off.  A VM which does not let itself be powered off has its
+# process ended, so that the phases after this one have a VM to start: a VM
+# left in the state "saving" took no command any more and cost the three
+# phases after it (run 250, on the 7.1 line, where saving the state had been
+# refused).
+power_off()
+{
+    local i=0
+    run controlvm "$VM" poweroff
+    wait_state poweroff 60 && return 0
+    echo "    the VM is in state '$(vmstate)' and not powered off, its process is ended"
+    pkill -KILL -f "VBoxHeadless.*--comment $VM " 2> /dev/null
+    while [ "$i" -lt 30 ]; do
+        case "$(vmstate)" in
+            poweroff|aborted) return 0 ;;
+            aborted-saved|saved) run discardstate "$VM"; return 0 ;;
+        esac
+        sleep 1
+        i=$((i + 1))
+    done
+    echo "    the VM is in state '$(vmstate)'"
+    return 1
+}
+
 # Brings the VM back to being powered off without a device of the host.
 reset_vm()
 {
     local a
     case "$(vmstate)" in
         running|paused|stuck|gurumeditation|starting|restoring|saving)
-            run controlvm "$VM" poweroff
-            wait_state poweroff 60 || echo "    the VM is in state '$(vmstate)'"
+            power_off
             ;;
-        saved)
+        saved|aborted-saved)
             run discardstate "$VM"
             ;;
     esac
@@ -201,8 +224,10 @@ end_phase()
     case "$(vmstate)" in
         running|paused|stuck|gurumeditation)
             pace_note
-            run controlvm "$VM" poweroff
-            wait_state poweroff 60 || echo "    the VM is in state '$(vmstate)'"
+            power_off
+            ;;
+        saving)
+            power_off
             ;;
     esac
     keep_logs
@@ -388,8 +413,12 @@ unbind_dev()
 }
 
 # Saves the state of the VM, which takes the slot being empty, and loads it.
+# STATE_LOADED tells afterwards whether it got as far as the VM running with
+# the loaded state.
+STATE_LOADED=no
 saved_state_round()
 {
+    STATE_LOADED=no
     VBM_TIMEOUT=300 run controlvm "$VM" savestate
     if [ $? -ne 0 ] || ! wait_state saved 60; then
         stage "the state is saved while the slot is empty" FAILED "the VM is in state '$(vmstate)'"
@@ -403,6 +432,7 @@ saved_state_round()
         diag
         return 1
     fi
+    STATE_LOADED=yes
     if ! wait_serial "$ALIVE_RE" 120; then
         stage "the saved state is loaded and the guest goes on" FAILED "nothing from the guest"
         diag
@@ -554,8 +584,37 @@ phase_passthrough()
             [ "$(vmstate)" = paused ] && run controlvm "$VM" resume
             guest_goes_on "the VM runs on after that" 60
         fi
+
+        # A snapshot of a running VM has the state of the VM saved as well, so
+        # it is refused in the same way, and nothing of it must be left.  On
+        # the 7.1 line Main took a state which was not saved for a saved one
+        # (run 250).
+        if [ "$(vmstate)" = running ]; then
+            local n
+            VBM_TIMEOUT=120 run snapshot "$VM" take refused
+            if [ $? -eq 0 ]; then
+                stage "a snapshot of the running VM with the device in it is refused" FAILED "it was taken"
+            else
+                stage "a snapshot of the running VM with the device in it is refused" ok
+            fi
+            sleep 3
+            [ "$(vmstate)" = paused ] && run controlvm "$VM" resume
+            n=$(vbm showvminfo "$VM" --machinereadable 2> /dev/null | grep -a -c '^SnapshotName')
+            if [ "$n" = 0 ]; then
+                stage "the VM has no snapshot after that" ok
+            else
+                stage "the VM has no snapshot after that" FAILED "$n"
+            fi
+            guest_goes_on "the VM runs on after the snapshot was refused" 60
+        fi
     fi
     end_phase
+    # Should there be a snapshot after all, the phases after this one are not
+    # to start from it.
+    if vbm showvminfo "$VM" --machinereadable 2> /dev/null | grep -a -q '^SnapshotName'; then
+        settle
+        VBM_TIMEOUT=300 run snapshot "$VM" delete refused
+    fi
 }
 
 # The device in the hot-plug capable slot: taken out and put in while the VM

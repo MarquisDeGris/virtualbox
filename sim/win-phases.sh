@@ -424,8 +424,7 @@ guest_shutdown()
     else
         stage "guest: shuts down when the simulation tells it to" FAILED "the VM is in state '$(vmstate)'"
         shot
-        run controlvm "$VM" poweroff
-        wait_state poweroff 60
+        power_off
     fi
     keep_logs
     settle
@@ -549,25 +548,27 @@ phase_restart()
     start_and_report "the installed Windows starts again" "$START_WAIT" || { stalls_stage; end_phase; return 1; }
     report_checks "after the restart: " hotplug,absent,unused
     guest_goes_on "the guest keeps running" 120
-    if saved_state_round; then
-        if guest_goes_on "the guest keeps running after the state was loaded" 120; then
-            if [ "$BUTTON_WORKS" = yes ]; then
-                power_button "guest: shuts down when the power button is pressed after the state was loaded"
-            fi
-        else
-            # A guest which stands still after the load tells nothing about
-            # the power button (run 249: Windows with the Hyper-V interface on
-            # the KVM backend of Cyberus Technology for 7.1).  Its disk is not
-            # left as a power cut leaves it either, for what comes after this
-            # phase: the VM is switched off, started once more and then shut
-            # down by the guest below.
-            shot
-            run controlvm "$VM" poweroff
-            wait_state poweroff 60
-            keep_logs -stood
-            settle
-            start_and_report "Windows starts again after the VM with the loaded state was switched off" "$START_WAIT"
+    local went_on=no
+    if saved_state_round && guest_goes_on "the guest keeps running after the state was loaded" 120; then
+        went_on=yes
+    fi
+    if [ "$went_on" = yes ]; then
+        if [ "$BUTTON_WORKS" = yes ]; then
+            power_button "guest: shuts down when the power button is pressed after the state was loaded"
         fi
+    elif [ "$STATE_LOADED" = yes ] && [ "$(vmstate)" = running ]; then
+        # A guest which stands still after the load tells nothing about the
+        # power button, and it is not told to shut down either, it would not
+        # hear it: Windows with the Hyper-V interface on the KVM backend of
+        # Cyberus Technology for 7.1 said one more line after the load in
+        # run 249 and none in run 250.  Its disk is not left as a power cut
+        # leaves it, for what comes after this phase: the VM is switched off,
+        # started once more and then shut down by the guest below.
+        shot
+        power_off
+        keep_logs -stood
+        settle
+        start_and_report "Windows starts again after the VM with the loaded state was switched off" "$START_WAIT"
     fi
     stalls_stage
     guest_shutdown
