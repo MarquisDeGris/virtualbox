@@ -641,16 +641,62 @@ only, and the checks of these calls write to the release log.
   host inside has the register. It is known when a run gets an AMD
   processor again.
 
+**Run 249** (2026-11-20, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.1-kvm` @ `160d83a6`, 36 minutes, AMD EPYC
+9V45): the first build of the 7.1 branch with the backend, and the
+first run of the simulation with Windows left at its default
+paravirtualization interface on such a build. 67 passed, 10 failed.
+
+- It builds at the first attempt (6 minutes 52 seconds), the tests of
+  the device pass.
+- On the runner the 19 checks with the Linux guest pass.
+- Windows on the runner, with the Hyper-V interface: installed in 276
+  seconds and started in 25, with 2.9 million exits for the installation
+  and not one read of the HPET (run 247, the same kind of processor
+  without the interface: 546 seconds, 28 million exits). Root bridge,
+  hand-over of hot-plug, port and slot, the refused plug and the power
+  button are as before.
+- **Windows does not go on after a saved state is loaded** there. The
+  state is saved and loaded and the guest writes one line more. After
+  that its line which comes every few seconds does not come any more, the
+  power button does nothing, and told to shut down it says that it does
+  and is still running four minutes later, with a few hundred exits a
+  second: a guest which reacts and whose time does not move as it
+  should. When the state is saved the backend
+  fails to read eleven registers of the Hyper-V interface per CPU from
+  the kernel and fails to write them when it is loaded; those are
+  registers this kernel does not have, which is noise, and what Windows
+  is missing after the load was not found. It is the backend and that
+  interface, not the slot: the Linux guest goes through the same round
+  on this backend (runs 247 to 249), and so did Windows without the
+  interface (run 247). Whether the version of the backend for 7.2 has it
+  too is not known yet. A VM with a device of the host cannot be saved
+  anyway; this is about a VM whose slot is empty.
+- Inside the virtual machine standing in for a host every VM stopped at
+  its first step again, and the release log names the call now:
+  `nemHCLnxExportState: rc=11 iMsr=12 (->0x48)`. Register 0x48 is
+  `IA32_SPEC_CTRL`, as read after run 247, but the condition of the
+  change after that run was the wrong one. The guest processor there has
+  a feature which is in the register (PSFD), so it was handed over; the
+  kernel of that host does not take it, its own processor being a
+  virtual one which has the feature and not the register. Changed on
+  both branches: the backend hands back to the kernel what it read of
+  the register when the VM is set up, once, and leaves the register out
+  from then on when the kernel does not take that. Where the kernel
+  takes it, which is every host which is not itself a VM of this kind,
+  nothing differs from the backend as it is published.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
-message), and the commit about the register. It is built with
+message), and two commits about the register. It is built with
 `configure --with-kvm`.
 
-State of `pci-passthrough-hotplug-7.1-kvm` (pushed, being built): the
-7.1 branch as above, the backend in its last version for the 7.1 line
-(2025-11-03, two places merged by hand) and the same commit about the
-register.
+State of `pci-passthrough-hotplug-7.1-kvm` (pushed): the 7.1 branch as
+above, the backend in its last version for the 7.1 line (2025-11-03, two
+places merged by hand) and the same two commits about the register. It
+builds since run 249; the simulation has not had a device in a VM on it
+yet.
 
 ### The management and the review, 13 to 15 November
 
@@ -1162,13 +1208,14 @@ harness since WP5, saved states since the fourth part of WP6.
    can run VMs with KVM, or only with the VirtualBox kernel driver. The
    ways in "The maintenance branches" hang on that.
 4b. The branches with the KVM backend of Cyberus Technology: 7.2 runs the
-   simulation with the device (run 248). Left: the first build and
-   simulation of the one for 7.1; Windows on that backend with the
-   Hyper-V interface, on the runner and where the drive is; the
-   sanitizers on both; a run on an AMD processor for the change after
-   run 247; then merge requests in the fork for them, and what
-   [INSTALL.md](INSTALL.md) and [HWTEST.md](HWTEST.md) say differently
-   for these branches.
+   simulation with the device (run 248), 7.1 builds and runs VMs on the
+   runner (run 249). Left: a device in a VM on the one for 7.1; Windows
+   where the drive is, on either; whether Windows with the Hyper-V
+   interface goes on after a saved state on the version of the backend
+   for 7.2; a run on an AMD processor with the second change about the
+   register; the sanitizers on both; then merge requests in the fork for
+   them, and what [INSTALL.md](INSTALL.md) and [HWTEST.md](HWTEST.md)
+   say differently for these branches.
 5. Windows where the drive is: what was changed after run 231 runs when
    a run for something else gets an AMD processor, or on any processor
    with a build which has the backend of Cyberus Technology. No runs for
@@ -1264,7 +1311,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-20 | No further runs on 2026-11-20 unless asked for. Before the first run on a base which is new to the workflow, its `configure`, its checkout and its makefiles are read for what the workflow assumes, and all of it is put right in one go | Ten runs in one morning, six of them stopped by the workflow itself within two minutes, each for one thing which reading the scripts of 7.2 and 7.1 would have shown: the options of the older `configure`, the translations, files a branch deletes, kBuild without `.gitmodules`, an option only 7.2 has, the place of kBuild. One run per finding is what was not to happen again after 2026-11-15, and it did |
 | 2026-11-20 | The KVM backend Cyberus Technology publishes for VirtualBox is put onto branches of their own (`pci-passthrough-hotplug-7.2-kvm`, `-7.1-kvm`), as one commit which is their patch as it is, and whatever this work changes in it comes as commits after that one | It is the one KVM backend there is for the released lines, it is maintained by somebody else, and it gives the device what it asks of an engine. Kept apart, it can be replaced by a newer version of theirs, and what is theirs and what is not stays plain to see. The branches without it remain what the merge request would be against upstream's maintenance branches |
 | 2026-11-20 | On a build with that backend the Windows guest of the simulation is left at its default paravirtualization interface (Hyper-V), and Windows where the drive is is tried on every processor, not on AMD only | Run 248: without the interface Windows keeps its time by the HPET on that backend and does not get through setup on an Intel processor. The backend gives a guest the interface through KVM, and a VM somebody creates for Windows has it. The reason for trying AMD only was that clock |
-| 2026-11-20 | The change to that backend after run 247 (a register handed to the kernel for a guest processor which has it only) stays on the branches although run 248 could not show it is what was missing; no run is started for the sake of getting an AMD processor | It is right by itself: a guest processor without the register has nothing to hand over. Which processor a runner has cannot be chosen, and every run on these branches tells when it has one. Should the VMs stop there again, the log now names the call |
+| 2026-11-20 | The change to that backend after run 247 (a register handed to the kernel for a guest processor which has it only) stays on the branches although run 248 could not show it is what was missing; no run is started for the sake of getting an AMD processor | It is right by itself: a guest processor without the register has nothing to hand over. Which processor a runner has cannot be chosen, and every run on these branches tells when it has one. Should the VMs stop there again, the log now names the call. (They did, in run 249, and it did: see the next line) |
+| 2026-11-20 | Whether the register is handed to the kernel is decided by asking the kernel once when the VM is set up, not by the features of the guest processor | Run 249: the kernel of a host can offer guests a feature which is in the register and still not take the register, so nothing which is known about the guest tells. Asking keeps the backend as it is published on every host where the kernel takes the register, which the first change did not |
+| 2026-11-20 | A Windows guest which does not go on after a saved state was loaded, with the Hyper-V interface on that backend, is written down as found and not looked into further for now. The simulation switches such a VM off, starts Windows once more and goes on | It is the backend's handling of that interface across a saved state, in a version of the backend which is a year old, and has nothing to do with the slot: the Linux guest and Windows without the interface go through the same round. The parts of the simulation which come after it need a Windows which was shut down properly |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
 ## Test tiers (see PLAN.md section 6)
@@ -1452,5 +1501,6 @@ slot.
 | 246 | `pci-passthrough-hotplug-7.1` @ `bbf47bc0` | tests, exploring | passed | 7 minutes. The work on the 7.1 branch builds, the 56 tests and the three random tests pass, the ACPI table check passes |
 | 247 | `pci-passthrough-hotplug-7.2-kvm` @ `2139a88e` | allsim, exploring | passed (seven checks of the simulation fail) | 27 minutes, AMD EPYC 9V74. The first build of the 7.2 branch with the KVM backend of Cyberus Technology: it builds with `--with-kvm` in 7 minutes 18 seconds and the tests of the device pass. On the runner every check with the Linux guest and with Windows passes on that backend (60 passed, 7 failed, none skipped). Every VM inside the virtual machine standing in for a host stops at its first step with `VERR_NEM_IPE_3` and nothing more in its log; see "Run 247" |
 | 248 | `pci-passthrough-hotplug-7.2-kvm` @ `e45e74e1` | allsim, exploring | passed (one check of the simulation fails) | 74 minutes, Intel Xeon 6975P-C. With the change after run 247. Inside the virtual machine standing in for a host all 64 checks with the Linux guest pass on the backend of Cyberus Technology: the device passed through, in the slot, taken out and put in, a start without it, saved states with the empty slot. The 20 checks with the Linux guest on the runner pass. Windows does not get through its setup in 50 minutes there, keeping its time by the HPET (57 million reads), so Windows where the drive is was skipped. 87 passed, 1 failed, 1 skipped; see "Run 248" |
+| 249 | `pci-passthrough-hotplug-7.1-kvm` @ `160d83a6` | allsim, exploring | passed (ten checks of the simulation fail) | 36 minutes, AMD EPYC 9V45. The first build of the 7.1 branch with the KVM backend of Cyberus Technology: it builds in 6 minutes 52 seconds, the tests of the device pass, the 19 checks with the Linux guest on the runner pass. Windows with the Hyper-V interface is installed in 276 seconds and does not go on after a saved state is loaded. Every VM inside the virtual machine standing in for a host stops at its first step, as in run 247, and the log names the register now. 67 passed, 10 failed; see "Run 249" |
 
 Run numbers are those GitHub shows for the `build` workflow.

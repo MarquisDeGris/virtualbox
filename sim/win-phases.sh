@@ -550,9 +550,23 @@ phase_restart()
     report_checks "after the restart: " hotplug,absent,unused
     guest_goes_on "the guest keeps running" 120
     if saved_state_round; then
-        guest_goes_on "the guest keeps running after the state was loaded" 120
-        if [ "$BUTTON_WORKS" = yes ]; then
-            power_button "guest: shuts down when the power button is pressed after the state was loaded"
+        if guest_goes_on "the guest keeps running after the state was loaded" 120; then
+            if [ "$BUTTON_WORKS" = yes ]; then
+                power_button "guest: shuts down when the power button is pressed after the state was loaded"
+            fi
+        else
+            # A guest which stands still after the load tells nothing about
+            # the power button (run 249: Windows with the Hyper-V interface on
+            # the KVM backend of Cyberus Technology for 7.1).  Its disk is not
+            # left as a power cut leaves it either, for what comes after this
+            # phase: the VM is switched off, started once more and then shut
+            # down by the guest below.
+            shot
+            run controlvm "$VM" poweroff
+            wait_state poweroff 60
+            keep_logs -stood
+            settle
+            start_and_report "Windows starts again after the VM with the loaded state was switched off" "$START_WAIT"
         fi
     fi
     stalls_stage
