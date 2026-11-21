@@ -22,14 +22,25 @@ not known yet, so parts F to H with a Windows guest are where to look
 closely. On the branch of the merge request no Windows has had a device
 in the slot yet.
 
-A device with two functions has been in the simulation with a Linux
-guest (run 264, on the branch for 7.2 with that backend): two emulated
-NVMe controllers at one address, which the host has in one IOMMU group
-as it has a graphics card and its audio function. Both were passed
-through, the device went out of the slot and into it as one, whichever
-function the command named, and a device of which one function was
-missing was refused. The host could reset each of those two functions
-by itself, which it cannot for many real devices; part C is about that.
+A device with two functions has been in the simulation, on the branches
+for 7.2 and 7.1 with that backend (runs 264 to 266): two emulated NVMe
+controllers at one address, which the host has in one IOMMU group as it
+has a graphics card and its audio function. With a Linux guest and with
+Windows both were passed through, the device went out of the slot and
+into it as one, whichever function the command named, and with the
+Linux guest a device of which one function was missing was refused.
+Also with functions which the host cannot reset by themselves, as it is
+with many graphics cards: the device then asks for a reset of its bus,
+which the kernel did, with the Linux guest and each time Windows
+switched the slot off (run 266). Part C is about that reset on
+hardware.
+
+One start of Windows got stuck in the simulation, early and for as long
+as the run waited, with the device of one function in the slot (run
+265, an AMD EPYC 7763, the VM being two levels of virtualization deep).
+It is not understood and has not come again. Should a Windows guest
+stay at its start screen with its disk idle, note down the processor of
+the host and keep the log.
 
 Nothing was tried anywhere with a graphics card, with Thunderbolt or
 with an IOMMU of AMD.

@@ -1141,11 +1141,44 @@ processor on the branch for 7.1.
   VM, and starts the VM once more, with the first start counted as
   failed.
 
-Changed in the simulation after it, not run yet: the port of the
-machine with two functions, as said; the look at a stuck start and the
-second attempt; and Windows with the device of two functions has the
-functions without a reset of their own from the start, so that every
-time Windows switches the slot off the bus is reset.
+Changed in the simulation after it: the port of the machine with two
+functions, as said; the look at a stuck start and the second attempt;
+and Windows with the device of two functions has the functions without
+a reset of their own from the start, so that every time Windows
+switches the slot off the bus is reset.
+
+**Run 266** (2026-11-21, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f`, 68 minutes, Intel Xeon
+6975P-C): the branch for 7.2 with all of that. **284 passed, none
+failed, none skipped.**
+
+- **The reset of the bus works against a real kernel.** With the port
+  which does not claim to report its link, the kernel of the simulated
+  host does the reset the device asks for and says so. With the Linux
+  guest (9 checks): the device says of each function that it cannot be
+  reset on its own, the VM is reset, the device is taken out of the slot
+  and put in, the guest reads from both drives each time, and the log
+  has the functions refusing their own reset three times over and no
+  word of a reset which failed. The log of the kernel has the two
+  functions reset together each time.
+- **Windows with the device of two functions which can only be reset
+  together** (43 checks, all pass): Windows starts with it in the slot
+  (413 seconds), runs both controllers with its driver and reads from
+  both drives; asked to, it lets go and both functions are gone (7
+  seconds); put in by naming the second function it takes both and
+  reads; taken by force and put in again, the same. Each time Windows
+  switches the slot off the bus is reset, three times in the run, with
+  no word of a failed reset. This is as near to a graphics card with its
+  audio function in an enclosure as the simulation gets.
+- Windows with the device of one function passes again, all 35 (it was
+  stuck in its start in run 265; no start was stuck in this run).
+- The 59 checks with the Linux guest and the device of two functions,
+  the 67 with the device of one, and what runs on the runner itself
+  pass.
+
+What the simulation has not got of such a device: more than two
+functions, a function which is not an NVMe controller, an option ROM,
+legacy VGA, and a host which is not a virtual machine.
 
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
@@ -1855,18 +1888,22 @@ harness since WP5, saved states since the fourth part of WP6.
    branch for 7.1, which also has Windows with such a device (part
    `mfwinhost`, 41 checks, all pass). A phase about functions which the
    host cannot reset by themselves came with run 265 and showed what
-   the root port of the simulated host does not do; the port is changed
-   and the phase has to run again. Left: that, with Windows as well; all
-   of it on the branch for 7.2; the part with the Linux guest on the
-   branch of the merge request.
+   the root port of the simulated host does not do; with the port
+   changed, run 266 on the branch for 7.2 passes all of it, 284 checks:
+   the reset of the bus with the Linux guest, and Windows with a device
+   of two functions which can only be reset together. Left: the phase
+   about the reset on the branch for 7.1, which has it failing for the
+   port (run 265), and the part with the Linux guest on the branch of
+   the merge request.
 4d. Windows stuck early in its start, once, in run 265 (the branch for
    7.1 with the KVM backend, an AMD EPYC 7763, the VM inside the virtual
    machine standing in for a host): not understood. The simulation
    tells more of such a start from here on and tries a second one.
    Every run with Windows at that depth is a look at whether it comes
    again and on which processors.
-5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259
-   and 261 and stopped after the first removal in run 251, on the
+5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259,
+   261 and 266 (and with the device of two functions in runs 265 and
+   266) and stopped after the first removal in run 251, on the
    branches with the backend of Cyberus Technology; run 261 had an AMD
    processor, the others Intel ones. Every run on such a
    branch goes through it again and tells what the VM shows of the guest
@@ -2185,5 +2222,6 @@ virtual machine.
 | 263 | `pci-passthrough-hotplug-7.2` @ `5d633ceb` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The same on the 7.2 line: the 56 tests and the three random tests pass, no report. 15 testcases of the tree pass |
 | 264 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | sim, exploring | passed | 34 minutes, Intel Xeon 6975P-C. The first run of the simulation with a device of two functions (two NVMe controllers at one address, in one IOMMU group). Every check passes, 160 of them; 59 are the new part: both functions passed through, the device in the slot taken out and put in by naming either function, a start without it, a device of which one function is missing refused, a saved state, the host taking both functions back. See "Run 264" |
 | 265 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | allsim, exploring | passed (two checks of the simulation fail) | 128 minutes, AMD EPYC 7763. 253 checks pass. New and passing: the device of two functions on the 7.1 line (59 checks), and Windows with such a device (41 checks: both controllers with the driver of Windows, both drives read, taken out, put in by naming the second function, taken by force, put in again). Failing: the kernel of the simulated host calls a reset of the bus failed which it has done, because the emulated root port never reports its link up (the phase about functions without a reset of their own, 8 of 9 pass); and Windows with the device of one function was stuck early in its start, once, for the hour the run gave it. See "Run 265" |
+| 266 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 68 minutes, Intel Xeon 6975P-C. Every check passes, 284 of them. With the changed root port of the simulated host the kernel does the reset of the bus which the device asks for and reports it done: with the Linux guest (9 checks) and with Windows, whose device of two functions can only be reset together from the start (43 checks). Windows with the device of one function passes again; no start was stuck. See "Run 266" |
 
 Run numbers are those GitHub shows for the `build` workflow.
