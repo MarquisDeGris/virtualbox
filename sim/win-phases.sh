@@ -203,6 +203,26 @@ disk_reads_now()
         | grep -a -o -E '<Counter c="[0-9]+"[^>]*name="[^"]*ReqsRead"' | sed -E 's/^<Counter c="([0-9]+)".*$/\1/' | head -n 1
 }
 
+# What the KVM of this machine counts for its VMs, a line for each: how often
+# the guest left and what for, how many interrupts were put into it, how often
+# it halted, and how the time stamp counter of its first CPU is shifted and
+# scaled.  Nothing where the kernel does not show that.
+kvm_counters()
+{
+    local d f
+    mount -t debugfs debugfs /sys/kernel/debug 2> /dev/null
+    for d in /sys/kernel/debug/kvm/[0-9]*-[0-9]*; do
+        [ -d "$d" ] || continue
+        for f in exits irq_exits irq_injections irq_window_exits nmi_injections halt_exits halt_wakeup io_exits mmio_exits signal_exits hypercalls; do
+            [ -r "$d/$f" ] && printf '%s=%s ' "$f" "$(cat "$d/$f" 2> /dev/null)"
+        done
+        for f in tsc-offset tsc-scaling-ratio guest_mode; do
+            [ -r "$d/vcpu0/$f" ] && printf '%s=%s ' "$f" "$(cat "$d/vcpu0/$f" 2> /dev/null)"
+        done
+        echo
+    done
+}
+
 # A Windows which is stuck early in its start (run 265, once, on the branch
 # for 7.1 with the KVM backend of Cyberus Technology and an AMD EPYC 7763: the
 # kernel of Windows had been started, nothing was read from the disk any more,
@@ -218,6 +238,10 @@ stuck_note()
         echo "    | exits $(exits_now), $(VBM_TIMEOUT=30 vbm debugvm "$VM" getregisters --cpu=0 rip rsp rflags cr8 2>&1 | tr -d '\r' | grep -a -E '^(rip|rsp|rflags|cr8)|rror' | tr -s ' ' | tr '\n' ' ' | cut -c1-170)"
         sleep 2
     done
+    echo "    ---- what KVM counts for the VM, twice, ten seconds apart:"
+    kvm_counters | cut -c1-400 | sed 's/^/    | /'
+    sleep 10
+    kvm_counters | cut -c1-400 | sed 's/^/    | /'
     for what in clocks activetimers lapic; do
         echo "    ---- debugvm info $what:"
         VBM_TIMEOUT=60 vbm debugvm "$VM" info "$what" 2>&1 | tr -d '\r' | grep -a -v '^ *$' | head -n 30 | cut -c1-170 | sed 's/^/    | /'
