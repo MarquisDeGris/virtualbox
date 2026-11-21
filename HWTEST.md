@@ -13,16 +13,26 @@ was empty: its PCI driver runs the port and the slot, a saved state is
 loaded, the power button works before and after. On the branches for
 the 7.1 and 7.2 lines with the KVM backend of Cyberus Technology the
 simulation has had Windows with the emulated drive in the slot as well,
-four times. Three times Windows started with it, read from it, let go
+seven times. Six times Windows started with it, read from it, let go
 of it when asked, took it again, had it taken by force and took it once
-more (runs 250, 253 and 254 in STATUS.md). Once, with the same device
-code, Windows let go of it when asked and then did nothing any more,
-with the events of the slot left unanswered (run 251); why is not known
-yet, so parts F to H with a Windows guest are where to look closely. On
-the branch of the merge request no Windows has had a device in the slot
-yet, and nothing was tried anywhere with a graphics card, with
-Thunderbolt, with a device of several functions or with an IOMMU of
-AMD.
+more (runs 250, 253, 254, 258, 259 and 261 in STATUS.md). Once, with the
+same device code, Windows let go of it when asked and then did nothing
+any more, with the events of the slot left unanswered (run 251); why is
+not known yet, so parts F to H with a Windows guest are where to look
+closely. On the branch of the merge request no Windows has had a device
+in the slot yet.
+
+A device with two functions has been in the simulation with a Linux
+guest (run 264, on the branch for 7.2 with that backend): two emulated
+NVMe controllers at one address, which the host has in one IOMMU group
+as it has a graphics card and its audio function. Both were passed
+through, the device went out of the slot and into it as one, whichever
+function the command named, and a device of which one function was
+missing was refused. The host could reset each of those two functions
+by itself, which it cannot for many real devices; part C is about that.
+
+Nothing was tried anywhere with a graphics card, with Thunderbolt or
+with an IOMMU of AMD.
 
 ## 1. What is needed
 

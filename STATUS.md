@@ -1032,6 +1032,50 @@ PCI bus code and the testcase are the same files on the branches with
 the backend, so this stands for those too. The testcases of the tree
 pass in both runs, 16 on 7.1 and 15 on 7.2.
 
+**Run 264** (2026-11-20 to 21, `sim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f`, 34 minutes, Intel Xeon
+6975P-C): the first run of the simulation with a device of two
+functions, which is the part `mfhost`. **160 passed, none failed, none
+skipped**; 59 of them are the new part.
+
+- The virtual machine standing in for a host has two NVMe controllers at
+  0000:01:00.0 and 0000:01:00.1 behind its root port, each with a drive
+  of its own. Its kernel has them in one IOMMU group with nothing else
+  in it, which is what makes them one device to hand over; the checklist
+  script of INSTALL.md says so for each. Both are bound to `vfio-pci`.
+- **Both functions passed through, no hot-plug** (8 checks): the guest
+  has two controllers, reads from each drive what is on it (two
+  checksums), writes to both, gets MSI-X interrupts of both, reads again
+  after pause and resume; saving the state is refused and the VM runs
+  on. What the guest wrote is on both drives of the host afterwards.
+- **The device in the hot-plug capable slot** (19 checks): `showvminfo`
+  tells the same for each function; the layout of each function is
+  stored; `unplugpci` with the first function named has the guest asked
+  and both drives gone after 8 seconds; `plugpci` with the second
+  function named puts the device back and the guest reads from both
+  drives; `unplugpci --force` takes both away from a guest which uses
+  them and the VM runs on; put in again both are read. No line about a
+  failed reset or register write.
+- **A start without the device** (15 checks): the VM is built from the
+  two stored layouts and the guest finds the slot empty. With one of the
+  two functions bound to `vfio-pci` and the other not, `plugpci` is
+  refused and the guest gets nothing of the device: all functions or
+  none. With both bound the device goes in and both drives are read.
+  The state is saved with the slot empty, and when it is loaded with
+  the device there, the guest has both drives again.
+- **The host takes the device back** (9 checks): both functions are
+  removed on the host at once; the guest is asked and lets go, the host
+  has both after 6 seconds, the VM runs on; after a rescan the device
+  is put in again and both drives are read.
+- The guest numbers its two controllers differently from one time to
+  the next (the first function was `nvme0` once and `nvme1` twice in one
+  VM), so its script finds each drive by the PCI device it belongs to.
+- What this still does not have: the host can reset each of these two
+  functions by itself. Functions which can only be reset together, as
+  those of many graphics cards, are gone through by the testcase alone
+  ("Reset of functions which can't be reset on their own"). And the
+  guest was Linux.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -1735,8 +1779,9 @@ harness since WP5, saved states since the fourth part of WP6.
    the slot (taken out with the guest asked, put in by naming either
    function, taken by force), a start without it, a device of which one
    function is not to be had, a saved state, and the host taking both
-   functions back. Written without having run; the first run is for
-   finding out. Windows with such a device comes after that.
+   functions back. Its first run, 264 on the branch for 7.2 with the KVM
+   backend, passes all of it: 59 checks. Left: Windows with such a
+   device, and the same on the branch for 7.1.
 5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259
    and 261 and stopped after the first removal in run 251, on the
    branches with the backend of Cyberus Technology; run 261 had an AMD
@@ -1857,7 +1902,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 56 tests, ACPI table check | `f563e7f8` | all pass with ASan, LSan and UBSan (run 233) and without them (run 232) |
 | T2 fuzz | running in CI | `f563e7f8` | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 233); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | passes | `f563e7f8` | Run 232, 80 checks with the Linux guest and 27 with Windows on the runner, all pass (a run for finding out; run 231 before it failed for four waits of the simulation, see there). For the head before the last two commits: run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above |
+| T4 system simulation | passes | `f563e7f8` | Run 232, 80 checks with the Linux guest and 27 with Windows on the runner, all pass (a run for finding out; run 231 before it failed for four waits of the simulation, see there). For the head before the last two commits: run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above. Since run 264, on the branch for 7.2 with the KVM backend of Cyberus Technology: a device with two functions in one IOMMU group, 59 checks with a Linux guest |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -1898,11 +1943,13 @@ By the definition in PLAN.md, section 7:
 What the simulation has shown since this was written: a Linux guest
 using the slot, Main and `VBoxManage` doing what they were written to do,
 the kernel interface of a real kernel. And since run 226: Windows taking the root bridge,
-the firmware tables and the empty slot. What the hardware test is still
-the first to show: a real device, a device with several functions, a
-graphics card, Thunderbolt, and what a host does which is not a virtual
-machine; and, unless run 227 shows it, Windows with a device in the
-slot.
+the firmware tables and the empty slot; since run 250 Windows with a
+device in the slot, on the branches with the KVM backend of Cyberus
+Technology; since run 264 a device with two functions, with a Linux
+guest. What the hardware test is still the first to show: a real
+device, functions which the host can only reset together, a graphics
+card, Thunderbolt, an IOMMU of AMD, and what a host does which is not a
+virtual machine.
 
 ## CI runs
 
@@ -2050,5 +2097,6 @@ slot.
 | 261 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 38 minutes, AMD EPYC 9V45. Every check passes, 172 of them, the first time for this branch with the VM behind NAT, the appliance, the TPM 2.0 and the testcases of the tree (15 pass). The first run on an AMD processor in which the VMs inside the virtual machine standing in for a host run on this backend: the second change about the register does what it is for, and Windows where the drive is passes there too, for the sixth time in seven runs. See "Run 261" |
 | 262 | `pci-passthrough-hotplug-7.1` @ `80d2f488` | sanitize, exploring | passed | 11 minutes, Intel Xeon 6975P-C. The device testcase with the sanitizers on the 7.1 line: the 56 tests and the three random tests in full length pass, no report. 16 testcases of the tree pass, the rewritten `tstGuestControlSvc` among them |
 | 263 | `pci-passthrough-hotplug-7.2` @ `5d633ceb` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The same on the 7.2 line: the 56 tests and the three random tests pass, no report. 15 testcases of the tree pass |
+| 264 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | sim, exploring | passed | 34 minutes, Intel Xeon 6975P-C. The first run of the simulation with a device of two functions (two NVMe controllers at one address, in one IOMMU group). Every check passes, 160 of them; 59 are the new part: both functions passed through, the device in the slot taken out and put in by naming either function, a start without it, a device of which one function is missing refused, a saved state, the host taking both functions back. See "Run 264" |
 
 Run numbers are those GitHub shows for the `build` workflow.
