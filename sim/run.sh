@@ -430,7 +430,7 @@ if has_part mfhost; then
     if part_simhost_prepare; then
         # The first drive is the one of part 2 and has what that part wrote to
         # it; what tells of this part is on the second drive.
-        run_simhost mfhost mfpassthrough,mfhotplug,mfstartempty,mfhostremove 600 5 3600 "" 2
+        run_simhost mfhost mfpassthrough,mfhotplug,mfstartempty,mfhostremove,mfbusreset 600 5 4200 "" 2
 
         if grep -q 'written by the guest to the second drive' "$WORK/nvme2.img"; then
             stage "what the guest wrote to the second drive is on that drive of the simulated host" ok \

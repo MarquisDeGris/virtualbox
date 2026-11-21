@@ -1342,6 +1342,96 @@ phase_mfhostremove()
     bind_dev
 }
 
+# The device of two functions when the host has no reset for a function by
+# itself, as it is with many graphics cards.  A reset of the device is then a
+# reset of the bus the functions are on, which the host does for the VM when
+# everything on that bus is the VM's.  The emulated controllers can each be
+# reset by themselves, so for this phase the host is told to forget how
+# (reset_method in sysfs), and told to remember afterwards.
+phase_mfbusreset()
+{
+    PHASE=mfbusreset
+    reset_vm
+    mf_wanted || return
+    bind_dev || { stage "the functions of the device are bound to vfio-pci" FAILED; return; }
+    local a set=yes log n notes=0 want=0
+    for a in $HOSTFUNCS; do
+        want=$((want + 1))
+        echo "+ the host forgets how to reset $a by itself (it knew: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1))"
+        echo "" > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null || set=no
+        [ -z "$(cat "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null)" ] || set=no
+    done
+    if [ "$set" != yes ]; then
+        stage "the host has no reset for a function by itself" skipped "its kernel does not let that be set"
+        for a in $HOSTFUNCS; do
+            echo default > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null
+        done
+        return
+    fi
+    attach_funcs
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    if boot "a VM with the device whose functions the host cannot reset by themselves boots the guest"; then
+        log="$VMDIR/Logs/VBox.log"
+        guest_reads_both 1 "guest: reads from both drives of the device"
+        for a in $HOSTFUNCS; do
+            grep -a -q "VFIO#0\.${a##*.}: The function can't be reset on its own, a reset is going to affect everything on its bus" "$log" \
+                && notes=$((notes + 1))
+        done
+        if [ "$notes" = "$want" ]; then
+            stage "the device tells of each function that it cannot be reset on its own" ok
+        else
+            stage "the device tells of each function that it cannot be reset on its own" FAILED "$notes of $want"
+            grep -a -E 'VFIO#.*reset' "$log" | cut -c1-200 | head -n 8 | sed 's/^/    | /'
+        fi
+
+        # A reset of the VM is a reset of the device.
+        serial_mark
+        run controlvm "$VM" reset
+        if wait_serial 'GUEST: READY' "$BOOT_WAIT" 1; then
+            stage "the guest boots again after the VM was reset" ok
+            guest_reads_both 1 "guest: reads from both drives after the VM was reset"
+        else
+            stage "the guest boots again after the VM was reset" FAILED
+            diag
+        fi
+
+        # The guest switching the slot off is a reset of the device as well.
+        serial_mark
+        if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
+            stage "unplugpci: the guest is asked and lets go of the device" ok
+        else
+            stage "unplugpci: the guest is asked and lets go of the device" FAILED
+            diag
+        fi
+        wait_serial 'GUEST: GONE 1' 30 || echo "    the guest has not said that the drives are gone"
+        serial_mark
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci puts the device into the slot again" ok
+        else
+            stage "plugpci puts the device into the slot again" FAILED
+            diag
+        fi
+        guest_reads_both 2 "guest: takes the device and reads from both drives"
+
+        # What the log has of the resets: the functions refusing a reset of
+        # their own, which is what leads to the reset of the bus, and no word
+        # of a reset which did not work.
+        n=$(grep -a -c -E "The function can't be reset on its own \(" "$log" 2> /dev/null)
+        grep -a -E "can't be reset on its own \(|could not be reset|is not reset now" "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
+        if [ "${n:-0}" -gt 0 ] && ! grep -a -q -E 'could not be reset|Failed to update command register|Failed to clear the command register' "$log"; then
+            stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" ok "$n times a function had no reset of its own"
+        else
+            stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" FAILED "$n times a function had no reset of its own"
+            grep -a -E 'could not be reset|Failed to (update|clear)' "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
+        fi
+    fi
+    end_phase
+    for a in $HOSTFUNCS; do
+        echo default > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null
+        echo "+ the host knows again how to reset $a: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1)"
+    done
+}
+
 
 # win-phases.sh takes the functions above and has phases of its own.
 [ -n "${SIM_LIB_ONLY:-}" ] && return 0
@@ -1362,6 +1452,7 @@ if setup; then
             mfhotplug)     phase_mfhotplug ;;
             mfstartempty)  phase_mfstartempty ;;
             mfhostremove)  phase_mfhostremove ;;
+            mfbusreset)    phase_mfbusreset ;;
             *)           echo "unknown phase $p" ;;
         esac
     done
