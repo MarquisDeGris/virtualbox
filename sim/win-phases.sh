@@ -59,6 +59,9 @@ MARKS='^WIN: (SETUP|SPECIALIZE|FIRSTLOGON|BUTTON-DEFAULT|UP|OS=|REPORT-END|SHUTD
 # The drive behind the port with the slot, as the script in the guest tells
 # of it once the driver of Windows has it.
 DRIVE_RE='^WIN: PRESENT [0-9]+ at=1\.0\.0 id=[^ ]* status=OK problem=0 service=stornvme'
+# The same for the second function of a device which has two, each an NVMe
+# controller with a drive of its own (run.sh, part "mfwinhost").
+DRIVE2_RE='^WIN: PRESENT [0-9]+ at=1\.0\.1 id=[^ ]* status=OK problem=0 service=stornvme'
 
 
 # A picture of the screen of the VM, the only way to see what setup is doing.
@@ -317,6 +320,15 @@ create_vm() # <cpus> <MiB> <disk> <DVD or emptydrive> <DVD or emptydrive> <host 
         return 1
     fi
     run modifyvm "$VM" --pci-attach "$6@0000:01:00.0" && ATTACHED=$6
+    # The other functions of the device of the host, where it has more than
+    # one: each at its function number of the same guest device.
+    if [ -n "$6" ] && [ "$6" = "$HOSTADDR" ]; then
+        local a
+        for a in $HOSTFUNCS; do
+            [ "$a" = "$6" ] && continue
+            run modifyvm "$VM" --pci-attach "$a@0000:01:00.${a##*.}" && ATTACHED="$ATTACHED $a"
+        done
+    fi
     run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
     [ -n "$7" ] && run setextradata "$VM" "VBoxInternal2/HostPCILayout/$6" "$7"
     VMDIR=$(dirname "$(vbm showvminfo "$VM" --machinereadable | sed -n 's/^CfgFile="\(.*\)"$/\1/p')")
@@ -755,6 +767,39 @@ win_drive_gone() # <what> [<seconds>]
     return 1
 }
 
+# The device of the host has a second function.
+two_funcs()
+{
+    [ "$HOSTFUNCS" != "$HOSTADDR" ]
+}
+
+# What Windows makes of the second function, where the device has one: its
+# driver has the controller, and what is read from its drive is what is on it.
+win_second() # <what> [<seconds>]
+{
+    two_funcs || return 0
+    if    wait_serial "$DRIVE2_RE" "${2:-420}" \
+       && wait_serial "^WIN: READ2 [0-9]+ md5=$EXPECT_MD5B\$" 420; then
+        stage "$1" ok
+        serial_show '^WIN: (PRESENT [0-9]+ at=1\.0\.1|DRIVE2|READ2|NODRIVE2|DRIVE-NOTE)' 6
+        return 0
+    fi
+    stage "$1" FAILED "last: $(serial_new | grep -a -E '^WIN: (PRESENT [0-9]+ at=1\.0\.1|READ2|NODRIVE2|GONE)' | tail -n 1 | cut -c1-140)"
+    diag
+    return 1
+}
+
+win_second_gone() # <what> [<seconds>]
+{
+    two_funcs || return 0
+    if wait_serial '^WIN: GONE [0-9]+ at=1\.0\.1' "${2:-300}"; then
+        stage "$1" ok
+        return 0
+    fi
+    stage "$1" FAILED "last: $(serial_new | grep -a -E '^WIN: (PRESENT|GONE)' | tail -n 2 | cut -c1-140 | tr '\n' '|')"
+    return 1
+}
+
 # A guest which has stopped telling anything while its VM runs (run 251: from
 # the moment it had switched the slot off, with the events of the slot left
 # unanswered).  What shows of it from the outside: the slot and the message
@@ -813,7 +858,8 @@ phase_hotplug()
     report_checks "" hotplug,present,inuse
     win_has_drive "guest: has the drive in the slot, with its driver" || { shot; return; }
     win_reads "guest: reads from the drive in the slot"
-    local lay t0
+    win_second "guest: has the second function too, with its driver, and reads from its drive"
+    local lay t0 second=${HOSTFUNCS##* }
     lay=$(vbm getextradata "$VM" "VBoxInternal2/HostPCILayout/$HOSTADDR" 2> /dev/null | sed -n 's/^Value: //p')
     echo "    layout stored: ${lay:-none}"
 
@@ -826,6 +872,7 @@ phase_hotplug()
         diag
     fi
     win_drive_gone "guest: the drive is gone"
+    win_second_gone "guest: the second function is gone with it"
     check_pcistate hotplug,absent,unused
     slot_registers_check
     if ! guest_goes_on "the guest keeps running" 300; then
@@ -839,7 +886,9 @@ phase_hotplug()
 
     if [ "$(pcistate)" = hotplug,absent,unused ]; then
         serial_mark
-        if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$HOSTADDR"; then
+        # Where the device has two functions the command names the second
+        # one here: a device is all of its functions, and any of them names it.
+        if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$second"; then
             stage "plugpci puts the device into the slot" ok
         else
             stage "plugpci puts the device into the slot" FAILED
@@ -847,6 +896,7 @@ phase_hotplug()
         fi
         win_has_drive "guest: takes the device in the slot, its driver has it" 600
         win_reads "guest: reads from the drive which was put in"
+        win_second "guest: takes the second function as well and reads from its drive" 600
         check_pcistate hotplug,present,inuse
         slot_registers_check
     fi
@@ -859,6 +909,7 @@ phase_hotplug()
         diag
     fi
     win_drive_gone "guest: notices that the drive is gone" 420
+    win_second_gone "guest: notices that the second function is gone" 420
     if ! guest_goes_on "the VM runs on after that" 300; then
         frozen_note
         WIN_UP=no
@@ -874,6 +925,7 @@ phase_hotplug()
     fi
     win_has_drive "guest: takes the device again, its driver has it" 600
     win_reads "guest: reads from the drive again"
+    win_second "guest: takes the second function again and reads from its drive" 600
     check_log_quiet
     shot
 }

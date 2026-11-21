@@ -243,20 +243,42 @@ function Md5-OfStart([string]$Path, [int]$Bytes) {
     }
 }
 
-# Reads from the NVMe drive once Windows has made a disk of it.
-function Read-Drive([int]$Round) {
+# Reads from the drive of an NVMe controller once Windows has made a disk of
+# it.  The controller is given by where it is ("bus.device.function") and by
+# its instance ID: a device with two functions has two controllers and two
+# disks, and the disk of a controller is the one whose parent it is.  The
+# lines about a function other than the first have a 2 after their first
+# word (READ2, DRIVE2, NODRIVE2).
+function Read-Drive([int]$Round, [string]$Where, [string]$Controller) {
+    $tag = ''
+    if ($Where -notmatch '\.0$') { $tag = '2' }
     $disk = $null
+    $seenParents = ''
     for ($t = 0; $t -lt 20 -and -not $disk; $t++) {
-        $disk = Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
-                Where-Object { $_.PNPDeviceID -match 'VEN_NVME' -or $_.Model -match 'NVMe' } | Select-Object -First 1
+        $all = @(Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
+                 Where-Object { $_.PNPDeviceID -match 'VEN_NVME' -or $_.Model -match 'NVMe' })
+        $parents = @()
+        foreach ($c in $all) {
+            $parent = Prop $c.PNPDeviceID 'DEVPKEY_Device_Parent'
+            if ($parent -ne '') { $parents += $parent }
+            if ($parent -ne '' -and $parent -eq $Controller -and -not $disk) { $disk = $c }
+        }
+        $seenParents = $parents -join ','
+        # Nothing says whose disk the one disk is, or it names somebody else:
+        # the first function takes it, as it did when there was nothing to
+        # choose from, and the line below tells.
+        if (-not $disk -and $all.Count -eq 1 -and $tag -eq '' -and $t -ge 3) { $disk = $all[0] }
         if (-not $disk) { Start-Sleep -Seconds 3 }
     }
     if (-not $disk) {
-        Say ("NODRIVE {0}" -f $Round)
+        Say ("NODRIVE{0} {1} controller={2} parents={3}" -f $tag, $Round, $Controller, $seenParents)
         return
     }
-    Say ("DRIVE {0} {1} model={2} size={3}" -f $Round, $disk.DeviceID, $disk.Model, $disk.Size)
-    Say ("READ {0} md5={1}" -f $Round, (Md5-OfStart $disk.DeviceID 8388608))
+    if ((Prop $disk.PNPDeviceID 'DEVPKEY_Device_Parent') -ne $Controller) {
+        Say ("DRIVE-NOTE {0} the disk does not name the controller as its parent: controller={1} parents={2}" -f $Round, $Controller, $seenParents)
+    }
+    Say ("DRIVE{0} {1} {2} model={3} size={4}" -f $tag, $Round, $disk.DeviceID, $disk.Model, $disk.Size)
+    Say ("READ{0} {1} md5={2}" -f $tag, $Round, (Md5-OfStart $disk.DeviceID 8388608))
 }
 
 # What the outside asks for: a DVD with the directory simcmd in the drive.
@@ -274,7 +296,7 @@ function Host-Command {
 $seen = Behind-Bridges
 foreach ($k in $seen.Keys) {
     Say ("PRESENT 0 at={0} id={1}" -f $k, $seen[$k])
-    if ($seen[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive 0 }
+    if ($seen[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive 0 $k (($seen[$k] -split ' status=')[0]) }
 }
 $rounds = [int]($AliveSeconds / 5)
 for ($i = 1; $i -le $rounds; $i++) {
@@ -289,7 +311,7 @@ for ($i = 1; $i -le $rounds; $i++) {
     foreach ($k in $now.Keys) {
         if (-not $seen.ContainsKey($k) -or $seen[$k] -ne $now[$k]) {
             Say ("PRESENT {0} at={1} id={2}" -f $i, $k, $now[$k])
-            if ($now[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive $i }
+            if ($now[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive $i $k (($now[$k] -split ' status=')[0]) }
         }
     }
     foreach ($k in $seen.Keys) {

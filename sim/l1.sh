@@ -148,6 +148,7 @@ if [ "${SIM_GUEST:-linux}" = win ]; then
     SIM_STAGES=$STAGES \
     SIM_WHERE=$WHERE \
     SIM_HOSTADDR=$addr \
+    SIM_HOSTFUNCS="$funcs" \
     WIN_DISK_DEV=/dev/vda \
     WIN_CMD_ISO=$SIM_WS/sim-work/cmd-shutdown.iso \
     WIN_START_WAIT=${SIM_BOOT_WAIT:-3600} \

@@ -1780,8 +1780,12 @@ harness since WP5, saved states since the fourth part of WP6.
    function, taken by force), a start without it, a device of which one
    function is not to be had, a saved state, and the host taking both
    functions back. Its first run, 264 on the branch for 7.2 with the KVM
-   backend, passes all of it: 59 checks. Left: Windows with such a
-   device, and the same on the branch for 7.1.
+   backend, passes all of it: 59 checks. Windows with such a device is
+   written since (part `mfwinhost`: the Windows which the run installed,
+   in the virtual machine with the device of two functions; its script
+   finds the disk of each controller by the device it belongs to) and
+   has not run yet. Left after that: the same on the branch for 7.1 and
+   on the branch of the merge request.
 5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259
    and 261 and stopped after the first removal in run 251, on the
    branches with the backend of Cyberus Technology; run 261 had an AMD

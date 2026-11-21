@@ -44,8 +44,11 @@
 #      in all when the counter is there.  With the counter told of, Windows
 #      leaves the HPET alone (run 231).
 #
+#   4b. The same with the device of two functions of 2b (SIM_PARTS has
+#      "mfwinhost").
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, win, winhost.  Without it: runner,simhost.
+# mfhost, win, winhost, mfwinhost.  Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
 # its serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox
@@ -86,7 +89,7 @@ stage() # <what> <ok|FAILED|skipped> [<note>]
     echo "$line" >> "$STAGES"
 }
 
-has_part() # <runner|simhost|mfhost|win|winhost>
+has_part() # <runner|simhost|mfhost|win|winhost|mfwinhost>
 {
     case "$PARTS" in *",$1,"*) return 0 ;; esac
     return 1
@@ -115,6 +118,10 @@ finish()
         fi
         if    has_part winhost && ! grep -q '^winhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES" \
            && ! grep -q '^runner/setup: Windows with the drive in the slot: skipped (no AMD processor' "$STAGES"; then
+            missing=1
+        fi
+        if    has_part mfwinhost && ! grep -q '^mfwinhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES" \
+           && ! grep -q '^runner/setup: Windows with the device of two functions in the slot: skipped (no AMD processor' "$STAGES"; then
             missing=1
         fi
     fi
@@ -503,10 +510,13 @@ if has_part win; then
     fi
 fi
 
-if has_part winhost; then
-    note "Part 4: Windows with the drive in the slot, in a virtual machine with an IOMMU and a PCIe device"
+# Windows where the device is: the Windows which part 3 installed, in a
+# virtual machine as in part 2 or 2b.
+part_winhost() # <name in the results> <functions of the device: 1 or 2> <what this is called in the results>
+{
+    local where=$1 funcs=$2 what=$3
     if ! grep -q '^runner/win-install: Windows is installed.*: ok' "$STAGES" || ! sudo test -s /tmp/sim-win/win.vdi; then
-        stage "Windows with the drive in the slot" skipped "there is no installed Windows"
+        stage "$what" skipped "there is no installed Windows"
     elif    ! grep -q AuthenticAMD /proc/cpuinfo && [ "${WIN_NESTED_ALWAYS:-no}" != yes ] \
          && ! grep -q -s -E '^VBOX_WITH_KVM +:= +1' "$WS/AutoConfig.kmk"; then
         # Runs 228 and 229 had runners with Intel processors.  Windows has its
@@ -520,7 +530,7 @@ if has_part winhost; then
         # one of Cyberus Technology (the third condition) gives Windows the
         # Hyper-V interface, with which it does not need the HPET for its
         # time, so there it is tried on every processor.
-        stage "Windows with the drive in the slot" skipped "no AMD processor here, and Windows does not get through a start at this depth on others"
+        stage "$what" skipped "no AMD processor here, and Windows does not get through a start at this depth on others"
     elif part_simhost_prepare; then
         sudo ls -l /tmp/sim-win/win.vdi
         # Half a million exits of a millisecond each make some ten minutes for
@@ -529,8 +539,20 @@ if has_part winhost; then
         # minutes, with few exits.  It gets an hour, less memory to go through
         # and that memory in huge pages (l1.sh), and tells every three minutes
         # how far it is.
-        run_simhost winhost win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi
+        run_simhost "$where" win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi "$funcs"
     fi
+}
+
+if has_part winhost; then
+    note "Part 4: Windows with the drive in the slot, in a virtual machine with an IOMMU and a PCIe device"
+    part_winhost winhost 1 "Windows with the drive in the slot"
+fi
+
+if has_part mfwinhost; then
+    note "Part 4b: the same with a device of two functions"
+    # The disk of Windows is the one part 4 had: what that part wrote to it
+    # went to a temporary file.
+    part_winhost mfwinhost 2 "Windows with the device of two functions in the slot"
 fi
 
 sudo chmod -R a+rX "$OUT" 2> /dev/null
