@@ -1180,6 +1180,29 @@ What the simulation has not got of such a device: more than two
 functions, a function which is not an NVMe controller, an option ROM,
 legacy VGA, and a host which is not a virtual machine.
 
+**Run 267** (2026-11-21, `sim`, for finding out,
+`pci-passthrough-hotplug-v1` @ `f563e7f8`, 38 minutes, Intel Xeon
+6975P-C): the branch of the merge request, which is the development
+line with its own KVM backend, with what the simulation has got since
+its last run there (232). **169 passed, none failed, none skipped.**
+
+- The device of two functions on the development line: all 68 checks
+  pass, the 59 of run 264 and the 9 about functions which the host
+  cannot reset by themselves, with the reset of the bus done by the
+  kernel and reported done.
+- The 67 checks with the device of one function pass, as in run 232.
+- On the runner, new for this branch and passing: the VM behind NAT and
+  the appliance exported and imported (the development line has the
+  changes to the import by itself).
+- The testcases of the tree which this line has pass, 12 of them; three
+  of the shared clipboard are not where the step looks for them on this
+  line, and the one of the guest control service is as upstream has it.
+
+With that the device of two functions has been through the simulation on
+all three lines, and the reset of the bus on the development line and
+on 7.2. The device, the port and the testcase are the same code on the
+three.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -1891,10 +1914,11 @@ harness since WP5, saved states since the fourth part of WP6.
    the root port of the simulated host does not do; with the port
    changed, run 266 on the branch for 7.2 passes all of it, 284 checks:
    the reset of the bus with the Linux guest, and Windows with a device
-   of two functions which can only be reset together. Left: the phase
-   about the reset on the branch for 7.1, which has it failing for the
-   port (run 265), and the part with the Linux guest on the branch of
-   the merge request.
+   of two functions which can only be reset together, and run 267 on
+   the branch of the merge request passes the part with the Linux
+   guest, 169 checks in all. Left: the phase about the reset on the
+   branch for 7.1, which has it failing for the port (run 265); it
+   comes with the next run of that branch.
 4d. Windows stuck early in its start, once, in run 265 (the branch for
    7.1 with the KVM backend, an AMD EPYC 7763, the VM inside the virtual
    machine standing in for a host): not understood. The simulation
@@ -2025,7 +2049,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | T1 unit | running in CI, 56 tests, ACPI table check | `f563e7f8` | all pass with ASan, LSan and UBSan (run 233) and without them (run 232) |
 | T2 fuzz | running in CI | `f563e7f8` | per run 2000 device models, 400000 operations on the root port and 40000 on the device in the slot; with the sanitizers 20000 models, 2000000 and 100000 operations (run 233); 200000 models with another seed and sanitizers (run 70, before WP3) |
 | T3 kernel simulation | not run | | The driver takes PCI devices behind an IOMMU and refuses everything else; the sample devices of the kernel are not such devices, and the runners have no IOMMU. What T3 was to show of the kernel interface is what the hardware test shows |
-| T4 system simulation | passes | `f563e7f8` | Run 232, 80 checks with the Linux guest and 27 with Windows on the runner, all pass (a run for finding out; run 231 before it failed for four waits of the simulation, see there). For the head before the last two commits: run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above. Since run 264, on the branch for 7.2 with the KVM backend of Cyberus Technology: a device with two functions in one IOMMU group, 59 checks with a Linux guest |
+| T4 system simulation | passes | `f563e7f8` | Run 232, 80 checks with the Linux guest and 27 with Windows on the runner, all pass (a run for finding out; run 231 before it failed for four waits of the simulation, see there). For the head before the last two commits: run 224, 79 checks, a run which fails if one of them does, with a Linux guest and an emulated NVMe drive behind an emulated IOMMU: passthrough with memory access by the device and MSI-X interrupts, pause and resume, the refused saved state, the hot-plug capable slot with `unplugpci` and `plugpci` (the guest being asked, and forced), the host asking for the device back, a start without the device, saved states with the empty slot. One device with one function. Windows as the guest so far with the empty slot only (run 226, 40 of 41 checks, not part of the strict run). See "Installation and the simulation" above. Since run 264, on the branch for 7.2 with the KVM backend of Cyberus Technology: a device with two functions in one IOMMU group, 59 checks with a Linux guest; the same on the head of the merge request in run 267 (169 checks in all, with the reset of the bus for functions which have no reset of their own), and with Windows on the branches for 7.2 and 7.1 (runs 265 and 266) |
 | T5 hardware | not run | | needs a human with hardware, see [HWTEST.md](HWTEST.md) |
 
 ## Security requirements and what shows them
@@ -2223,5 +2247,6 @@ virtual machine.
 | 264 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | sim, exploring | passed | 34 minutes, Intel Xeon 6975P-C. The first run of the simulation with a device of two functions (two NVMe controllers at one address, in one IOMMU group). Every check passes, 160 of them; 59 are the new part: both functions passed through, the device in the slot taken out and put in by naming either function, a start without it, a device of which one function is missing refused, a saved state, the host taking both functions back. See "Run 264" |
 | 265 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | allsim, exploring | passed (two checks of the simulation fail) | 128 minutes, AMD EPYC 7763. 253 checks pass. New and passing: the device of two functions on the 7.1 line (59 checks), and Windows with such a device (41 checks: both controllers with the driver of Windows, both drives read, taken out, put in by naming the second function, taken by force, put in again). Failing: the kernel of the simulated host calls a reset of the bus failed which it has done, because the emulated root port never reports its link up (the phase about functions without a reset of their own, 8 of 9 pass); and Windows with the device of one function was stuck early in its start, once, for the hour the run gave it. See "Run 265" |
 | 266 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 68 minutes, Intel Xeon 6975P-C. Every check passes, 284 of them. With the changed root port of the simulated host the kernel does the reset of the bus which the device asks for and reports it done: with the Linux guest (9 checks) and with Windows, whose device of two functions can only be reset together from the start (43 checks). Windows with the device of one function passes again; no start was stuck. See "Run 266" |
+| 267 | `pci-passthrough-hotplug-v1` @ `f563e7f8` | sim, exploring | passed | 38 minutes, Intel Xeon 6975P-C. The branch of the merge request with what the simulation has got since run 232. Every check passes, 169 of them: the device of two functions (68, with the reset of the bus), the device of one function (67), and on the runner the VM behind NAT and the appliance for the first time on this branch. 12 testcases of the tree pass. See "Run 267" |
 
 Run numbers are those GitHub shows for the `build` workflow.
