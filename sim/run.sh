@@ -45,7 +45,8 @@
 #      leaves the HPET alone (run 231).
 #
 #   4b. The same with the device of two functions of 2b (SIM_PARTS has
-#      "mfwinhost").
+#      "mfwinhost"), whose functions the host cannot reset by themselves
+#      there: what a graphics card with its audio function mostly is.
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
 # mfhost, win, winhost, mfwinhost.  Without it: runner,simhost.
@@ -361,9 +362,14 @@ part_simhost_prepare()
 run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds> [<disk image of a Windows guest or ""> [<functions of the device: 1 or 2>]]
 {
     local where=$1 phases=$2 bootwait=$3 warp=$4 limit=$5 windisk=${6:-} funcs=${7:-1} t0 rc
+    # The eighth argument, "noreset": the functions of the device are ones
+    # the host cannot reset by themselves, see forget_resets in
+    # vbox-phases.sh.  The phases with the Linux guest have one of their own
+    # for that; with Windows it is so from the start.
     local cmdline="console=ttyS0 loglevel=4 mitigations=off intel_iommu=on rdinit=/init panic=-1"
     cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
     [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
+    [ "${8:-}" = noreset ] && cmdline="$cmdline SIM_NORESET=1"
     local mem=8G cpu=host
     local -a extra=()
     if [ -n "$windisk" ]; then
@@ -384,7 +390,16 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     # two of them as the functions of one device.
     local -a dev=(-drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw"
                   -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1")
+    # The root port.  For the device of two functions it is one which does
+    # not tell whether its link is up (a port for 2.5 GT/s has not got to).
+    # The port QEMU emulates by default says that it tells and then never
+    # does, and a kernel which resets the bus behind such a port waits for
+    # the link in vain and calls the reset failed, having done it (run 265:
+    # "Data Link Layer Link Active not set"); a port of a real host tells.
+    # The reset of the bus is what the phase mfbusreset is about.
+    local port="pcie-root-port,id=rp1,chassis=1,slot=1"
     if [ "$funcs" = 2 ]; then
+        port="$port,x-speed=2_5,x-width=1"
         cmdline="$cmdline SIM_MD5B=$MD5B"
         dev=(-drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw"
              -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1,addr=00.0,multifunction=on"
@@ -399,7 +414,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         -device intel-iommu,intremap=on \
         -virtfs "local,path=/,mount_tag=hostroot,security_model=none,readonly=on,multidevs=remap" \
         -virtfs "local,path=$OUT,mount_tag=simout,security_model=none" \
-        -device pcie-root-port,id=rp1,chassis=1,slot=1 \
+        -device "$port" \
         "${dev[@]}" \
         "${extra[@]}" \
         < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/$where-console.log"
@@ -539,7 +554,11 @@ part_winhost() # <name in the results> <functions of the device: 1 or 2> <what t
         # minutes, with few exits.  It gets an hour, less memory to go through
         # and that memory in huge pages (l1.sh), and tells every three minutes
         # how far it is.
-        run_simhost "$where" win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi "$funcs"
+        if [ "$funcs" = 2 ]; then
+            run_simhost "$where" win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi "$funcs" noreset
+        else
+            run_simhost "$where" win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi "$funcs"
+        fi
     fi
 }
 

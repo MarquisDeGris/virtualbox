@@ -153,9 +153,14 @@ stalls_stage()
 
 # Waits for a line of the guest.  Tells what the guest says about where it is
 # meanwhile, and takes a picture of the screen every three minutes.
-wait_win() # <regex> <seconds>
+#
+# With a third argument the wait ends early, with 2, for a Windows which is
+# stuck in its start: it has not said a word yet and has not read from its
+# disk for that many seconds.  A Windows which starts reads from its disk all
+# the time until its script runs.
+wait_win() # <regex> <seconds> [<seconds without a read from the disk>]
 {
-    local t0 now n st last=0 shown=$SERIAL_FROM
+    local t0 now n st last=0 shown=$SERIAL_FROM reads lastreads= since=0
     t0=$(date +%s)
     while :; do
         now=$(( $(date +%s) - t0 ))
@@ -175,10 +180,52 @@ wait_win() # <regex> <seconds>
             esac
             echo "    [$now s] waiting, the VM is $st; $(progress_note)"
             shot
+            if [ -n "${3:-}" ] && ! serial_has '^WIN: '; then
+                reads=$(disk_reads_now)
+                if [ -z "$reads" ] || [ "$reads" != "$lastreads" ]; then
+                    lastreads=$reads
+                    since=$now
+                elif [ $((now - since)) -ge "$3" ]; then
+                    echo "    [$now s] nothing was read from the disk for $((now - since)) s ($reads reads in all) and the guest has not said a word"
+                    return 2
+                fi
+            fi
         fi
         stall_check
         sleep 5
     done
+}
+
+# How often the guest has read from its disk so far.
+disk_reads_now()
+{
+    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/Public/Storage/AHCI0/Port0/ReqsRead' 2> /dev/null | tr -d '\r' \
+        | grep -a -o -E '<Counter c="[0-9]+"[^>]*name="[^"]*ReqsRead"' | sed -E 's/^<Counter c="([0-9]+)".*$/\1/' | head -n 1
+}
+
+# A Windows which is stuck early in its start (run 265, once, on the branch
+# for 7.1 with the KVM backend of Cyberus Technology and an AMD EPYC 7763: the
+# kernel of Windows had been started, nothing was read from the disk any more,
+# the guest left for VirtualBox for interrupts of the host only, some 70 times
+# a second, and the picture on the screen changed once in ten minutes).  What
+# shows of it from the outside: where CPU 0 is and whether that moves, what
+# the guest leaves for, and what time it is in the VM.
+stuck_note()
+{
+    local i what
+    echo "    ---- the guest is stuck in its start; what the VM shows of it:"
+    for i in 1 2 3 4 5 6; do
+        echo "    | exits $(exits_now), $(VBM_TIMEOUT=30 vbm debugvm "$VM" getregisters --cpu=0 rip rsp rflags cr8 2>&1 | tr -d '\r' | grep -a -E '^(rip|rsp|rflags|cr8)|rror' | tr -s ' ' | tr '\n' ' ' | cut -c1-170)"
+        sleep 2
+    done
+    for what in clocks activetimers lapic; do
+        echo "    ---- debugvm info $what:"
+        VBM_TIMEOUT=60 vbm debugvm "$VM" info "$what" 2>&1 | tr -d '\r' | grep -a -v '^ *$' | head -n 30 | cut -c1-170 | sed 's/^/    | /'
+    done
+    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/NEM/CPU0/Exit*|/TM/VirtualSync/CurrentOffset|/TM/TSC/*|/Public/Storage/AHCI0/Port0/Reqs*' 2> /dev/null \
+        | grep -a -o -E '<(Counter|U64) (c|val)="[1-9][0-9]*"[^>]*name="[^"]*"' \
+        | sed -E 's/^<[A-Za-z0-9]+ [a-z]+="([0-9]+)".*name="([^"]*)"$/\2: \1/' | head -n 40 | sed 's/^/    | /'
+    shot
 }
 
 # Waits until the VM is powered off, by the clock.
@@ -402,7 +449,37 @@ start_and_report() # <what> <seconds>
         diag
         return 1
     fi
-    if ! wait_win '^WIN: REPORT-END' "$2"; then
+    local rc=0
+    wait_win '^WIN: REPORT-END' "$2" 900 || rc=$?
+    if [ "$rc" = 2 ]; then
+        # Stuck early in its start.  That counts as failed, is looked at, and
+        # the VM is started once more: what comes after the start is what this
+        # is here for, and a second start tells whether the first was chance.
+        stage "$1" FAILED "it is stuck early in its start, $(( $(date +%s) - t0 )) s after the VM was started"
+        stuck_note
+        diag
+        keep_logs -stuck
+        power_off
+        t0=$(date +%s)
+        if ! start_vm; then
+            stage "$1, at a second attempt" FAILED "the VM does not start"
+            diag
+            return 1
+        fi
+        rc=0
+        wait_win '^WIN: REPORT-END' "$2" 900 || rc=$?
+        if [ "$rc" = 0 ]; then
+            WIN_UP=yes
+            stage "$1, at a second attempt" ok "$(( $(date +%s) - t0 )) s until its report was done"
+            return 0
+        fi
+        stage "$1, at a second attempt" FAILED "the last from the guest is: $(serial_new | grep -a '^WIN: ' | tail -n 1 | cut -c1-60)"
+        [ "$rc" = 2 ] && stuck_note
+        shot
+        diag
+        return 1
+    fi
+    if [ "$rc" != 0 ]; then
         stage "$1" FAILED "the last from the guest is: $(serial_new | grep -a '^WIN: ' | tail -n 1 | cut -c1-60)"
         shot
         diag
@@ -948,10 +1025,24 @@ mode_nested()
     # the less there is for Windows to go through when it starts.
     create_vm 1 2048 "$SIM_WORK/win-raw.vmdk" emptydrive emptydrive "$HOSTADDR" "" || return
     stage "the VM for Windows is created, with the drive in the hot-plug capable slot" ok
+    # The device of two functions is one whose functions the host cannot
+    # reset by themselves here (SIM_NORESET, run.sh), as it is with many
+    # graphics cards: every reset of the device, which is what Windows
+    # switching the slot off comes to, is a reset of the bus then.
+    if [ "${SIM_NORESET:-}" = 1 ] && two_funcs; then
+        if forget_resets; then
+            stage "the host has no reset for a function of the device by itself" ok
+        else
+            stage "the host has no reset for a function of the device by itself" skipped "its kernel does not let that be set"
+        fi
+    fi
 
     echo "==== phase win-hotplug on $WHERE"
     phase_hotplug
     stalls_stage
+    if [ "$RESETS_FORGOTTEN" = yes ]; then
+        check_bus_resets
+    fi
     # A Windows which did not get through its start is not asked to shut
     # down: its script is not there yet for hearing it, and waiting for that
     # took 20 minutes of run 230.
@@ -961,6 +1052,8 @@ mode_nested()
         end_phase
     fi
     show_exits "$SIM_OUT/VBox-$PHASE.log"
+    [ "$RESETS_FORGOTTEN" = yes ] && remember_resets
+    return 0
 }
 
 

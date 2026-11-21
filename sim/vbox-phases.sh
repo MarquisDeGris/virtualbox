@@ -19,6 +19,9 @@ HOSTADDR=${SIM_HOSTADDR:-}
 HOSTFUNCS=${SIM_HOSTFUNCS:-$HOSTADDR}
 EXPECT_MD5=${SIM_MD5:-none}
 EXPECT_MD5B=${SIM_MD5B:-none}
+# Whether the host has been told to forget how it resets the functions of the
+# device by themselves, see forget_resets.
+RESETS_FORGOTTEN=no
 BOOT_WAIT=${SIM_BOOT_WAIT:-240}
 # The waits for a line of the guest are this many times as long as written
 # down where they are made.  They are written down for the runner.  In the
@@ -363,6 +366,10 @@ check_log_quiet()
 {
     local log="$VMDIR/Logs/VBox.log" n
     local re='Failed to update command register|could not be reset|t be reset on its own|Failed to clear the command register'
+    # Where the host has been told to forget how it resets a function by
+    # itself (forget_resets), a function refusing its own reset is how it
+    # has to go, and check_bus_resets counts on those lines.
+    [ "$RESETS_FORGOTTEN" = yes ] && re='Failed to update command register|could not be reset|Failed to clear the command register'
     # What the device says once of a function the host has no reset for by
     # itself is no failure: devices with several functions are often so.
     local note='a reset is going to affect everything on its bus'
@@ -1342,30 +1349,67 @@ phase_mfhostremove()
     bind_dev
 }
 
+# A device whose functions the host cannot reset by themselves, as it is with
+# many graphics cards.  A reset of the device is then a reset of the bus the
+# functions are on, which the host does for the VM when everything on that
+# bus is the VM's.  The emulated controllers can each be reset by themselves,
+# so the host is told to forget how (reset_method in sysfs), and told to
+# remember afterwards.
+forget_resets()
+{
+    local a set=yes
+    for a in $HOSTFUNCS; do
+        echo "+ the host forgets how to reset $a by itself (it knew: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1))"
+        echo "" > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null || set=no
+        [ -z "$(cat "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null)" ] || set=no
+    done
+    if [ "$set" != yes ]; then
+        remember_resets
+        return 1
+    fi
+    RESETS_FORGOTTEN=yes
+}
+
+remember_resets()
+{
+    local a
+    for a in $HOSTFUNCS; do
+        echo default > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null
+        echo "+ the host knows how to reset $a: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1)"
+    done
+    RESETS_FORGOTTEN=no
+}
+
+# What the log of the VM has of the resets after forget_resets: the functions
+# refusing a reset of their own, which is what leads to the reset of the bus,
+# and no word of a reset which did not work.
+check_bus_resets()
+{
+    local log="$VMDIR/Logs/VBox.log" n
+    n=$(grep -a -c -E "The function can't be reset on its own \(" "$log" 2> /dev/null)
+    grep -a -E "can't be reset on its own \(|could not be reset|is not reset now" "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
+    if [ "${n:-0}" -gt 0 ] && ! grep -a -q -E 'could not be reset|Failed to update command register|Failed to clear the command register' "$log"; then
+        stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" ok "$n times a function had no reset of its own"
+    else
+        stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" FAILED "${n:-0} times a function had no reset of its own"
+        grep -a -E 'could not be reset|Failed to (update|clear)' "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
+    fi
+}
+
 # The device of two functions when the host has no reset for a function by
-# itself, as it is with many graphics cards.  A reset of the device is then a
-# reset of the bus the functions are on, which the host does for the VM when
-# everything on that bus is the VM's.  The emulated controllers can each be
-# reset by themselves, so for this phase the host is told to forget how
-# (reset_method in sysfs), and told to remember afterwards.
+# itself: the VM is reset, and the device is taken out of the slot and put in.
 phase_mfbusreset()
 {
     PHASE=mfbusreset
     reset_vm
     mf_wanted || return
     bind_dev || { stage "the functions of the device are bound to vfio-pci" FAILED; return; }
-    local a set=yes log n notes=0 want=0
+    local a log notes=0 want=0
     for a in $HOSTFUNCS; do
         want=$((want + 1))
-        echo "+ the host forgets how to reset $a by itself (it knew: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1))"
-        echo "" > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null || set=no
-        [ -z "$(cat "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null)" ] || set=no
     done
-    if [ "$set" != yes ]; then
+    if ! forget_resets; then
         stage "the host has no reset for a function by itself" skipped "its kernel does not let that be set"
-        for a in $HOSTFUNCS; do
-            echo default > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null
-        done
         return
     fi
     attach_funcs
@@ -1412,24 +1456,10 @@ phase_mfbusreset()
             diag
         fi
         guest_reads_both 2 "guest: takes the device and reads from both drives"
-
-        # What the log has of the resets: the functions refusing a reset of
-        # their own, which is what leads to the reset of the bus, and no word
-        # of a reset which did not work.
-        n=$(grep -a -c -E "The function can't be reset on its own \(" "$log" 2> /dev/null)
-        grep -a -E "can't be reset on its own \(|could not be reset|is not reset now" "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
-        if [ "${n:-0}" -gt 0 ] && ! grep -a -q -E 'could not be reset|Failed to update command register|Failed to clear the command register' "$log"; then
-            stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" ok "$n times a function had no reset of its own"
-        else
-            stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" FAILED "$n times a function had no reset of its own"
-            grep -a -E 'could not be reset|Failed to (update|clear)' "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
-        fi
+        check_bus_resets
     fi
     end_phase
-    for a in $HOSTFUNCS; do
-        echo default > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null
-        echo "+ the host knows again how to reset $a: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1)"
-    done
+    remember_resets
 }
 
 
