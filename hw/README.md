@@ -45,7 +45,8 @@ by whoever is at the machine; the scripts are short enough to be read first.
     sh hw/linux/bind.sh             # shows what giving the device to vfio-pci takes
     sudo sh hw/linux/bind.sh --do   # does it; --undo gives the device back to the host
     sudo sh hw/linux/prereq.sh      # the checklist once more, as the tests will run
-    sudo sh hw/linux/test-a.sh      # the first test
+    sudo sh hw/linux/test-a.sh      # the first test: a VM without an operating system
+    sudo sh hw/linux/test-b.sh      # the second: a small Linux guest with the driver of the device
     sh hw/publish.sh
 
 - The device is the first graphics card which is not the one the firmware
@@ -64,7 +65,16 @@ by whoever is at the machine; the scripts are short enough to be read first.
   the device. It makes a VM called `hwtest` under `hw-work/` and touches
   nothing else.
 
-The workflow runs `test-a.sh` in its simulation, with an emulated NVMe drive
+- `test-b.sh` puts a small Linux guest together from the kernel the machine
+  runs, the modules that kernel has for the device and their firmware, and
+  starts it in the VM. The guest tells on the serial port of the VM which
+  driver has the device, its interrupts, and for a graphics card its
+  connectors and whether a monitor is on one; the script turns that into
+  checks. Nobody has to look at a screen for it. It needs a few small
+  programs (busybox as a static program, cpio, zstd, mkfs.vfat, mtools,
+  sgdisk) and names the packages if one is missing.
+
+The workflow runs both tests in its simulation, with an emulated NVMe drive
 as the device. On hardware nothing here has run yet.
 
 ## Where the machine runs Windows

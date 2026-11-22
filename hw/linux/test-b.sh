@@ -1,0 +1,226 @@
+#!/bin/sh
+# The second test with a real device: a small Linux guest which has the
+# drivers the host has for the device.  It is put together here from the
+# kernel the host runs, the modules of that kernel for the device and their
+# firmware, and a script which tells on the serial port of the VM what the
+# guest makes of the device: which driver has it, its interrupts, and for a
+# graphics card its connectors and whether a monitor is on one.  Nobody has
+# to look at a screen for it, though a monitor on the card shows the text
+# console of the guest if all is well.
+#
+#   sudo sh hw/linux/test-b.sh        writes hw-out/test-b.txt
+#
+# It runs as root, like hw/linux/test-a.sh, and after it.  It needs busybox as
+# a static program, cpio, gzip, zstd, mkfs.vfat, mtools and sgdisk, and tells
+# what to install if one is missing.  HW_KERNEL names another kernel image
+# than /boot/vmlinuz-<the running one>, HW_GUEST_MB another size of the memory
+# of the VM than 4096 MB.
+. "$(dirname "$0")/common.sh"
+RESULT="$out/test-b.txt"
+: > "$RESULT"
+
+test_begin test-b.sh
+
+# ---- The guest.
+missing=
+for t in busybox cpio gzip zstd mkfs.vfat mmd mcopy sgdisk modprobe modinfo; do
+    have "$t" || missing="$missing $t"
+done
+if [ -n "$missing" ]; then
+    check "what it takes to put the guest together is there" FAILED "missing:$missing; as root: apt-get install busybox-static cpio zstd dosfstools mtools gdisk kmod"
+    test_end
+fi
+bbx=$(command -v busybox)
+if ldd "$bbx" 2> /dev/null | grep -q '=>'; then
+    check "what it takes to put the guest together is there" FAILED "busybox is not a static program; as root: apt-get install busybox-static"
+    test_end
+fi
+kver=$(uname -r)
+kernel=${HW_KERNEL:-/boot/vmlinuz-$kver}
+if [ ! -r "$kernel" ]; then
+    check "the kernel for the guest is there" FAILED "no readable kernel image for $kver"
+    test_end
+fi
+
+# The modules the kernel has for the functions of the device, by what the
+# functions say they are.
+mods=
+for f in $FUNCS; do
+    for m in $(modprobe -R "$(cat "/sys/bus/pci/devices/$f/modalias")" 2> /dev/null); do
+        case " $mods " in
+            *" $m "*) ;;
+            *) mods="$mods $m" ;;
+        esac
+    done
+done
+
+root="$work/guest-root"
+rm -rf "$root"
+mkdir -p "$root/bin" "$root/dev" "$root/proc" "$root/sys" "$root/tmp" "$root/modules" "$root/lib/firmware"
+cp "$bbx" "$root/bin/busybox"
+cp "$here/guest-init" "$root/init"
+chmod 755 "$root/init" "$root/bin/busybox"
+: > "$root/modules.list"
+nfw=0
+for m in $mods; do
+    modprobe --show-depends "$m" 2> /dev/null | while read -r kind file rest; do
+        [ "$kind" = insmod ] || continue
+        base=$(basename "$file")
+        base=${base%.zst}
+        base=${base%.xz}
+        base=${base%.gz}
+        [ -e "$root/modules/$base" ] && continue
+        case "$file" in
+            *.zst) zstd -q -d -c "$file" > "$root/modules/$base" ;;
+            *.xz)  xz -d -c "$file" > "$root/modules/$base" ;;
+            *.gz)  gzip -d -c "$file" > "$root/modules/$base" ;;
+            *)     cp "$file" "$root/modules/$base" ;;
+        esac
+        echo "$base" >> "$root/modules.list"
+        # The firmware the module names, as far as the host has it, compressed
+        # or not: the kernel of the guest takes it as the one of the host does.
+        for fw in $(modinfo -F firmware "$file" 2> /dev/null); do
+            for src in "/lib/firmware/$fw" "/lib/firmware/$fw.zst" "/lib/firmware/$fw.xz"; do
+                [ -e "$src" ] || continue
+                mkdir -p "$root/lib/firmware/$(dirname "$fw")"
+                cp -L "$src" "$root/lib/firmware/$(dirname "$fw")/"
+            done
+        done
+    done
+done
+nfw=$(find "$root/lib/firmware" -type f | wc -l)
+( cd "$root" && find . | cpio -o -H newc -R 0:0 --quiet | gzip -1 ) > "$work/guest.cpio.gz"
+mb=$(( ( $(wc -c < "$work/guest.cpio.gz") + $(wc -c < "$kernel") ) / 1048576 + 1 ))
+
+# A disk with an EFI system partition which has the kernel, the initramfs and
+# a script for the shell of the firmware, which starts the kernel.
+esp="$work/guest-esp.img"
+espmb=$(( mb + 64 ))
+[ "$espmb" -ge 200 ] || espmb=200
+# A disk of that name from a run before is none of this run.
+vbm closemedium disk "$work/guest.vdi" --delete > /dev/null 2>&1
+rm -f "$esp" "$work/guest.raw" "$work/guest.vdi"
+truncate -s "${espmb}M" "$esp"
+built=yes
+mkfs.vfat -F 32 -n HWGUEST "$esp" > /dev/null 2>&1 || built=no
+mcopy -i "$esp" "$kernel" ::/vmlinuz.efi || built=no
+mcopy -i "$esp" "$work/guest.cpio.gz" ::/initrd.img || built=no
+printf 'echo -off\r\nfs0:\r\n\\vmlinuz.efi console=tty0 console=ttyS0,115200 loglevel=4 rdinit=/init panic=30 initrd=\\initrd.img\r\n' > "$work/startup.nsh"
+mcopy -i "$esp" "$work/startup.nsh" ::/startup.nsh || built=no
+truncate -s "$(( espmb + 4 ))M" "$work/guest.raw"
+sgdisk -n "1:2048:+${espmb}M" -t 1:ef00 "$work/guest.raw" > /dev/null 2>&1 || built=no
+dd if="$esp" of="$work/guest.raw" bs=1M seek=1 conv=notrunc status=none || built=no
+rm -f "$esp"
+if [ "$built" = yes ] && run convertfromraw "$work/guest.raw" "$work/guest.vdi" --format VDI; then
+    check "the guest is put together" ok "kernel $kver, modules for the device:${mods:- none, which is so when the driver is part of the kernel or there is none}, $(wc -l < "$root/modules.list") module files, $nfw firmware files, $mb MB"
+else
+    check "the guest is put together" FAILED "see what was said above"
+    test_end
+fi
+rm -f "$work/guest.raw"
+
+# ---- The VM with it.
+test_vm --memory "${HW_GUEST_MB:-4096}" --boot1 disk --boot2 none --boot3 none --boot4 none
+if    ! run storagectl "$VM" --name sata --add sata --controller IntelAhci --portcount 1 \
+   || ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$work/guest.vdi"; then
+    check "the VM has the disk of the guest" FAILED "$(short 160 < "$work/last.out" | sed -n '1p')"
+    test_end
+fi
+test_start
+
+# What the guest has said so far, without the escape sequences of the firmware.
+said() { tr -d '\r' < "$work/serial.log" 2> /dev/null | grep -a '^HW: '; }
+wait_said() # <regex> <seconds>
+{
+    local i=0
+    while [ "$i" -lt "$2" ]; do
+        said | grep -q -E "$1" && return 0
+        [ "$(vmstate)" = running ] || return 1
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+if wait_said '^HW: UP ' 180; then
+    check "the guest starts" ok "$(said | sed -n 's/^HW: UP //p' | sed -n '1p')"
+else
+    check "the guest starts" FAILED "nothing from it on the serial port after 180 seconds, the VM is in state '$(vmstate)'"
+    test_end
+fi
+if wait_said '^HW: READY' 300; then
+    check "the guest has looked at the device" ok
+else
+    check "the guest has looked at the device" FAILED "it did not get done in 300 seconds"
+fi
+
+# Function by function: there with the IDs it has on the host, and a driver
+# has it.
+for f in $FUNCS; do
+    g="0000:01:00.${f##*.}"
+    line=$(said | grep -F "HW: PCI $g " | sed -n '1p')
+    case "$line" in
+        *" $(ids_of "$f") "*) check "guest: has function ${f##*.} of the device, with the IDs it has on the host" ok "$(ids_of "$f")" ;;
+        *)                    check "guest: has function ${f##*.} of the device, with the IDs it has on the host" FAILED "${line:-the guest tells nothing of $g}" ;;
+    esac
+    drv=$(echo "$line" | sed -n 's/^.* driver \([^ ]*\) .*$/\1/p')
+    if [ -n "$drv" ] && [ "$drv" != none ]; then
+        check "guest: a driver has function ${f##*.}" ok "$(echo "$line" | sed -e 's/^.* driver //')"
+    elif [ -z "$mods" ]; then
+        check "guest: a driver has function ${f##*.}" skipped "the kernel has no module for it"
+    else
+        check "guest: a driver has function ${f##*.}" FAILED "none; the modules were:$mods"
+    fi
+done
+
+# A graphics card: the driver has made a card of it, and a monitor.
+display=no
+for f in $FUNCS; do
+    case "$(first "/sys/bus/pci/devices/$f/class")" in 0x03*) display=yes ;; esac
+done
+if [ "$display" = yes ]; then
+    if said | grep -q '^HW: DRM card'; then
+        check "guest: the graphics driver has the card and its connectors" ok "$(said | grep -c '^HW: DRM card') connectors"
+        on=$(said | sed -n 's/^HW: DRM \([^ ]*\) connected .*$/\1/p' | tr '\n' ' ')
+        if [ -n "$on" ]; then
+            check "guest: a monitor is on a connector of the card" ok "$on"
+        else
+            check "guest: a monitor is on a connector of the card" skipped "none is told of; with a monitor on the card one would be"
+        fi
+    else
+        check "guest: the graphics driver has the card and its connectors" FAILED "the guest tells of no card"
+    fi
+fi
+
+# What the host has for the device meanwhile.
+echo "---- the interrupts the host has for the device:" >> "$RESULT"
+for f in $FUNCS; do
+    grep -a -F "($f)" /proc/interrupts | grep -a 'vfio-' | tr -s ' ' | short 160 >> "$RESULT"
+done
+
+# It keeps running.
+n0=$(said | grep -c '^HW: ALIVE')
+sleep 15
+n1=$(said | grep -c '^HW: ALIVE')
+if [ "$n1" -gt "$n0" ] && [ "$(vmstate)" = running ]; then
+    check "the guest keeps running with the device" ok
+else
+    check "the guest keeps running with the device" FAILED "the VM is in state '$(vmstate)', the guest said it was alive $n1 times"
+fi
+bad=$(said | grep -c -i -E '^HW: k: .*(nobody cared|Disabling IRQ|timed? ?out|fail|error)')
+if [ "${bad:-0}" = 0 ]; then
+    check "guest: its kernel tells of no trouble about the device" ok
+else
+    check "guest: its kernel tells of no trouble about the device" look "$bad line(s) which may or may not matter, among those below"
+fi
+log_check "with the guest running"
+
+if run controlvm "$VM" poweroff && wait_vmstate poweroff 60; then
+    check "the VM is powered off" ok
+else
+    check "the VM is powered off" FAILED "it is in state '$(vmstate)'"
+fi
+
+echo "---- what the guest said (at most 150 lines):" >> "$RESULT"
+said | grep -v '^HW: ALIVE' | short 200 | sed -n '1,150p' >> "$RESULT"
+test_end

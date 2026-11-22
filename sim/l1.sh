@@ -197,6 +197,29 @@ if [ -f "$SIM_DIR/../hw/linux/test-a.sh" ]; then
         stage "the first script for a machine with real hardware goes through its checks with the drive" FAILED \
               "$(grep -c ': FAILED' "$OUT/$WHERE/hw-out/test-a.txt" 2> /dev/null) of its checks failed, or it did not get to them"
     fi
+    # The second one, which puts a guest together from the kernel of the
+    # machine it runs on and the drivers that kernel has for the device.
+    if [ -f "$SIM_DIR/../hw/linux/test-b.sh" ]; then
+        echo "==== $WHERE: hw/linux/test-b.sh, with the drive as the device"
+        i=0
+        while pgrep -x VBoxSVC > /dev/null 2>&1 && [ "$i" -lt 30 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        kimg=$(ls "$SIM_WS/sim-work/kroot/boot/vmlinuz-$(uname -r)" "$SIM_WS/sim-work/vmlinuz-$(uname -r)" 2> /dev/null | head -n 1)
+        HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr HW_KERNEL=$kimg HW_GUEST_MB=1536 \
+        HW_VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
+            sh "$SIM_DIR/../hw/linux/test-b.sh" > "$OUT/$WHERE/hw-test-b.log" 2>&1
+        rc=$?
+        cut -c1-220 "$OUT/$WHERE/hw-test-b.log" | sed 's/^/    /'
+        if [ "$rc" = 0 ]; then
+            stage "the second script for a machine with real hardware goes through its checks with the drive" ok \
+                  "$(grep -c ': ok' "$OUT/$WHERE/hw-out/test-b.txt" 2> /dev/null) checks"
+        else
+            stage "the second script for a machine with real hardware goes through its checks with the drive" FAILED \
+                  "$(grep -c ': FAILED' "$OUT/$WHERE/hw-out/test-b.txt" 2> /dev/null) of its checks failed, or it did not get to them"
+        fi
+    fi
 fi
 
 echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"

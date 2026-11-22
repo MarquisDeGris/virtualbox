@@ -1,0 +1,82 @@
+#!/bin/busybox sh
+# Init of the small Linux guest of hw/linux/test-b.sh: a kernel with this
+# script, busybox and the drivers of the device in its initramfs.  It tells on
+# the serial port what it makes of the device which was passed through to it:
+# the PCI devices behind bridges, which driver has them, what the kernel says
+# while the driver takes the device, the interrupts, and for a graphics card
+# the connectors and whether a monitor is on one.  Lines of this script start
+# with "HW: ".
+
+bb=/bin/busybox
+$bb mkdir -p /proc /sys /dev /tmp /lib/firmware
+$bb mount -t proc proc /proc
+$bb mount -t sysfs sys /sys
+$bb mount -t devtmpfs dev /dev
+exec < /dev/console > /dev/console 2>&1
+$bb --install -s /bin
+export PATH=/bin
+
+say() { echo "HW: $*"; }
+
+say "UP $(uname -r)"
+
+# The drivers, in the order they were put in.  One which is built into the
+# kernel is not in the list and has its devices already.
+for m in $(cat /modules.list 2> /dev/null); do
+    insmod "/modules/$m" 2> /tmp/insmod.err || say "insmod $m: $(head -n 1 /tmp/insmod.err | cut -c1-120)"
+done
+
+# A driver of a graphics card takes a moment, more when it has to load
+# firmware: wait until the devices behind bridges have drivers, at most a
+# minute, and then a little for what follows from that.
+i=0
+while [ "$i" -lt 60 ]; do
+    left=0
+    for d in /sys/bus/pci/devices/*; do
+        case "${d##*/}" in 0000:00:*) continue ;; esac
+        [ -e "$d/driver" ] || left=1
+    done
+    [ "$left" = 0 ] && break
+    sleep 1
+    i=$((i + 1))
+done
+sleep 5
+
+for d in /sys/bus/pci/devices/*; do
+    case "${d##*/}" in 0000:00:*) continue ;; esac
+    drv=none
+    [ -e "$d/driver" ] && drv=$(basename "$(readlink "$d/driver")")
+    say "PCI ${d##*/} $(cat "$d/vendor" | sed 's/^0x//'):$(cat "$d/device" | sed 's/^0x//') class $(cat "$d/class") driver $drv irq $(cat "$d/irq" 2> /dev/null) msi $(ls "$d/msi_irqs" 2> /dev/null | wc -l)"
+done
+
+# The interrupts which are not the ones every VM has.
+grep -E '^ *[0-9]+:' /proc/interrupts \
+    | grep -v -E 'timer|i8042|rtc0|acpi|ahci|cascade|ttyS|ehci|xhci|virtio|PCIe|pciehp|aerdrv|dmar' \
+    | tr -s ' ' | cut -c1-150 | while read -r l; do say "IRQ $l"; done
+
+# A graphics card: its connectors, and what is on them.
+for c in /sys/class/drm/card*-*; do
+    [ -e "$c/status" ] || continue
+    edid=0
+    [ -e "$c/edid" ] && edid=$(wc -c < "$c/edid")
+    say "DRM ${c##*/} $(cat "$c/status") edid=$edid modes=$(wc -l < "$c/modes" 2> /dev/null)"
+done
+[ -e /sys/class/drm/card0 ] || say "DRM none"
+# Sound cards, as ALSA has them.
+if [ -e /proc/asound/cards ]; then
+    grep -E '^ *[0-9]+ ' /proc/asound/cards | tr -s ' ' | cut -c1-120 | while read -r l; do say "SOUND $l"; done
+fi
+
+# What the kernel said meanwhile about the devices and their drivers, and
+# anything which sounds like trouble.
+dmesg | grep -i -E 'drm|amdgpu|radeon|nouveau|nvidia|i915|xe |snd_hda|hda[-_]|nvme|firmware|vgaarb|BAR [0-9]|pciehp|AER|DPC|nobody cared|Disabling IRQ|timed? ?out|fail|error' \
+    | sed -e 's/^\[ *[0-9.]*\] //' | cut -c1-180 | tail -n 80 | while read -r l; do say "k: $l"; done
+
+say "READY"
+
+n=0
+while :; do
+    sleep 5
+    n=$((n + 1))
+    say "ALIVE $n"
+done
