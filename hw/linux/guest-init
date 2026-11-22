@@ -100,7 +100,12 @@ for c in /sys/class/drm/card*-*; do
     [ -e "$c/status" ] || continue
     edid=0
     [ -e "$c/edid" ] && edid=$(wc -c < "$c/edid")
-    say "DRM ${c##*/} $(cat "$c/status") edid=$edid modes=$(wc -l < "$c/modes" 2> /dev/null)"
+    # Whose connector it is: the PCI device of its card, or what else the card
+    # is, which for the graphics adapter every VM has is no PCI device here.
+    card=${c##*/}
+    card=${card%%-*}
+    dev=$(basename "$(readlink "/sys/class/drm/$card/device" 2> /dev/null)" 2> /dev/null)
+    say "DRM ${c##*/} dev=${dev:-none} $(cat "$c/status") edid=$edid modes=$(wc -l < "$c/modes" 2> /dev/null)"
 done
 [ -e /sys/class/drm/card0 ] || say "DRM none"
 # Sound cards, as ALSA has them.

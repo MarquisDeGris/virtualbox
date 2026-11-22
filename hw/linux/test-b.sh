@@ -14,7 +14,8 @@
 # a static program, cpio, gzip, zstd, mkfs.vfat, mtools, sgdisk and ukify, and tells
 # what to install if one is missing.  HW_KERNEL names another kernel image
 # than /boot/vmlinuz-<the running one>, HW_GUEST_MB another size of the memory
-# of the VM than 4096 MB.
+# of the VM than 4096 MB.  HW_EXPECT_DRIVER=no is for a device no driver of
+# the kernel takes although a module names it.
 . "$(dirname "$0")/common.sh"
 RESULT="$out/test-b.txt"
 : > "$RESULT"
@@ -191,6 +192,8 @@ for f in $FUNCS; do
         check "guest: a driver has function ${f##*.}" ok "$(echo "$line" | sed -e 's/^.* driver //')"
     elif [ -z "$mods" ]; then
         check "guest: a driver has function ${f##*.}" skipped "the kernel has no module for it"
+    elif [ "${HW_EXPECT_DRIVER:-yes}" = no ]; then
+        check "guest: a driver has function ${f##*.}" skipped "none, and none is expected for this device; the modules which name it were:$mods"
     else
         check "guest: a driver has function ${f##*.}" FAILED "none; the modules were:$mods"
     fi
@@ -246,9 +249,11 @@ for f in $FUNCS; do
     case "$(first "/sys/bus/pci/devices/$f/class")" in 0x03*) display=yes ;; esac
 done
 if [ "$display" = yes ]; then
-    if said | grep -q '^HW: DRM card'; then
-        check "guest: the graphics driver has the card and its connectors" ok "$(said | grep -c '^HW: DRM card') connectors"
-        on=$(said | sed -n 's/^HW: DRM \([^ ]*\) connected .*$/\1/p' | tr '\n' ' ')
+    # The connectors of the card which was passed through, not those of the
+    # graphics adapter the VM has anyway.
+    if said | grep -q '^HW: DRM card[^ ]* dev=0000:01:00\.'; then
+        check "guest: the graphics driver has the card and its connectors" ok "$(said | grep -c '^HW: DRM card[^ ]* dev=0000:01:00\.') connectors"
+        on=$(said | sed -n 's/^HW: DRM \([^ ]*\) dev=0000:01:00\.[0-7] connected .*$/\1/p' | tr '\n' ' ')
         if [ -n "$on" ]; then
             check "guest: a monitor is on a connector of the card" ok "$on"
         else

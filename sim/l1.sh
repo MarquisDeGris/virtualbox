@@ -202,6 +202,9 @@ if [ "${SIM_BARTEST:-}" = 1 ]; then
     # guest of the second one writes to the memory of the device.
     echo "the memory of the device: $(cat "/sys/bus/pci/devices/$addr/resource" | awk '$1 != "0x0000000000000000" { printf "%s..%s ", $1, $2 }')"
     export HW_CMDLINE="hwbarwrite=$(cat "/sys/bus/pci/devices/$addr/vendor" | sed 's/^0x//'):$(cat "/sys/bus/pci/devices/$addr/device" | sed 's/^0x//')"
+    # The device has the vendor of the virtio devices, whose driver names all
+    # of that vendor and takes this one not.
+    export HW_EXPECT_DRIVER=no
     hw_scripts
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40
