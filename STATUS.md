@@ -7,13 +7,14 @@ Updated: 2026-11-22
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `f563e7f8`, 36 commits. The last two are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `4add131b`, 37 commits. The last one is INTx, in since 2026-11-22, see "INTx (WP8)". The two before it are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
+| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. Nothing of the passthrough work in either. See "Requests from the tracker of upstream" |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -1447,6 +1448,40 @@ commit: 177 checks, none failed, the phase `intx` among them. With that
 backend wait for runs 278 and 279, the whole simulation on
 `scratch/intx-7.2-kvm` and on `scratch/intx-7.1-kvm`.
 
+**Run 278** (2026-11-22, `allsim`, for finding out,
+`scratch/intx-7.2-kvm` @ `26e4045a`, 133 minutes, AMD EPYC 7763): the
+whole simulation on the 7.2 line with the KVM backend: 264 checks pass
+and 5 fail, none of them for the device. Everything with the Linux
+guest passes, the phase `intx` with it: a guest which does not use MSI
+has its drive at the I/O APIC that backend has. Windows with the device
+of two functions got through its start and through every step with the
+slot. The five:
+
+- Windows with the drive of one function did not get through its
+  start, twice, as on this kind of runner before (see "Run 268").
+- The step with Windows and INTx ran for the first time. Windows
+  started both controllers anew with `MSISupported` at 0, its driver had
+  both again, and what it read from both drives afterwards is what is
+  on them. Whether it was a line interrupt it read with, the run does
+  not tell: the script in the guest asked WMI for the interrupts of a
+  controller and found nothing, and the two checks which wanted a small
+  interrupt number failed for that.
+- After that step the guest did not shut down when it was told to. It
+  was alive, with 56 lines saying so after the step. It did not see the
+  DVD which tells it to shut down, which was the second DVD it was
+  given; the two were alike in name and size, which is the likeliest
+  reason and is not shown.
+
+Changed in the simulation after it (`meta` @ `151334a`): what kind of
+interrupt a function has is told by the host, whose `/proc/interrupts`
+has a line `vfio-intx` for a function with a line interrupt and lines
+`vfio-msix` for one with messages, and counts them; the checks want the
+first, none of the second, and the count to have gone up while the
+guest read. The script in the guest goes through all resources Windows
+has given out. The two DVDs differ in name and size. Run 282, the part
+of the simulation with Windows on the same branch, is the first with
+that. The branches for 7.2 and 7.1 wait for it.
+
 Until then the branches of the merge requests are as they were, with
 the limitation as it was; the descriptions of the merge requests and
 HWTEST.md say what it means for a guest, see "What is missing" there.
@@ -1479,6 +1514,72 @@ taken over from 7.2 and the size check in the ACPI device; one commit
 came after it, which changes a testcase only (`tstGuestControlSvc`) and
 is built, with the testcase passing, in run 260.
 Merge request [#4](https://github.com/MarquisDeGris/virtualbox/pull/4).
+
+### Requests from the tracker of upstream, from 2026-11-22
+
+Asked for on 2026-11-22: to take up what users ask for in the public
+tracker of VirtualBox where it can be done and tested here, what is
+about 3D first. The tracker has 62 open requests (label `enhancement`)
+and no priorities. Each one which is taken up is a branch of its own
+from the development branch of upstream and a merge request inside this
+fork. Nothing is sent upstream: that takes a contributor agreement,
+which is not for this work to sign.
+
+How 3D and this work relate: the 3D acceleration of VirtualBox is for
+the graphics card it emulates, the passthrough is for a graphics card
+of the host. A VM uses the one or the other. What is done for 3D here
+is for VMs without a card of their own.
+
+| Request | What it asks for | What became of it |
+|---------|------------------|-------------------|
+| 798 | `VBoxManage modifyvm --accelerate-3d=on --graphicscontroller=vmsvga` to work in that order as well | done, merge request [#5](https://github.com/MarquisDeGris/virtualbox/pull/5), see below |
+| 674, 904 | more video memory than 256 MB | The 256 MB are the screens. The 3D objects of a guest have a limit of their own, 4 GB and up to 32, which the manual did not say: a paragraph for the manual, merge request [#6](https://github.com/MarquisDeGris/virtualbox/pull/6). A setting of its own for it in the API and the user interface is not done |
+| 668 | Vulkan for Linux guests by paravirtualization | months of work, not taken up |
+| 518 | WDDM 2.0 and DirectX 12 for Windows guests | months of work, not taken up |
+| 678 | hot-plugged devices to be seen in the settings | the graphical user interface, which is not built here |
+
+The tracker also has 20 open bugs about 3D. Nearly all need a graphics
+card and a certain host to be seen, which the runners do not have.
+
+**Request 798** (`feat/modifyvm-graphics-order` @ `ca3e5b3b`, one
+commit on `main`). `modifyvm` applies its options as they come, and two
+of the graphics options depend on a third: whether 3D acceleration can
+be had and which sizes the video memory can have depend on the graphics
+controller. `--accelerate-3d` and `--vram` are remembered now and set
+when all options have been gone through, the 3D acceleration first. The
+report was about the first; the second has the same fault and nobody
+had reported it. Two kinds of command lines which went through before
+are refused now, as they ask for what the VM cannot have: 3D
+acceleration followed by a graphics controller without it, and a size
+of the video memory which fits the VM as it is and not what the same
+command makes of it. Manual and changelog say so.
+
+The workflow has a step for this since (`Command line checks`):
+`VBoxManage` of the build with a `VBoxSVC` of its own creates a VM,
+changes it and reads it back, without starting it. Six checks, three
+command lines which have to work and three which have to be refused
+with the VM left as it was. A tree without the change is told by its
+source and is not checked. The step which runs the testcase of the
+passthrough device ends well on a tree which does not have it, so that
+such a branch can be built with the `tests` flavor.
+
+**Run 280** (2026-11-22, `tests`, for finding out, that branch, 5
+minutes): it builds. The build as the workflow configures it has no 3D
+acceleration; the two checks which do without it pass.
+
+**Run 281** (2026-11-22, the same with `VBOX_WITH_3D_ACCELERATION=1`
+for the build, which changes what the API says a graphics controller
+can do and nothing else, 7 minutes): all six checks pass. They count
+since. No run has shown them failing without the change: for the
+command of the report that is what the report shows, for the others it
+is what reading the code says.
+
+**The manual text** (`feat/doc-3d-object-memory` @ `7c65ccc3`, one
+commit on `main`): one paragraph and one command under "Screen Tab".
+The numbers and the name of the configuration value are read from the
+source of the graphics device. The file is well-formed XML; the
+workflow does not build the manual, and no VM was run with the value
+set.
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -2201,6 +2302,11 @@ harness since WP5, saved states since the fourth part of WP6.
    276). Left: the runs named under "Where it is now" there, then the
    commit on the branches of the merge requests and their descriptions.
    Not planned: seeing the new test fail on the device as it was.
+4f. Requests from the tracker of upstream, see the section of that
+   name: 798 and the manual text for 674 and 904 are merge requests.
+   What could follow, each small and to be tested without a graphics
+   card: other requests about `VBoxManage` and about settings. The two
+   large ones about 3D are not planned.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
    device coming and going, a device pulled without notice and a device
    error in the simulation.
@@ -2309,6 +2415,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-22 | The longest time between two questions to a device about its INTx interrupt is 2 milliseconds, not the 8 of the first version | It is the pace of a device with many interrupts as much as the bound for one nobody deals with. 500 pulses a second cost little on a host which is not a virtual machine; 125 interrupts a second would have been little for a graphics card whose driver uses INTx. What the right number is can only be told with such a device |
 | 2026-11-22 | The INTx change was read by somebody who had not written it before it goes to the branches of the merge requests, and what that found is a commit of its own on the working branch | The testcase and one phase of the simulation were all that had seen the change, and whoever writes a test and the code it tests makes the same mistake in both. The reading found a check which could not fail and a request to a device which was gone |
 | 2026-11-22 | Runs may overlap: a build of ten minutes next to a simulation, and two simulations at a time at most | One run at a time made a day of what three lines need, most of it waiting. The runs are no more for it |
+| 2026-11-22 | Requests from the public tracker of upstream are taken up where they can be done and tested here, each as a branch from the development branch of upstream and a merge request inside the fork | Asked for by whom this work is for. The tracker has no priorities, so what is small and can be tested without a graphics card comes first. Nothing goes upstream from here |
+| 2026-11-22 | The branches for 7.2 and 7.1 get the INTx change when a run has shown Windows using the line interrupt, not before | Run 278 had Windows read from the drives after its controllers were told not to use MSI, and could not tell which interrupt they had. That is what a Windows guest with the audio function of a graphics card comes to, so it is worth one more run |
+| 2026-11-22 | The three changes of 7.2 to the execution engine in the kernel driver stay left out of the 7.1 branches | Looked at again: they can be tried here in principle, the runners have the hardware virtualization for a VM on the kernel driver of VirtualBox, but that takes a part of the simulation of its own, about a day of work and several runs. A host which runs VMs with KVM does not run that code. It is worth doing if the hosts this is meant for turn out not to use KVM |
 | 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -2529,5 +2638,8 @@ virtual machine.
 | 275 | `scratch/intx-7.1` @ `97f447c7` | tests, exploring | passed | 8 minutes, AMD EPYC 9V45. The INTx change on the 7.1 line: it builds, all tests pass |
 | 276 | `scratch/intx` @ `6fe456f0` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The third commit, written after the change was read by a second reader: it builds, 60 tests pass with the sanitizers, no report |
 | 277 | `scratch/intx` @ `6fe456f0` | sim, exploring | passed | 45 minutes, AMD EPYC 7763. 177 checks, none failed, the phase `intx` with the third commit among them. `pci-passthrough-hotplug-v1` has the INTx change as one commit after this run (`4add131b`) |
+| 278 | `scratch/intx-7.2-kvm` @ `26e4045a` | allsim, exploring | passed | 133 minutes, AMD EPYC 7763. 264 checks pass, 5 fail, none for the device: Windows with one function stuck in its start twice (see "Run 268"), and the new step with Windows and INTx, which could not tell the kind of interrupt and after which the guest did not see the DVD telling it to shut down. Everything with the Linux guest passes, the phase `intx` with the KVM backend among it. See "Run 278" |
+| 280 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests, exploring | passed | 5 minutes. A branch from `main` without the passthrough work: it builds, the step for the testcase of the device ends well without one, and the two command line checks which need no 3D acceleration pass. See "Requests from the tracker of upstream" |
+| 281 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests with `VBOX_WITH_3D_ACCELERATION=1`, exploring | passed | 7 minutes. All six command line checks for `modifyvm` pass |
 
 Run numbers are those GitHub shows for the `build` workflow.
