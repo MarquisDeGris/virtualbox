@@ -1,0 +1,50 @@
+name: release
+
+# Publishes the package which a run of the build workflow has made (flavor
+# "package") as a file of the release "hw-builds".  A machine with real
+# hardware fetches it from there without logging in, see hw/README.md.
+#
+# These are unofficial test builds of a fork.  Each file is named by the
+# commit it was built from, which is its source.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The run of the build workflow whose package is published (the number in its address)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Fetch the package of the run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          ls -l
+          f=$(ls vbox-*-ubuntu2404.tar.zst | head -n 1)
+          sha256sum -c "$f.sha256"
+          if ! gh release view hw-builds --repo "$REPO" > /dev/null 2>&1; then
+            gh release create hw-builds --repo "$REPO" --target meta --prerelease \
+              --title "Builds for machines with real hardware" \
+              --notes "Unofficial test builds of VirtualBox from the branches of this fork, made by its workflow for the hardware test; see hw/README.md on the meta branch. They are not releases of Oracle. Each file is named by the commit it was built from, which is its source. GPL-3.0-only."
+          fi
+          gh release upload hw-builds "$f" "$f.sha256" --repo "$REPO" --clobber
+          gh release view hw-builds --repo "$REPO" --json assets --jq '.assets[] | "\(.name) \(.size)"'
