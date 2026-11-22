@@ -61,6 +61,10 @@ on:
         description: "no (default) or yes. With yes the run counts as passed whatever happens in it: for the first build of a branch or a base nothing is known about yet, where a failure is a finding about the workflow as likely as one about the code. The log tells what happened"
         required: false
         default: "no"
+      sim_parts:
+        description: "Parts of the simulation to run instead of those the flavor has, with commas (optional): runner, simhost, mfhost, win, winhost, mfwinhost, hdawinhost. For a run which is about one part"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -656,7 +660,7 @@ jobs:
         continue-on-error: ${{ inputs.sim_strict != 'yes' && inputs.sim_strict != 'linux' }}
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}
-          SIM_PARTS: ${{ inputs.flavor == 'winsim' && 'runner,win,winhost,mfwinhost,hdawinhost' || inputs.flavor == 'allsim' && 'runner,simhost,mfhost,win,winhost,mfwinhost,hdawinhost' || 'runner,simhost,mfhost' }}
+          SIM_PARTS: ${{ inputs.sim_parts != '' && inputs.sim_parts || inputs.flavor == 'winsim' && 'runner,win,winhost,mfwinhost,hdawinhost' || inputs.flavor == 'allsim' && 'runner,simhost,mfhost,win,winhost,mfwinhost,hdawinhost' || 'runner,simhost,mfhost' }}
         run: bash ci-meta/sim/run.sh
 
       - name: Upload logs

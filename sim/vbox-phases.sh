@@ -1447,6 +1447,12 @@ forget_resets()
 {
     local a set=yes
     for a in $HOSTFUNCS; do
+        # A function which the host has no reset for to begin with has no such
+        # file: nothing to forget, and it is as wanted.
+        if [ ! -e "/sys/bus/pci/devices/$a/reset_method" ]; then
+            echo "+ the host has no reset for $a by itself to begin with"
+            continue
+        fi
         echo "+ the host forgets how to reset $a by itself (it knew: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1))"
         echo "" > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null || set=no
         [ -z "$(cat "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null)" ] || set=no
@@ -1462,6 +1468,7 @@ remember_resets()
 {
     local a
     for a in $HOSTFUNCS; do
+        [ -e "/sys/bus/pci/devices/$a/reset_method" ] || continue
         echo default > "/sys/bus/pci/devices/$a/reset_method" 2> /dev/null
         echo "+ the host knows how to reset $a: $(cat "/sys/bus/pci/devices/$a/reset_method" 2>&1)"
     done
