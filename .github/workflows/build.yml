@@ -593,7 +593,9 @@ jobs:
           if ! grep -q 'iAccelerate3D' src/VBox/Frontends/VBoxManage/VBoxManageModifyVM.cpp 2> /dev/null; then
             echo "CLI: this tree applies the graphics options of modifyvm in the order they are given, which is not checked"
           else
-            kind=tried
+            # All six passed in run 281, a build with 3D acceleration; the two
+            # without it in run 280.
+            kind=counts
             # The video memory: VBoxVGA takes 1 MB, VMSVGA does not.
             try modifyvm cli --graphicscontroller vboxvga --vram 8 || true
             expect $kind "video memory too small for the graphics controller which follows it" refused vboxvga,off,8 \
