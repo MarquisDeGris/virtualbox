@@ -35,12 +35,15 @@ which the kernel did, with the Linux guest and each time Windows
 switched the slot off (run 266). Part C is about that reset on
 hardware.
 
-One start of Windows got stuck in the simulation, early and for as long
-as the run waited, with the device of one function in the slot (run
-265, an AMD EPYC 7763, the VM being two levels of virtualization deep).
-It is not understood and has not come again. Should a Windows guest
-stay at its start screen with its disk idle, note down the processor of
-the host and keep the log.
+On AMD processors Windows often does not get through its start in the
+simulation where the VM is two levels of virtualization deep (runs 265
+and 268, four starts of six). It crawls there: its timer interrupts,
+380 a second, cost it 6300 exits a second, and at that depth an exit
+costs a hundred times what it costs on hardware. One level less deep
+on the same processors Windows starts in 25 seconds. Nothing of that
+is expected on a host which is not a virtual machine; should a Windows
+guest stay at its start screen with its disk nearly idle all the same,
+note down the processor of the host and keep the log.
 
 Nothing was tried anywhere with a graphics card, with Thunderbolt or
 with an IOMMU of AMD.
