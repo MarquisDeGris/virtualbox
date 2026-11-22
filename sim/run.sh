@@ -48,8 +48,15 @@
 #      "mfwinhost"), whose functions the host cannot reset by themselves
 #      there: what a graphics card with its audio function mostly is.
 #
+#   4c. The same with a device whose second function is a High Definition
+#      Audio controller (SIM_PARTS has "hdawinhost"): a drive and the sound
+#      of a card as one device, which is how a graphics card comes.  Windows
+#      has its own driver for such a controller and runs it with a line
+#      interrupt unless it is told otherwise; the part tells which interrupt
+#      it has by what the host has for it, and has Windows play sound.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, win, winhost, mfwinhost.  Without it: runner,simhost.
+# mfhost, win, winhost, mfwinhost, hdawinhost.  Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
 # its serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox
@@ -123,6 +130,10 @@ finish()
         fi
         if    has_part mfwinhost && ! grep -q '^mfwinhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES" \
            && ! grep -q '^runner/setup: Windows with the device of two functions in the slot: skipped (no AMD processor' "$STAGES"; then
+            missing=1
+        fi
+        if    has_part hdawinhost && ! grep -q '^hdawinhost/win-hotplug: Windows starts with the drive.*: ok' "$STAGES" \
+           && ! grep -q '^runner/setup: Windows with a device whose second function is an audio controller: skipped (no AMD processor' "$STAGES"; then
             missing=1
         fi
     fi
@@ -409,6 +420,16 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -drive "file=$WORK/nvme2.img,if=none,id=nvm1,format=raw"
              -device "nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1")
     fi
+    if [ "$funcs" = hda ]; then
+        # A drive and a High Definition Audio controller as the two functions
+        # of one device.  The sound goes nowhere, in the time sound takes.
+        port="$port,x-speed=2_5,x-width=1"
+        dev=(-drive "file=$WORK/nvme.img,if=none,id=nvm0,format=raw"
+             -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1,addr=00.0,multifunction=on"
+             -audiodev "none,id=snd0"
+             -device "intel-hda,id=hda0,bus=rp1,addr=00.1"
+             -device "hda-output,bus=hda0.0,audiodev=snd0")
+    fi
     t0=$(date +%s)
     sudo timeout -k 30 "$limit" qemu-system-x86_64 \
         -machine q35,kernel-irqchip=split -accel kvm -cpu "$cpu" -smp 4 -m "$mem" \
@@ -511,6 +532,12 @@ make_unattend_image()
     # medium to it; that is the likeliest reason.
     head -c 300000 /dev/zero > "$WORK/cmdi/simcmd/padding"
     genisoimage -quiet -J -r -V SIMINTX -o "$WORK/cmd-intx.iso" "$WORK/cmdi" || return 1
+    # And one which has it play three seconds of sound, see win_audio there.
+    rm -rf "$WORK/cmda" "$WORK/cmd-audio.iso"
+    mkdir -p "$WORK/cmda/simcmd"
+    echo audio > "$WORK/cmda/simcmd/audio"
+    head -c 700000 /dev/zero > "$WORK/cmda/simcmd/padding"
+    genisoimage -quiet -J -r -V SIMAUDIO -o "$WORK/cmd-audio.iso" "$WORK/cmda" || return 1
 }
 
 LINUX_STAGES=$(wc -l < "$STAGES")
@@ -568,7 +595,7 @@ part_winhost() # <name in the results> <functions of the device: 1 or 2> <what t
         # minutes, with few exits.  It gets an hour, less memory to go through
         # and that memory in huge pages (l1.sh), and tells every three minutes
         # how far it is.
-        if [ "$funcs" = 2 ]; then
+        if [ "$funcs" = 2 ] || [ "$funcs" = hda ]; then
             run_simhost "$where" win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi "$funcs" noreset
         else
             run_simhost "$where" win-hotplug 3600 "" 7500 /tmp/sim-win/win.vdi "$funcs"
@@ -586,6 +613,11 @@ if has_part mfwinhost; then
     # The disk of Windows is the one part 4 had: what that part wrote to it
     # went to a temporary file.
     part_winhost mfwinhost 2 "Windows with the device of two functions in the slot"
+fi
+
+if has_part hdawinhost; then
+    note "Part 4c: the same with a device whose second function is an audio controller"
+    part_winhost hdawinhost hda "Windows with a device whose second function is an audio controller"
 fi
 
 sudo chmod -R a+rX "$OUT" 2> /dev/null

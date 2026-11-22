@@ -288,6 +288,7 @@ function Host-Command {
             if ($dr.DriveType -eq [System.IO.DriveType]::CDRom -and $dr.IsReady) {
                 if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\shutdown')) { return 'shutdown' }
                 if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\intx')) { return 'intx' }
+                if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\audio')) { return 'audio' }
             }
         }
     } catch { }
@@ -348,17 +349,97 @@ function Use-LineInterrupt([int]$Round) {
     Say ("INTX-DONE {0}" -f $Round)
 }
 
+# A High Definition Audio controller behind a bridge: the codecs behind it
+# are devices of their own to Windows, children of the controller.  Its bus
+# driver finds them by sending commands to the controller and getting answers.
+function Report-Audio([int]$Round, [string]$Where, [string]$Controller) {
+    $codecs = @()
+    for ($t = 0; $t -lt 20 -and $codecs.Count -eq 0; $t++) {
+        $codecs = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+                    Where-Object { $_.InstanceId -like 'HDAUDIO\*' -and (Prop $_.InstanceId 'DEVPKEY_Device_Parent') -eq $Controller })
+        if ($codecs.Count -eq 0) { Start-Sleep -Seconds 3 }
+    }
+    foreach ($c in $codecs) {
+        Say ("AUDIO-CODEC {0} at={1} id={2} status={3} problem={4} service={5}" -f $Round, $Where, $c.InstanceId, $c.Status, (Problem-Code $c), (Prop $c.InstanceId 'DEVPKEY_Device_Service'))
+    }
+    Say ("AUDIO {0} at={1} codecs={2} irqs={3}" -f $Round, $Where, $codecs.Count, (Irq-Numbers $Controller))
+}
+
+# Plays three seconds of silence with what Windows has for playing sound, and
+# tells how long that took.  The services for sound do not run by themselves
+# on a server.  Playing is given a minute, in a thread of its own.
+function Play-Sound([int]$Round) {
+    try {
+        foreach ($svc in 'AudioEndpointBuilder', 'Audiosrv') {
+            try {
+                Set-Service -Name $svc -StartupType Manual -ErrorAction Stop
+                Start-Service -Name $svc -ErrorAction Stop
+            } catch {
+                Say ("AUDIO-SERVICE {0} {1}: {2}" -f $Round, $svc, $_.Exception.Message)
+            }
+        }
+        $ep = @(Get-PnpDevice -PresentOnly -Class AudioEndpoint -ErrorAction SilentlyContinue)
+        Say ("AUDIO-ENDPOINTS {0} n={1} {2}" -f $Round, $ep.Count, (($ep | ForEach-Object { $_.FriendlyName + '/' + $_.Status }) -join ';'))
+        # A WAV file: 48000 samples a second, two channels of 16 bits, all zero.
+        $rate = 48000
+        $secs = 3
+        $cbData = $rate * $secs * 4
+        $wav = New-Object byte[] (44 + $cbData)
+        [Text.Encoding]::ASCII.GetBytes('RIFF').CopyTo($wav, 0)
+        [BitConverter]::GetBytes([int32](36 + $cbData)).CopyTo($wav, 4)
+        [Text.Encoding]::ASCII.GetBytes('WAVEfmt ').CopyTo($wav, 8)
+        [BitConverter]::GetBytes([int32]16).CopyTo($wav, 16)
+        [BitConverter]::GetBytes([int16]1).CopyTo($wav, 20)
+        [BitConverter]::GetBytes([int16]2).CopyTo($wav, 22)
+        [BitConverter]::GetBytes([int32]$rate).CopyTo($wav, 24)
+        [BitConverter]::GetBytes([int32]($rate * 4)).CopyTo($wav, 28)
+        [BitConverter]::GetBytes([int16]4).CopyTo($wav, 32)
+        [BitConverter]::GetBytes([int16]16).CopyTo($wav, 34)
+        [Text.Encoding]::ASCII.GetBytes('data').CopyTo($wav, 36)
+        [BitConverter]::GetBytes([int32]$cbData).CopyTo($wav, 40)
+        $path = Join-Path $env:TEMP 'simsound.wav'
+        [System.IO.File]::WriteAllBytes($path, $wav)
+        $ps = [PowerShell]::Create().AddScript({ param($p) (New-Object System.Media.SoundPlayer $p).PlaySync() }).AddArgument($path)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $h = $ps.BeginInvoke()
+        $done = $h.AsyncWaitHandle.WaitOne(60000)
+        $sw.Stop()
+        if ($done) {
+            $err = ''
+            try { [void]$ps.EndInvoke($h) } catch { $err = $_.Exception.Message }
+            if ($ps.Streams.Error.Count -gt 0) { $err = $err + ' ' + $ps.Streams.Error[0].ToString() }
+            Say ("AUDIO-PLAY {0} ms={1} seconds={2} {3}" -f $Round, $sw.ElapsedMilliseconds, $secs, $err)
+        } else {
+            Say ("AUDIO-PLAY {0} failed: not done after a minute" -f $Round)
+            try { $ps.Stop() } catch { }
+        }
+    } catch {
+        Say ("AUDIO-PLAY {0} failed: {1}" -f $Round, $_.Exception.Message)
+    }
+}
+
 $intxDone = $false
+$audioBusy = $false
 $seen = Behind-Bridges
 foreach ($k in $seen.Keys) {
     Say ("PRESENT 0 at={0} id={1}" -f $k, $seen[$k])
     if ($seen[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive 0 $k (($seen[$k] -split ' status=')[0]) }
+    if ($seen[$k] -match 'status=OK problem=0 service=HDAudBus') { Report-Audio 0 $k (($seen[$k] -split ' status=')[0]) }
 }
 $rounds = [int]($AliveSeconds / 5)
 for ($i = 1; $i -le $rounds; $i++) {
     Say ("ALIVE {0}" -f $i)
     Start-Sleep -Seconds 5
     $cmd = Host-Command
+    if ($cmd -eq 'audio') {
+        # Once for each time the DVD is put in.
+        if (-not $audioBusy) {
+            $audioBusy = $true
+            Play-Sound $i
+        }
+        continue
+    }
+    $audioBusy = $false
     if ($cmd -eq 'intx' -and -not $intxDone) {
         $intxDone = $true
         Use-LineInterrupt $i
@@ -375,6 +456,7 @@ for ($i = 1; $i -le $rounds; $i++) {
         if (-not $seen.ContainsKey($k) -or $seen[$k] -ne $now[$k]) {
             Say ("PRESENT {0} at={1} id={2}" -f $i, $k, $now[$k])
             if ($now[$k] -match 'status=OK problem=0 service=stornvme') { Read-Drive $i $k (($now[$k] -split ' status=')[0]) }
+            if ($now[$k] -match 'status=OK problem=0 service=HDAudBus') { Report-Audio $i $k (($now[$k] -split ' status=')[0]) }
         }
     }
     foreach ($k in $seen.Keys) {

@@ -62,6 +62,9 @@ DRIVE_RE='^WIN: PRESENT [0-9]+ at=1\.0\.0 id=[^ ]* status=OK problem=0 service=s
 # The same for the second function of a device which has two, each an NVMe
 # controller with a drive of its own (run.sh, part "mfwinhost").
 DRIVE2_RE='^WIN: PRESENT [0-9]+ at=1\.0\.1 id=[^ ]* status=OK problem=0 service=stornvme'
+# The second function where it is a High Definition Audio controller: the bus
+# driver Windows has for those has it.
+AUDIO_RE='^WIN: PRESENT [0-9]+ at=1\.0\.1 id=[^ ]* status=OK problem=0 service=[Hh][Dd][Aa]ud[Bb]us'
 
 
 # A picture of the screen of the VM, the only way to see what setup is doing.
@@ -898,9 +901,34 @@ two_funcs()
 
 # What Windows makes of the second function, where the device has one: its
 # driver has the controller, and what is read from its drive is what is on it.
+# The second function of the device is a High Definition Audio controller,
+# which is PCI class 0403.
+second_is_audio()
+{
+    two_funcs || return 1
+    case "$(cat "/sys/bus/pci/devices/${HOSTFUNCS##* }/class" 2> /dev/null)" in
+        0x0403*) return 0 ;;
+    esac
+    return 1
+}
+
 win_second() # <what> [<seconds>]
 {
     two_funcs || return 0
+    if second_is_audio; then
+        # Its driver has the controller, and it has found the codec behind it,
+        # which takes commands to the controller and answers from it.
+        local what=${1/and reads from its drive/and finds its codec}
+        if    wait_serial "$AUDIO_RE" "${2:-420}" \
+           && wait_serial '^WIN: AUDIO [0-9]+ at=1\.0\.1 codecs=[1-9]' 420; then
+            stage "$what" ok "$(serial_new | grep -a '^WIN: AUDIO [0-9]* at=1\.0\.1 ' | tail -n 1 | sed -e 's/^WIN: AUDIO [0-9]* at=1\.0\.1 //' | cut -c1-60)"
+            serial_show '^WIN: (PRESENT [0-9]+ at=1\.0\.1|AUDIO)' 6
+            return 0
+        fi
+        stage "$what" FAILED "last: $(serial_new | grep -a -E '^WIN: (PRESENT [0-9]+ at=1\.0\.1|AUDIO|GONE)' | tail -n 1 | cut -c1-140)"
+        diag
+        return 1
+    fi
     if    wait_serial "$DRIVE2_RE" "${2:-420}" \
        && wait_serial "^WIN: READ2 [0-9]+ md5=$EXPECT_MD5B\$" 420; then
         stage "$1" ok
@@ -974,6 +1002,11 @@ win_intx()
     echo "    ---- the interrupts the host has for the device, after:"
     for f in $HOSTFUNCS; do host_irq_lines "$f" | tr -s ' ' | cut -c1-160 | sed 's/^/    | /'; done
     for f in $HOSTFUNCS; do
+        if [ "$n" != 0 ] && second_is_audio; then
+            # The script in the guest does this with the controllers of drives.
+            n=$((n + 1))
+            continue
+        fi
         at="1\\.0\\.$n"
         if [ "$n" = 0 ]; then
             tag=; md5=$EXPECT_MD5; name=$what; reads="guest: reads from the drive with its INTx interrupt"
@@ -1006,6 +1039,62 @@ win_intx()
     done
     dvd emptydrive
     guest_goes_on "the guest keeps running with the drive at INTx" 300
+}
+
+# Sound over the audio controller, where the second function of the device is
+# one.  Which interrupt Windows runs the controller with is its own choice and
+# is told by the host, see host_irq_lines.  Then the script in the guest plays
+# three seconds of silence, which takes the controller an interrupt for each
+# piece of it: with too few of them it takes longer, with none it does not
+# end.  The sound goes nowhere on the simulated host, in the time it takes.
+win_audio() # <what is added to the name of the check>
+{
+    second_is_audio || return 0
+    [ -s "${WIN_CMD_AUDIO_ISO:-}" ] || return 0
+    local f=${HOSTFUNCS##* } before="$SIM_WORK/interrupts-before-audio" after="$SIM_WORK/interrupts-after-audio"
+    local irq msgs line ms c0 c1 kind
+    echo "    ---- the interrupts the host has for the audio controller:"
+    host_irq_lines "$f" | tr -s ' ' | cut -c1-160 | sed 's/^/    | /'
+    cat /proc/interrupts > "$before" 2> /dev/null
+    irq=$(grep -a -F "vfio-intx($f)" "$before" | head -n 1 | sed -n 's/^ *\([0-9]*\):.*$/\1/p')
+    msgs=$(grep -a -F "($f)" "$before" | grep -a -c -E 'vfio-msix?\[')
+    if [ -n "$irq" ] && [ "$msgs" = 0 ]; then
+        kind="a line interrupt (INTx), interrupt $irq of the host"
+    elif [ "$msgs" != 0 ]; then
+        kind="$msgs message interrupt(s)"
+        irq=$(grep -a -F "($f)" "$before" | grep -a -E 'vfio-msix?\[' | head -n 1 | sed -n 's/^ *\([0-9]*\):.*$/\1/p')
+    else
+        kind=
+    fi
+    if [ -n "$kind" ]; then
+        stage "host: the audio controller has an interrupt set up$1" ok "$kind"
+    else
+        stage "host: the audio controller has an interrupt set up$1" FAILED "the host has none for $f"
+    fi
+    serial_mark
+    dvd "$WIN_CMD_AUDIO_ISO"
+    if wait_serial '^WIN: AUDIO-PLAY ' 600; then
+        cat /proc/interrupts > "$after" 2> /dev/null
+        line=$(serial_new | grep -a '^WIN: AUDIO-PLAY ' | tail -n 1)
+        ms=$(echo "$line" | sed -n 's/^WIN: AUDIO-PLAY [0-9]* ms=\([0-9]*\) .*$/\1/p')
+        c0=$(irq_count "${irq:-none}" "$before")
+        c1=$(irq_count "${irq:-none}" "$after")
+        : "${c0:=0}" "${c1:=0}"
+        serial_show '^WIN: AUDIO' 8
+        if [ -n "$ms" ] && [ "$ms" -ge 2500 ] && [ "$ms" -le 12000 ] && [ "$c1" -gt "$c0" ]; then
+            stage "guest: plays three seconds of sound over the audio controller$1" ok "$ms ms, $((c1 - c0)) interrupts of the host meanwhile"
+        elif [ -n "$ms" ] && [ "$ms" -lt 2500 ]; then
+            stage "guest: plays three seconds of sound over the audio controller$1" skipped "Windows was done after $ms ms: it has nothing to play sound with"
+        else
+            stage "guest: plays three seconds of sound over the audio controller$1" FAILED "$(echo "$line" | cut -c1-120); interrupt ${irq:-none} of the host: $c0 before, $c1 after"
+        fi
+    else
+        stage "guest: plays three seconds of sound over the audio controller$1" FAILED "the guest did not tell of it"
+        serial_show '^WIN: AUDIO' 8
+        diag
+    fi
+    dvd emptydrive
+    guest_goes_on "the guest keeps running after the sound$1" 300
 }
 
 # A guest which has stopped telling anything while its VM runs (run 251: from
@@ -1071,6 +1160,7 @@ phase_hotplug()
     win_has_drive "guest: has the drive in the slot, with its driver" || { shot; return; }
     win_reads "guest: reads from the drive in the slot"
     win_second "guest: has the second function too, with its driver, and reads from its drive"
+    win_audio ""
     local lay t0 second=${HOSTFUNCS##* }
     lay=$(vbm getextradata "$VM" "VBoxInternal2/HostPCILayout/$HOSTADDR" 2> /dev/null | sed -n 's/^Value: //p')
     echo "    layout stored: ${lay:-none}"
@@ -1139,6 +1229,7 @@ phase_hotplug()
     win_reads "guest: reads from the drive again"
     win_second "guest: takes the second function again and reads from its drive" 600
     win_intx
+    win_audio ", with the drive at INTx as well"
     check_log_quiet
     shot
 }
