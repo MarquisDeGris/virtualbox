@@ -1495,9 +1495,37 @@ down. As there, Windows read from the drives after their controllers
 were started anew, and what it read is what is on them. Run 283 is the
 part with Windows on this branch with the simulation as it is since.
 
-Until then the branches of the merge requests are as they were, with
-the limitation as it was; the descriptions of the merge requests and
-HWTEST.md say what it means for a guest, see "What is missing" there.
+**Run 282** (2026-11-22, `winsim`, for finding out, the branch of run
+278, 46 minutes, Intel Xeon 6975P-C): the part with Windows, with the
+simulation as changed: all 155 checks pass. Before the step Windows has
+messages for both controllers (interrupt numbers above four thousand
+million) and the host has its lines `vfio-msix` for them. After it
+Windows has IRQ 16 for both, and the host has one line for both:
+`23: ... IR-IO-APIC 23-fasteoi vfio-intx(0000:01:00.0),
+vfio-intx(0000:01:00.1)`. Those are two functions of a device which
+share an interrupt line, as the functions of a graphics card can.
+Windows reads what is on the drives with that, the host counting 128
+interrupts meanwhile with the drive of one function and 311 with the
+device of two, keeps running, and shuts down when it is told to.
+
+With that the branches for 7.2 have the change:
+`pci-passthrough-hotplug-7.2` @ `a170413a` and
+`pci-passthrough-hotplug-7.2-kvm` @ `26e4045a`, pushed on 2026-11-22.
+
+**Run 283** (2026-11-22, `winsim`, for finding out, the branch of run
+279, 42 minutes, Intel Xeon 6975P-C): the same on the 7.1 line: all 155
+checks pass, with the same to be seen of the interrupts: IRQ 16 in
+Windows for both controllers, one line `vfio-intx` for both functions
+on the host, 106 interrupts of the host while Windows read with the
+drive of one function and 251 with the device of two.
+
+With that the branches for 7.1 have the change as well,
+`pci-passthrough-hotplug-7.1` @ `2486f750` and
+`pci-passthrough-hotplug-7.1-kvm` @ `9f8f5cba`, and every branch of a
+merge request about the passthrough work has it (2026-11-22, 14:35
+UTC). What "Where it is now" above names as waiting is done. Seen
+nowhere: a device which has nothing but INTx, the audio function of a
+graphics card, hardware.
 
 Not done: the new test against the device as it was
 (`scratch/intx-before`), a run which ends well when the test fails.
@@ -2311,11 +2339,11 @@ harness since WP5, saved states since the fourth part of WP6.
    Windows guest letting go of a device counts.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
-4e. INTx (WP8), see "INTx (WP8)" above: written, read by a second
-   reader, built and tested on all three lines, and run in the
-   simulation with a Linux guest which does not use MSI (runs 269 to
-   276). Left: the runs named under "Where it is now" there, then the
-   commit on the branches of the merge requests and their descriptions.
+4e. INTx (WP8), see "INTx (WP8)" above: done on 2026-11-22. It is on
+   every branch of a merge request about the passthrough work, read by
+   a second reader, built and tested on all three lines, and run in the
+   simulation with a Linux guest and with Windows, neither using MSI
+   (runs 269 to 283). Left for the hardware: a real device with INTx.
    Not planned: seeing the new test fail on the device as it was.
 4f. Requests from the tracker of upstream, see the section of that
    name: 798 and the manual text for 674 and 904 are merge requests.
@@ -2660,5 +2688,7 @@ virtual machine.
 | 279 | `scratch/intx-7.1-kvm` @ `9f8f5cba` | allsim, exploring | passed | 110 minutes, Intel Xeon 6975P-C. 292 checks pass, 5 fail, the same five as in run 278 and for the step itself: the kind of interrupt not told, the DVD for shutting down not seen. Everything with the Linux guest passes, the phase `intx` among it, and both parts with Windows get through their steps with the slot. See "Run 279" |
 | 280 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests, exploring | passed | 5 minutes. A branch from `main` without the passthrough work: it builds, the step for the testcase of the device ends well without one, and the two command line checks which need no 3D acceleration pass. See "Requests from the tracker of upstream" |
 | 281 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests with `VBOX_WITH_3D_ACCELERATION=1`, exploring | passed | 7 minutes. All six command line checks for `modifyvm` pass |
+| 282 | `scratch/intx-7.2-kvm` @ `26e4045a` | winsim, exploring | passed | 46 minutes, Intel Xeon 6975P-C. All 155 checks pass. Windows runs the controllers of both drives with a line interrupt, which the host shows as `vfio-intx` for both functions on one line, reads what is on the drives and shuts down when told to. See "Run 282" |
+| 283 | `scratch/intx-7.1-kvm` @ `9f8f5cba` | winsim, exploring | passed | 42 minutes, Intel Xeon 6975P-C. All 155 checks pass: the same on the 7.1 line as run 282 on 7.2. Every branch of a merge request about the passthrough work has the INTx change after this run |
 
 Run numbers are those GitHub shows for the `build` workflow.

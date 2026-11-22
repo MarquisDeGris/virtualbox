@@ -79,23 +79,36 @@ with an IOMMU of AMD.
   VM which has a device in the slot has not been tried anywhere, and
   neither has Secure Boot, which Windows 11 asks for as well.
 - A function whose driver uses INTx, the old kind of PCI interrupt, gets
-  each of its interrupts on `pci-passthrough-hotplug-v1` since
-  2026-11-22 ([STATUS.md](STATUS.md), "INTx (WP8)"). The branches for
-  7.2 and 7.1 follow; until then such a function gets its first
-  interrupt there and no more. It is slower with INTx than a function
-  with MSI or MSI-X: the device is asked for its next
-  interrupt a moment after each one, at most 2 milliseconds later, so a
-  function which has interrupts all the time gets about 500 a second.
-  Seen so far with the testcase and in the simulation, where the drive
-  was used by a guest told not to use MSI (run 277); with no real
-  device. Windows uses INTx for a High Definition Audio controller
-  unless it is told otherwise, and that is what the audio function of a
-  graphics card is to it. For a first test with a graphics card and a
-  Windows guest, leave the audio function out of the VM: attach function
-  0 only. The audio function has to be bound to `vfio-pci` on the host
-  all the same, being in the IOMMU group of the card. Then try with it:
-  whether sound over the card plays without breaks is one of the things
-  only the hardware can tell.
+  each of its interrupts, on all branches since 2026-11-22
+  ([STATUS.md](STATUS.md), "INTx (WP8)"). It is slower with INTx than a
+  function with MSI or MSI-X: the device is asked for its next interrupt
+  a moment after each one, at most 2 milliseconds later, so a function
+  which has interrupts all the time gets about 500 a second. Seen with
+  the testcase and in the simulation: with a Linux guest told not to use
+  MSI, and with Windows told to run the controllers of two drives
+  without MSI, the two sharing one interrupt line (runs 277, 282 and
+  283); with no real device.
+  - Which kind of interrupt a function has is told by the host while
+    the VM runs: `grep vfio /proc/interrupts` has a line
+    `vfio-intx(<address>)` for a function with INTx, and lines
+    `vfio-msix[...](<address>)` or `vfio-msi[...](<address>)` for one
+    with messages. The numbers in front count.
+  - Windows uses INTx for a High Definition Audio controller unless it
+    is told otherwise, and that is what the audio function of a graphics
+    card is to it. For a first test with a graphics card and a Windows
+    guest, leave the audio function out of the VM: attach function 0
+    only. The audio function has to be bound to `vfio-pci` on the host
+    all the same, being in the IOMMU group of the card.
+  - Then try with it: whether sound over the card plays without breaks
+    is one of the things only the hardware can tell. If it does not,
+    Windows can be told to use MSI for the function, which is the
+    simulation's way of having it use INTx the other way around: the
+    value `MSISupported` (1 for MSI) in the registry of the guest, under
+    `Device Parameters\Interrupt Management\MessageSignaledInterruptProperties`
+    of the device below `HKLM\SYSTEM\CurrentControlSet\Enum`, and the
+    device or the guest started anew. Whether the audio function of a
+    given card works with MSI is for its driver to say; nothing here
+    has tried it.
 - For a Windows guest: `VBoxManage modifyvm <vm> --paravirt-provider none`.
   With KVM VirtualBox cannot show a Windows guest the interface of Hyper-V,
   which is what it shows such a guest otherwise. It shows a minimal one
