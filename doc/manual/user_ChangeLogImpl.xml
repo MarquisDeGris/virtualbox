@@ -118,6 +118,12 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VBoxManage: The modifyvm options --accelerate-3d and --vram now
+          apply to the graphics controller selected by --graphicscontroller in
+          the same command, regardless of the order of the options</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 

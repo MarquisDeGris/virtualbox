@@ -794,6 +794,13 @@ it unless this changes. -->
           <listitem><para>
               Specifies the amount of RAM to allocate to the virtual
               graphics card. See <xref linkend="ct_settings-display" />.
+            </para><para>
+              The sizes which are valid depend on the graphics controller
+              and on whether 3D acceleration is enabled. When
+              <option>--graphicscontroller</option> or
+              <option>--accelerate-3d</option> are specified in the same
+              command, the size is checked against what they select,
+              regardless of the order of the options.
             </para></listitem>
         </varlistentry>
         <varlistentry>
@@ -1130,6 +1137,12 @@ it unless this changes. -->
               graphics adapter variants which support it. This option
               has an effect only when the Guest Additions are installed.
               See <xref linkend="guestadd-video" />.
+            </para><para>
+              When <option>--graphicscontroller</option> is specified in
+              the same command, this option applies to the graphics
+              controller which that option selects, regardless of the
+              order of the two options. Enabling 3D acceleration for a
+              graphics controller which does not support it is an error.
             </para></listitem>
         </varlistentry>
         <varlistentry>
