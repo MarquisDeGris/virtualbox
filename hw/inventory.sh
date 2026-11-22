@@ -16,8 +16,8 @@ mkdir -p "$out" || exit 1
 f="$out/inventory.txt"
 
 have() { command -v "$1" > /dev/null 2>&1; }
-# One line "key: value", the value cut to what a line can take.
-kv() { printf '%s: %s\n' "$1" "$(printf '%s' "$2" | tr -s ' \t\n' ' ' | cut -c1-160)"; }
+# One line "key: value", the value shortened to what a line can take.
+kv() { printf '%s: %s\n' "$1" "$(printf '%s\n' "$2" | tr -s ' \t\n' ' ' | sed -e 's/^\(.\{0,160\}\).*/\1/' -e 's/ $//')"; }
 first() { sed -n '1p' "$1" 2> /dev/null; }
 
 {
@@ -75,7 +75,7 @@ first() { sed -n '1p' "$1" 2> /dev/null; }
         boot=
         [ "$(first "$d/boot_vga")" = 1 ] && boot=", the firmware's screen"
         name=
-        if have lspci; then name=$(lspci -s "$addr" 2> /dev/null | sed -e 's/^[^ ]* //' | cut -c1-90); fi
+        if have lspci; then name=$(lspci -s "$addr" 2> /dev/null | sed -e 's/^[^ ]* //' -e 's/^\(.\{0,90\}\).*/\1/'); fi
         kv "pci-$addr" "class $class, id $(first "$d/vendor" | sed 's/^0x//'):$(first "$d/device" | sed 's/^0x//'), driver $drv, IOMMU group $grp$boot${name:+, $name}"
         if [ "$grp" != none ]; then
             others=
