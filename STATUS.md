@@ -1266,7 +1266,10 @@ Windows never got up.
 ### INTx (WP8), from 2026-11-22
 
 Not on any branch of a merge request yet: the work is on
-`scratch/intx`, one commit on the head of `pci-passthrough-hotplug-v1`.
+`scratch/intx`, two commits on the head of `pci-passthrough-hotplug-v1`
+(`b2b6e1ee`). The same two apply to the branches for 7.2 and 7.1 as
+they are and are on `scratch/intx-7.2` and `scratch/intx-7.1`, not
+built.
 
 What was wrong is more than the notes said. They said that a device
 which only has INTx does not work beyond its first interrupt. Reading
@@ -1293,9 +1296,25 @@ passes one on, and nothing tells the device when the guest is done with
 it, so the interrupt thread asks the device again (unmasks it) 100
 microseconds later. A device which still has an interrupt says so at
 once, which is another pulse; while it keeps saying so the time is
-doubled, up to 8 milliseconds, which bounds what a device costs which
+doubled, up to a longest time, which bounds what a device costs which
 nobody deals with. It stays inside the device: the I/O APIC and the VMM
 are as they were.
+
+The longest time was 8 milliseconds in the first commit, which is what
+runs 269 and 270 built, and is 2 milliseconds since the second, which
+no run has built. A device which has its next interrupt ready every
+time it is asked cannot be told from one nobody deals with, so the
+longest time is also the pace of a device with many interrupts: 125 a
+second with 8 milliseconds, 500 with 2. That is the price of sampling
+the device instead of knowing when the guest is done, and why such a
+device is better off with MSI or MSI-X.
+
+The I/O APIC as the KVM backend of Cyberus Technology has it knows of
+the trouble a raised line makes: it counts how often a line is passed
+on without having gone down and holds it back for a tenth of a second
+after ten thousand times (`Interrupt storm on GSI ..., delaying
+injection`). With the line going down after each pulse that count
+starts anew each time.
 
 Two other ways were looked at and not taken. A callback from the I/O
 APIC at the EOI of the guest is what the comment in the code had asked
@@ -2088,11 +2107,14 @@ harness since WP5, saved states since the fourth part of WP6.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
 4e. INTx (WP8), see "INTx (WP8)" above: written, built and tested on
-   `scratch/intx` (runs 269 and 270). Left, in this order: the
+   `scratch/intx` (runs 269 and 270), with one change since which is
+   not built (the longest time between asking the device). Left, in
+   this order: the testcase and the sanitizers on the new head; the
    simulation with a guest which does not use MSI; the new test seen
-   failing on the device as it was; the commit on the three lines and
-   their branches with the backend, each with a run; the descriptions
-   of the merge requests. All of it waits for runs to be allowed again.
+   failing on the device as it was; the commits on the three lines and
+   their branches with the backend, each with a run (the scratch
+   branches for 7.2 and 7.1 are there for that); the descriptions of
+   the merge requests. All of it waits for runs to be allowed again.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
    device coming and going, a device pulled without notice and a device
    error in the simulation.
@@ -2198,6 +2220,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-21 | Windows with the device of two functions has functions which the host cannot reset by themselves, from the start of its VM | That is the device this work is for: a graphics card and its audio function are mostly reset together, by the reset of their bus, and Windows switching the slot off is such a reset. The device of one function with Windows, and the device of two functions with the Linux guest in its other phases, keep the reset of a function |
 | 2026-11-21 | A Windows which is stuck early in its start is given up on after 15 minutes without a read from its disk, looked at, and started once more; the first start counts as failed | Run 265 waited an hour for such a start and learned little from it, and everything the part is for comes after the start. A second start which works tells that the first was chance and lets the checks about the device run; a second which is stuck too tells the opposite. The failure stays in the count either way |
 | 2026-11-22 | WP8 is taken up: a function which uses INTx gets every interrupt through to the guest. Each interrupt is a pulse on the line of the guest, and the device is asked for its next one after a time which grows while it keeps answering with one | Reading the device showed that the first INTx interrupt left the line of the guest raised for good, which is worse than the notes had it, and the audio function of a graphics card in a Windows guest is a device which uses INTx. The way taken stays inside the device, where the testcase goes through every step of it; a callback from the I/O APIC or trapping the memory of the device would have changed parts which every VM uses and which nothing here can test alone |
+| 2026-11-22 | The longest time between two questions to a device about its INTx interrupt is 2 milliseconds, not the 8 of the first version | It is the pace of a device with many interrupts as much as the bound for one nobody deals with. 500 pulses a second cost little on a host which is not a virtual machine; 125 interrupts a second would have been little for a graphics card whose driver uses INTx. What the right number is can only be told with such a device |
 | 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
