@@ -206,13 +206,17 @@ test_vm() # <options for modifyvm>...
         check "the VM is created" FAILED "$(short 160 < "$work/last.out" | sed -n '1p')"
         test_end
     fi
-    run modifyvm "$VM" --cpus 2 --ioapic on --chipset ich9 --firmware efi \
+    run modifyvm "$VM" --cpus "${HW_CPUS:-2}" --ioapic on --chipset ich9 --firmware efi \
         --vm-execution-engine native-api --nic1 none --audio-enabled off \
         --graphicscontroller vboxvga --vram 16 --uart1 0x3f8 4 --uartmode1 file "$work/serial.log" "$@" || attached=no
     for f in $FUNCS; do
         run modifyvm "$VM" --pci-attach "$f@0000:01:00.${f##*.}" || attached=no
     done
     run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1 || attached=no
+    # Where the machine is itself a VM, every exit from the guest is slow, and
+    # a guest which keeps time by interrupts gets nowhere.  HW_WARP is the
+    # percentage of the pace of time in the VM then.  Not for real hardware.
+    [ -n "${HW_WARP:-}" ] && run setextradata "$VM" VBoxInternal/TM/WarpDrivePercentage "$HW_WARP"
     if [ "$attached" = yes ]; then
         check "the VM is created, with the device in the hot-plug capable slot" ok
     else

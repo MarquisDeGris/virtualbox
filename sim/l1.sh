@@ -179,6 +179,7 @@ hw_scripts()
             i=$((i + 1))
         done
         HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr HW_KERNEL=$kimg HW_GUEST_MB=1536 HW_BOOT_WAIT=600 \
+        HW_CPUS=1 HW_WARP=${SIM_WARP:-5} \
         HW_VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
             sh "$SIM_DIR/../hw/linux/test-$t.sh" > "$OUT/$WHERE/hw-test-$t.log" 2>&1
         rc=$?
