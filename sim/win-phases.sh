@@ -923,6 +923,22 @@ win_second_gone() # <what> [<seconds>]
     return 1
 }
 
+# What the host has in /proc/interrupts for a function of the device: a line
+# "vfio-intx(<address>)" while the function has a line interrupt set up, and
+# lines "vfio-msix[<n>](<address>)" or "vfio-msi[<n>](<address>)" while it
+# has messages.
+host_irq_lines() # <address>
+{
+    grep -a -F "($1)" /proc/interrupts | grep -a 'vfio-'
+}
+
+# How often an interrupt of the host has come, all CPUs together, by a copy of
+# /proc/interrupts; 0 if it is not in there.
+irq_count() # <number> <file>
+{
+    awk -v n="$1:" '$1 == n { c = 0; for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) c += $i; print c; f = 1; exit } END { if (!f) print 0 }' "$2" 2> /dev/null
+}
+
 # The drive with the interrupt of old.  Windows runs an NVMe controller with
 # MSI-X; a DVD with a word for the script in the guest has it told not to
 # (MSISupported in the registry, which is how a driver is told) and the
@@ -934,39 +950,60 @@ win_second_gone() # <what> [<seconds>]
 win_intx()
 {
     [ -s "${WIN_CMD_INTX_ISO:-}" ] || return 0
+    local what="guest: runs the controller of the drive with a line interrupt (INTx)"
     if ! grep -a -q 'Asking the device for its next interrupt' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
-        stage "guest: runs the controller of the drive with a line interrupt (INTx)" skipped "this build passes the first INTx interrupt of a function on and no more"
+        stage "$what" skipped "this build passes the first INTx interrupt of a function on and no more"
         return 0
     fi
+    local before="$SIM_WORK/interrupts-before-intx" after="$SIM_WORK/interrupts-after-intx"
+    local f n=0 at tag md5 name reads irq msgs c0 c1 told
+    cat /proc/interrupts > "$before" 2> /dev/null
+    echo "    ---- the interrupts the host has for the device, before:"
+    for f in $HOSTFUNCS; do host_irq_lines "$f" | tr -s ' ' | cut -c1-160 | sed 's/^/    | /'; done
     serial_mark
     dvd "$WIN_CMD_INTX_ISO"
     if ! wait_serial '^WIN: INTX-DONE ' 900; then
-        stage "guest: runs the controller of the drive with a line interrupt (INTx)" FAILED "its script did not get done with it"
+        stage "$what" FAILED "its script did not get done with it"
         serial_show '^WIN: INTX' 10
         diag
         dvd emptydrive
         return 1
     fi
     serial_show '^WIN: (INTX|DRIVE|READ|NODRIVE)' 14
-    # A line interrupt has a small number, the messages of MSI-X very large ones.
-    if serial_has '^WIN: INTX [0-9]+ at=1\.0\.0 status=OK irqs=[0-9]{1,3}$'; then
-        stage "guest: runs the controller of the drive with a line interrupt (INTx)" ok "$(serial_new | grep -a '^WIN: INTX [0-9]* at=1\.0\.0 ' | head -n 1 | sed -e 's/^WIN: INTX [0-9]* //' | cut -c1-60)"
-        if serial_has "^WIN: READ [0-9]+ md5=$EXPECT_MD5\$"; then
-            stage "guest: reads from the drive with its INTx interrupt" ok
+    cat /proc/interrupts > "$after" 2> /dev/null
+    echo "    ---- the interrupts the host has for the device, after:"
+    for f in $HOSTFUNCS; do host_irq_lines "$f" | tr -s ' ' | cut -c1-160 | sed 's/^/    | /'; done
+    for f in $HOSTFUNCS; do
+        at="1\\.0\\.$n"
+        if [ "$n" = 0 ]; then
+            tag=; md5=$EXPECT_MD5; name=$what; reads="guest: reads from the drive with its INTx interrupt"
         else
-            stage "guest: reads from the drive with its INTx interrupt" FAILED "last: $(serial_new | grep -a -E '^WIN: (READ|NODRIVE|DRIVE) ' | tail -n 1 | cut -c1-110)"
+            tag=2; md5=$EXPECT_MD5B; name="guest: the same with the second function"
+            reads="guest: reads from the drive of the second function with its INTx interrupt"
         fi
-    else
-        stage "guest: runs the controller of the drive with a line interrupt (INTx)" FAILED "$(serial_new | grep -a '^WIN: INTX' | grep -a 'at=1\.0\.0' | tail -n 1 | cut -c1-140)"
-    fi
-    if two_funcs; then
-        if    serial_has '^WIN: INTX [0-9]+ at=1\.0\.1 status=OK irqs=[0-9]{1,3}$' \
-           && serial_has "^WIN: READ2 [0-9]+ md5=$EXPECT_MD5B\$"; then
-            stage "guest: the same with the second function, and reads from its drive" ok
+        # The guest tells that its driver has the controller again.  What kind of
+        # interrupt the function has is what the host tells: a line interrupt
+        # and no messages.  The numbers Windows has for it are told along.
+        irq=$(grep -a -F "vfio-intx($f)" "$after" | head -n 1 | sed -n 's/^ *\([0-9]*\):.*$/\1/p')
+        msgs=$(grep -a -F "($f)" "$after" | grep -a -c -E 'vfio-msix?\[')
+        told=$(serial_new | grep -a -E "^WIN: INTX [0-9]+ at=$at " | tail -n 1 | sed -e 's/^WIN: INTX [0-9]* //' | cut -c1-90)
+        if serial_has "^WIN: INTX [0-9]+ at=$at status=OK " && [ -n "$irq" ] && [ "$msgs" = 0 ]; then
+            stage "$name" ok "interrupt $irq of the host; the guest: $told"
         else
-            stage "guest: the same with the second function, and reads from its drive" FAILED "$(serial_new | grep -a -E '^WIN: (INTX [0-9]+ at=1\.0\.1|READ2|NODRIVE2)' | tail -n 1 | cut -c1-140)"
+            stage "$name" FAILED "the host has ${irq:+interrupt $irq as its line interrupt and }$msgs message interrupt(s) for $f; the guest: ${told:-nothing}"
         fi
-    fi
+        # Reading eight megabytes takes interrupts: what was read is what is on
+        # the drive, and the host has counted its line interrupt meanwhile.
+        c0=$(irq_count "${irq:-none}" "$before")
+        c1=$(irq_count "${irq:-none}" "$after")
+        : "${c0:=0}" "${c1:=0}"
+        if serial_has "^WIN: READ$tag [0-9]+ md5=$md5\$" && [ -n "$irq" ] && [ "$c1" -gt "$c0" ]; then
+            stage "$reads" ok "$((c1 - c0)) interrupts of the host meanwhile"
+        else
+            stage "$reads" FAILED "last: $(serial_new | grep -a -E "^WIN: (READ|NODRIVE|DRIVE)$tag " | tail -n 1 | cut -c1-100); interrupt ${irq:-none} of the host: $c0 before, $c1 after"
+        fi
+        n=$((n + 1))
+    done
     dvd emptydrive
     guest_goes_on "the guest keeps running with the drive at INTx" 300
 }

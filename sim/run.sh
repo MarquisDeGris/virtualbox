@@ -505,7 +505,12 @@ make_unattend_image()
     rm -rf "$WORK/cmdi" "$WORK/cmd-intx.iso"
     mkdir -p "$WORK/cmdi/simcmd"
     echo intx > "$WORK/cmdi/simcmd/intx"
-    genisoimage -quiet -J -r -V SIMCMD -o "$WORK/cmd-intx.iso" "$WORK/cmdi" || return 1
+    # With another name and another size than the one for shutting down.  In
+    # run 278 Windows did not see the second one after it had had the first,
+    # and two media which are alike in all a drive tells of them are one
+    # medium to it; that is the likeliest reason.
+    head -c 300000 /dev/zero > "$WORK/cmdi/simcmd/padding"
+    genisoimage -quiet -J -r -V SIMINTX -o "$WORK/cmd-intx.iso" "$WORK/cmdi" || return 1
 }
 
 LINUX_STAGES=$(wc -l < "$STAGES")

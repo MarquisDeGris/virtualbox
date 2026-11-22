@@ -298,11 +298,18 @@ function Host-Command {
 # line interrupt has a small number, the messages of MSI and MSI-X have very
 # large ones.
 function Irq-Numbers([string]$InstanceId) {
+    # All the resources Windows has given out are gone through: asking for
+    # those of one device by its name found nothing (run 278).
     try {
-        $esc = $InstanceId -replace '\\', '\\'
-        $res = @(Get-CimInstance -Query ("ASSOCIATORS OF {Win32_PnPEntity.DeviceID='" + $esc + "'} WHERE ResultClass = Win32_IRQResource") -ErrorAction Stop)
-        if ($res.Count -eq 0) { return 'none' }
-        return (($res | ForEach-Object { $_.IRQNumber } | Sort-Object | Select-Object -First 4) -join ',')
+        $all = @(Get-CimInstance -ClassName Win32_PnPAllocatedResource -ErrorAction Stop)
+        $irqs = @()
+        foreach ($a in $all) {
+            if ($a.Dependent.DeviceID -eq $InstanceId -and $a.Antecedent.CimSystemProperties.ClassName -eq 'Win32_IRQResource') {
+                $irqs += [uint32]$a.Antecedent.IRQNumber
+            }
+        }
+        if ($irqs.Count -eq 0) { return ('none-of-' + $all.Count) }
+        return (($irqs | Sort-Object | Select-Object -First 4) -join ',')
     } catch {
         return ('failed-' + ($_.Exception.Message -replace '\s+', '_'))
     }
