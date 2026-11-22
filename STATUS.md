@@ -1527,6 +1527,43 @@ UTC). What "Where it is now" above names as waiting is done. Seen
 nowhere: a device which has nothing but INTx, the audio function of a
 graphics card, hardware.
 
+**A device whose second function is an audio controller** (the part
+`hdawinhost` of the simulation, on the `meta` branch since 2026-11-22).
+What comes nearest here to a graphics card with its sound: the device
+behind the port is a drive and a High Definition Audio controller as
+its two functions, both in one IOMMU group, and Windows is the guest.
+Windows has a driver of its own for such a controller, and HWTEST.md
+says of it that it runs the controller with a line interrupt unless it
+is told otherwise; the part is to show whether that is so. It tells
+which interrupt the audio function has by what the host has for it,
+whether the driver of Windows finds the codec behind the controller,
+and it has Windows play three seconds of silence and tells how long
+that took and how many interrupts the host counted meanwhile, once as
+Windows set the device up and once after the drive was told to use
+INTx, so that both functions have a line interrupt. The steps with the
+slot are those of the part with two drives.
+
+**Run 284** (2026-11-22, `winsim`, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `26e4045a`, 163 minutes, AMD EPYC
+9V74): the first run with that part, and it tells nothing about it: 93
+checks pass, 5 fail, 1 is skipped. The runner had an AMD processor, on
+which Windows does not get through its start two levels of
+virtualization deep (see "Run 268"): the parts with one drive and with
+two gave up after two attempts each, and the new one waited an hour for
+a Windows which crept along at the pace known from there, some seven
+thousand exits a second for 440 interrupts. What the run does show of
+the new part: the host has the two functions in one group and both
+bound to `vfio-pci`, and the VM is created with both. The audio
+controller as QEMU emulates it has no reset of its own; the step which
+has the host forget the resets of the functions gave up over that and
+counts it as done since.
+
+Changed after it: a run can name the parts of the simulation it is
+about (input `sim_parts` of the workflow), and such a run is cancelled
+at its start when it is for Windows two levels deep and its runner has
+an AMD processor, which the workflow tells in its first steps. Run 285
+is the part with Windows on the runner and the new part, nothing else.
+
 Not done: the new test against the device as it was
 (`scratch/intx-before`), a run which ends well when the test fails.
 That the test fails there is what reading says: the line is left high
@@ -1555,6 +1592,35 @@ taken over from 7.2 and the size check in the ACPI device; one commit
 came after it, which changes a testcase only (`tstGuestControlSvc`) and
 is built, with the testcase passing, in run 260.
 Merge request [#4](https://github.com/MarquisDeGris/virtualbox/pull/4).
+
+### Machines with real hardware, from 2026-11-22
+
+The runners of the workflow have no graphics card, no IOMMU to switch
+on and no device to pass through, and the machine this work is done on
+is a virtual machine. For a machine which has such things the `meta`
+branch has a directory `hw/` since 2026-11-22, see its README: scripts
+which are started there with one command, write down what they find
+field by field, and publish it on the branch `hw-results`, from where
+it is read when this work goes on. Whoever starts them does not have to
+know what they are for, and an assistant is not needed for it; where
+one is used, the README has the one command which keeps it to the two
+scripts.
+
+So far there is the inventory, for Linux and for Windows: processor,
+virtualization, IOMMU groups, the graphics cards and what shares their
+groups, what there is for building. It only reads. What it writes has
+no name of a machine or a person in it, and both scripts refuse a
+result which has; the fork is public.
+
+For a machine which runs Windows the README has the plan: the
+inventory there, then Linux from an external drive with the IOMMU
+switched on in the firmware, a VirtualBox built by the workflow fetched
+instead of built, the card bound to `vfio-pci` by the person at the
+machine, and the tests as one command each. Of that only the inventory
+exists. The inventory for Windows was tried on one machine; the one for
+Linux, the publishing, and the command for an assistant were not run
+anywhere yet. No result has arrived on `hw-results` (2026-11-22, 18:23
+UTC).
 
 ### Requests from the tracker of upstream, from 2026-11-22
 
@@ -2345,6 +2411,10 @@ harness since WP5, saved states since the fourth part of WP6.
    simulation with a Linux guest and with Windows, neither using MSI
    (runs 269 to 283). Left for the hardware: a real device with INTx.
    Not planned: seeing the new test fail on the device as it was.
+4g. Machines with real hardware, see the section of that name: waiting
+   for a first inventory on `hw-results`. Then, for that machine: the
+   VirtualBox of the workflow as something to fetch, and the scripts
+   for the steps of the plan in `hw/README.md`.
 4f. Requests from the tracker of upstream, see the section of that
    name: 798 and the manual text for 674 and 904 are merge requests.
    What could follow, each small and to be tested without a graphics
@@ -2461,6 +2531,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-22 | Requests from the public tracker of upstream are taken up where they can be done and tested here, each as a branch from the development branch of upstream and a merge request inside the fork | Asked for by whom this work is for. The tracker has no priorities, so what is small and can be tested without a graphics card comes first. Nothing goes upstream from here |
 | 2026-11-22 | The branches for 7.2 and 7.1 get the INTx change when a run has shown Windows using the line interrupt, not before | Run 278 had Windows read from the drives after its controllers were told not to use MSI, and could not tell which interrupt they had. That is what a Windows guest with the audio function of a graphics card comes to, so it is worth one more run |
 | 2026-11-22 | The three changes of 7.2 to the execution engine in the kernel driver stay left out of the 7.1 branches | Looked at again: they can be tried here in principle, the runners have the hardware virtualization for a VM on the kernel driver of VirtualBox, but that takes a part of the simulation of its own, about a day of work and several runs. A host which runs VMs with KVM does not run that code. It is worth doing if the hosts this is meant for turn out not to use KVM |
+| 2026-11-22 | What is to run on a machine with real hardware is scripts which need nobody to think, and their results come back through a branch of the fork | The machine which is offered for it has an assistant with little to spend and is not to be given a free hand. Scripts cost nothing to run, can be read before they are run, and what they find is worked out where the work is done. Only fields which were chosen leave the machine, as the fork is public |
+| 2026-11-22 | A run which is about Windows two levels of virtualization deep is cancelled at its start when its runner has an AMD processor | Run 284 took 163 minutes to tell nothing: Windows does not get through its start there on such a runner, which is known since run 268 and is not about the device. A run which is cancelled in its first minute costs next to nothing |
 | 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -2690,5 +2762,6 @@ virtual machine.
 | 281 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests with `VBOX_WITH_3D_ACCELERATION=1`, exploring | passed | 7 minutes. All six command line checks for `modifyvm` pass |
 | 282 | `scratch/intx-7.2-kvm` @ `26e4045a` | winsim, exploring | passed | 46 minutes, Intel Xeon 6975P-C. All 155 checks pass. Windows runs the controllers of both drives with a line interrupt, which the host shows as `vfio-intx` for both functions on one line, reads what is on the drives and shuts down when told to. See "Run 282" |
 | 283 | `scratch/intx-7.1-kvm` @ `9f8f5cba` | winsim, exploring | passed | 42 minutes, Intel Xeon 6975P-C. All 155 checks pass: the same on the 7.1 line as run 282 on 7.2. Every branch of a merge request about the passthrough work has the INTx change after this run |
+| 284 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | winsim, exploring | passed | 163 minutes, AMD EPYC 9V74. 93 checks pass, 5 fail, 1 skipped. The first run with the part `hdawinhost`, and on a runner on which Windows does not get through its start at that depth: all three parts with Windows in the simulated host waited for it in vain. See "Run 284" |
 
 Run numbers are those GitHub shows for the `build` workflow.
