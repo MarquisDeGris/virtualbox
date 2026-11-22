@@ -1263,6 +1263,92 @@ hour; the look at a guest which says nothing any more (run 251) has the
 counters too; and the check on the resets of the bus is left out when
 Windows never got up.
 
+### INTx (WP8), from 2026-11-22
+
+Not on any branch of a merge request yet: the work is on
+`scratch/intx`, one commit on the head of `pci-passthrough-hotplug-v1`.
+
+What was wrong is more than the notes said. They said that a device
+which only has INTx does not work beyond its first interrupt. Reading
+the device for this showed what the first interrupt leaves behind: the
+interrupt line of the guest was raised and stayed raised until the
+guest disabled INTx, switched to MSI or MSI-X, or the VM was reset. For
+a guest a line which stays high is an interrupt which never ends: its
+handler is called again as soon as it has returned. A Linux guest ends
+that by switching the line off after a hundred thousand rounds, with
+whatever else is on that line; Windows has no such way out. A driver
+which enables MSI before its device can interrupt never meets this,
+and the drive of the simulation is such a device, so no run did. The
+driver of Windows for a High Definition Audio controller, which is what
+the audio function of a graphics card is to it, uses INTx unless its
+installation says otherwise, and graphics drivers are known to. So a
+graphics card in a Windows guest, which is what this work is for, was
+likely to meet it. That is from what is known of those drivers, not
+from a run.
+
+What the commit does: an interrupt of the device is a pulse on the line
+of the guest, up and down again, which the PCI bus and the I/O APIC
+have a level for. The host masks the interrupt of a device when it
+passes one on, and nothing tells the device when the guest is done with
+it, so the interrupt thread asks the device again (unmasks it) 100
+microseconds later. A device which still has an interrupt says so at
+once, which is another pulse; while it keeps saying so the time is
+doubled, up to 8 milliseconds, which bounds what a device costs which
+nobody deals with. It stays inside the device: the I/O APIC and the VMM
+are as they were.
+
+Two other ways were looked at and not taken. A callback from the I/O
+APIC at the EOI of the guest is what the comment in the code had asked
+for; it changes a device every VM has and the interfaces between it,
+PDM and the PCI bus, on three lines and for two backends, and none of
+that can be gone through by the testcase. Trapping every access of the
+guest to the device while an interrupt is pending, which is what QEMU
+does where the kernel cannot tell it of the EOI, needs the memory of
+the device to change between mapped and trapped while the guest runs,
+in the code which also takes a device out of the address space when the
+host wants it back.
+
+**Run 269** (2026-11-22, `tests`, for finding out, `scratch/intx` @
+`42d73998`, 10 minutes, Intel Xeon 6975P-C): the first build. It builds
+without a warning in a file it changes, and all tests pass, the new one
+among them: five interrupts of a device which is dealt with at once
+arrive as five pulses, with the line low after each and the device asked
+after each; a device which holds its interrupt gets pulses at times
+which grow, within bounds; the pulses end when it lets go, when the
+guest disables INTx and when it switches to MSI, with nobody asking the
+device then; a device which still holds its interrupt is heard at once
+when the guest is back at INTx; after a reset of the VM the device is
+asked and its interrupt arrives; and a device taken out of the slot
+while it holds its interrupt gets no pulse and no question after that.
+The fake kernel of the testcase has a function which holds its
+interrupt for this.
+
+**Run 270** (2026-11-22, `sanitize`, the same commit, 11 minutes): the
+same with AddressSanitizer, LeakSanitizer and
+UndefinedBehaviorSanitizer and the random tests in full length: all
+pass, no report.
+
+Not done, and why. Two runs which were to follow could not be started
+on 2026-11-22: the session which does this work was refused the start
+of further runs, and it is a rule of this work not to try again or
+around that without the word of who it is for. They are:
+
+- The simulation on `scratch/intx`. It has a phase for this since
+  (`intx`, on the `meta` branch): the Linux guest started with
+  `pci=nomsi`, so that the driver of the drive gets its INTx interrupt,
+  reading and writing, pause and resume, a reset of the VM, and the
+  kernel of the guest not saying that nobody cares for an interrupt.
+  The phase has not run; a build without the change leaves it out.
+- The new test against the device as it was (`scratch/intx-before`), a
+  run which ends well when the test fails. That the test fails there is
+  what reading says: the line is left high and the device is never asked
+  again, and the test checks both. It was not seen.
+
+Until both have run the change stays where it is. The branches of the
+merge requests are as they were, with the limitation as it was; the
+descriptions of the merge requests and HWTEST.md say what it means for a
+guest, see "What is missing" there.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -2001,9 +2087,15 @@ harness since WP5, saved states since the fourth part of WP6.
    Windows guest letting go of a device counts.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
-7. Not planned for now: T3 (see the test tiers), WP8 (INTx beyond the
-   first interrupt), events in the API for a device coming and going, a
-   device pulled without notice and a device error in the simulation.
+4e. INTx (WP8), see "INTx (WP8)" above: written, built and tested on
+   `scratch/intx` (runs 269 and 270). Left, in this order: the
+   simulation with a guest which does not use MSI; the new test seen
+   failing on the device as it was; the commit on the three lines and
+   their branches with the backend, each with a run; the descriptions
+   of the merge requests. All of it waits for runs to be allowed again.
+7. Not planned for now: T3 (see the test tiers), events in the API for a
+   device coming and going, a device pulled without notice and a device
+   error in the simulation.
 
 ## Decisions
 
@@ -2105,6 +2197,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-21 | The machine of the simulation which has the device of two functions gets a root port for 2.5 GT/s, which does not claim to report whether its link is up; the machine with the device of one function keeps the port it had | The port QEMU emulates by default claims it and never reports the link up, so the kernel calls every reset of the bus behind it failed after doing it (run 265). A port of a real host reports its link. Without the change the reset of the bus, which is the reset a graphics card gets, can only be seen failing; with it the kernel does what it does on hardware. The other machine does not reset a bus and stays as the runs so far had it |
 | 2026-11-21 | Windows with the device of two functions has functions which the host cannot reset by themselves, from the start of its VM | That is the device this work is for: a graphics card and its audio function are mostly reset together, by the reset of their bus, and Windows switching the slot off is such a reset. The device of one function with Windows, and the device of two functions with the Linux guest in its other phases, keep the reset of a function |
 | 2026-11-21 | A Windows which is stuck early in its start is given up on after 15 minutes without a read from its disk, looked at, and started once more; the first start counts as failed | Run 265 waited an hour for such a start and learned little from it, and everything the part is for comes after the start. A second start which works tells that the first was chance and lets the checks about the device run; a second which is stuck too tells the opposite. The failure stays in the count either way |
+| 2026-11-22 | WP8 is taken up: a function which uses INTx gets every interrupt through to the guest. Each interrupt is a pulse on the line of the guest, and the device is asked for its next one after a time which grows while it keeps answering with one | Reading the device showed that the first INTx interrupt left the line of the guest raised for good, which is worse than the notes had it, and the audio function of a graphics card in a Windows guest is a device which uses INTx. The way taken stays inside the device, where the testcase goes through every step of it; a callback from the I/O APIC or trapping the memory of the device would have changed parts which every VM uses and which nothing here can test alone |
+| 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -2315,5 +2409,7 @@ virtual machine.
 | 266 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 68 minutes, Intel Xeon 6975P-C. Every check passes, 284 of them. With the changed root port of the simulated host the kernel does the reset of the bus which the device asks for and reports it done: with the Linux guest (9 checks) and with Windows, whose device of two functions can only be reset together from the start (43 checks). Windows with the device of one function passes again; no start was stuck. See "Run 266" |
 | 267 | `pci-passthrough-hotplug-v1` @ `f563e7f8` | sim, exploring | passed | 38 minutes, Intel Xeon 6975P-C. The branch of the merge request with what the simulation has got since run 232. Every check passes, 169 of them: the device of two functions (68, with the reset of the bus), the device of one function (67), and on the runner the VM behind NAT and the appliance for the first time on this branch. 12 testcases of the tree pass. See "Run 267" |
 | 268 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | allsim, exploring | passed (four checks of the simulation fail) | 145 minutes, AMD EPYC 9V45. 222 checks pass: everything with the Linux guest, with the reset of the bus now reported done on the 7.1 line too, and Windows on the runner. Windows in the VMs inside the virtual machine standing in for a host does not get through its start, three times out of three, which is the four failures. The counters of KVM tell what it is busy with: 6300 exits a second for 380 timer interrupts a second, which at that depth is all the time there is. See "Run 268" |
+| 269 | `scratch/intx` @ `42d73998` | tests, exploring | passed | 10 minutes, Intel Xeon 6975P-C. The first build of the INTx change (WP8): it builds without a warning in a changed file, the tests pass, the rewritten INTx test among them. See "INTx (WP8)" |
+| 270 | `scratch/intx` @ `42d73998` | sanitize, exploring | passed | 11 minutes. The same with the sanitizers and the random tests in full length: all pass, no report |
 
 Run numbers are those GitHub shows for the `build` workflow.
