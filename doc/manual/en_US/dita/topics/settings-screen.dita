@@ -8,6 +8,9 @@
       <li>
         <p><b outputclass="bold">Video Memory</b>: Sets the size of the memory provided by the virtual graphics card available to the guest, in megabytes. As with the main memory, the specified amount will be allocated from the host's resident memory. Based on the amount of video memory, higher resolutions and color depths may be available.</p>
         <p><ph conkeyref="vbox-conkeyref-phrases/vbox-mgr"/> will show a warning if the amount of video memory is too small to be able to switch the VM into full screen mode. The minimum value depends on the number of virtual monitors, the screen resolution and the color depth of the host display as well as on the use of <i>3D acceleration</i>. A rough estimate is (<i>color depth</i> / 8) x <i>vertical pixels</i> x <i>horizontal pixels</i> x <i>number of screens</i> = <i>number of bytes</i>. Extra memory may be required if display acceleration is used.</p>
+        <p>The video memory holds the screens of the VM. The memory which a guest with <i>3D acceleration</i> uses for its 3D objects, such as textures, is not part of the video memory and is not limited by this setting. The guest takes that memory from its main memory as it needs it, up to a limit of 4 GB. To change the limit for a VM, use a command such as the following. The size is specified in gigabytes, and the largest size is 32.</p>
+        <pre xml:space="preserve">$ VBoxManage setextradata <varname>VM-name</varname> \
+"VBoxInternal/Devices/vga/0/Config/VMSVGA3dGraphicsMemSizeGB" 8</pre>
       </li>
       <li>
         <p><b outputclass="bold">Number of Virtual Monitors</b>: With this setting, <ph conkeyref="vbox-conkeyref-phrases/product-name"/> can provide more than one virtual monitor to a virtual machine. If a guest OS supports multiple attached monitors, <ph conkeyref="vbox-conkeyref-phrases/product-name"/> can pretend that multiple virtual monitors are present. Up to eight such virtual monitors are supported.</p>
