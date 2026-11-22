@@ -151,6 +151,7 @@ if [ "${SIM_GUEST:-linux}" = win ]; then
     SIM_HOSTFUNCS="$funcs" \
     WIN_DISK_DEV=/dev/vda \
     WIN_CMD_ISO=$SIM_WS/sim-work/cmd-shutdown.iso \
+    WIN_CMD_INTX_ISO=$SIM_WS/sim-work/cmd-intx.iso \
     WIN_START_WAIT=${SIM_BOOT_WAIT:-3600} \
         bash "$SIM_DIR/win-phases.sh" nested
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"

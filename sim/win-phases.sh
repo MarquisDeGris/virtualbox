@@ -923,6 +923,54 @@ win_second_gone() # <what> [<seconds>]
     return 1
 }
 
+# The drive with the interrupt of old.  Windows runs an NVMe controller with
+# MSI-X; a DVD with a word for the script in the guest has it told not to
+# (MSISupported in the registry, which is how a driver is told) and the
+# controller started anew, so that it gets a line interrupt, INTx.  That is
+# what Windows gives the audio function of a graphics card unless it is told
+# otherwise.  Reading eight megabytes from the drive then takes many INTx
+# interrupts, each of which the device passes on as a pulse.  A build without
+# that is told by a message the device has since, and this is left out there.
+win_intx()
+{
+    [ -s "${WIN_CMD_INTX_ISO:-}" ] || return 0
+    if ! grep -a -q 'Asking the device for its next interrupt' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
+        stage "guest: runs the controller of the drive with a line interrupt (INTx)" skipped "this build passes the first INTx interrupt of a function on and no more"
+        return 0
+    fi
+    serial_mark
+    dvd "$WIN_CMD_INTX_ISO"
+    if ! wait_serial '^WIN: INTX-DONE ' 900; then
+        stage "guest: runs the controller of the drive with a line interrupt (INTx)" FAILED "its script did not get done with it"
+        serial_show '^WIN: INTX' 10
+        diag
+        dvd emptydrive
+        return 1
+    fi
+    serial_show '^WIN: (INTX|DRIVE|READ|NODRIVE)' 14
+    # A line interrupt has a small number, the messages of MSI-X very large ones.
+    if serial_has '^WIN: INTX [0-9]+ at=1\.0\.0 status=OK irqs=[0-9]{1,3}$'; then
+        stage "guest: runs the controller of the drive with a line interrupt (INTx)" ok "$(serial_new | grep -a '^WIN: INTX [0-9]* at=1\.0\.0 ' | head -n 1 | sed -e 's/^WIN: INTX [0-9]* //' | cut -c1-60)"
+        if serial_has "^WIN: READ [0-9]+ md5=$EXPECT_MD5\$"; then
+            stage "guest: reads from the drive with its INTx interrupt" ok
+        else
+            stage "guest: reads from the drive with its INTx interrupt" FAILED "last: $(serial_new | grep -a -E '^WIN: (READ|NODRIVE|DRIVE) ' | tail -n 1 | cut -c1-110)"
+        fi
+    else
+        stage "guest: runs the controller of the drive with a line interrupt (INTx)" FAILED "$(serial_new | grep -a '^WIN: INTX' | grep -a 'at=1\.0\.0' | tail -n 1 | cut -c1-140)"
+    fi
+    if two_funcs; then
+        if    serial_has '^WIN: INTX [0-9]+ at=1\.0\.1 status=OK irqs=[0-9]{1,3}$' \
+           && serial_has "^WIN: READ2 [0-9]+ md5=$EXPECT_MD5B\$"; then
+            stage "guest: the same with the second function, and reads from its drive" ok
+        else
+            stage "guest: the same with the second function, and reads from its drive" FAILED "$(serial_new | grep -a -E '^WIN: (INTX [0-9]+ at=1\.0\.1|READ2|NODRIVE2)' | tail -n 1 | cut -c1-140)"
+        fi
+    fi
+    dvd emptydrive
+    guest_goes_on "the guest keeps running with the drive at INTx" 300
+}
+
 # A guest which has stopped telling anything while its VM runs (run 251: from
 # the moment it had switched the slot off, with the events of the slot left
 # unanswered).  What shows of it from the outside: the slot and the message
@@ -1053,6 +1101,7 @@ phase_hotplug()
     win_has_drive "guest: takes the device again, its driver has it" 600
     win_reads "guest: reads from the drive again"
     win_second "guest: takes the second function again and reads from its drive" 600
+    win_intx
     check_log_quiet
     shot
 }

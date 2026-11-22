@@ -500,6 +500,12 @@ make_unattend_image()
     mkdir -p "$WORK/cmd/simcmd"
     echo shutdown > "$WORK/cmd/simcmd/shutdown"
     genisoimage -quiet -J -r -V SIMCMD -o "$WORK/cmd-shutdown.iso" "$WORK/cmd" || return 1
+    # And one which tells it to run the NVMe controllers behind the port with
+    # a line interrupt (INTx) instead of MSI-X, see win_intx in win-phases.sh.
+    rm -rf "$WORK/cmdi" "$WORK/cmd-intx.iso"
+    mkdir -p "$WORK/cmdi/simcmd"
+    echo intx > "$WORK/cmdi/simcmd/intx"
+    genisoimage -quiet -J -r -V SIMCMD -o "$WORK/cmd-intx.iso" "$WORK/cmdi" || return 1
 }
 
 LINUX_STAGES=$(wc -l < "$STAGES")

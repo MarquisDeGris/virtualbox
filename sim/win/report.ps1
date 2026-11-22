@@ -287,12 +287,61 @@ function Host-Command {
         foreach ($dr in [System.IO.DriveInfo]::GetDrives()) {
             if ($dr.DriveType -eq [System.IO.DriveType]::CDRom -and $dr.IsReady) {
                 if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\shutdown')) { return 'shutdown' }
+                if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\intx')) { return 'intx' }
             }
         }
     } catch { }
     return ''
 }
 
+# The interrupts Windows has given a device, as numbers with commas between: a
+# line interrupt has a small number, the messages of MSI and MSI-X have very
+# large ones.
+function Irq-Numbers([string]$InstanceId) {
+    try {
+        $esc = $InstanceId -replace '\\', '\\'
+        $res = @(Get-CimInstance -Query ("ASSOCIATORS OF {Win32_PnPEntity.DeviceID='" + $esc + "'} WHERE ResultClass = Win32_IRQResource") -ErrorAction Stop)
+        if ($res.Count -eq 0) { return 'none' }
+        return (($res | ForEach-Object { $_.IRQNumber } | Sort-Object | Select-Object -First 4) -join ',')
+    } catch {
+        return ('failed-' + ($_.Exception.Message -replace '\s+', '_'))
+    }
+}
+
+# Has Windows run the NVMe controllers behind a bridge with a line interrupt
+# (INTx) instead of MSI-X: the setting for that is written for each, the device
+# is started anew, and it tells of the interrupt it has then and reads from the
+# drive again.
+function Use-LineInterrupt([int]$Round) {
+    $now = Behind-Bridges
+    foreach ($k in ($now.Keys | Sort-Object)) {
+        if ($now[$k] -notmatch 'service=stornvme') { continue }
+        $id = ($now[$k] -split ' status=')[0]
+        Say ("INTX-BEFORE {0} at={1} irqs={2}" -f $Round, $k, (Irq-Numbers $id))
+        try {
+            $key = 'HKLM:\SYSTEM\CurrentControlSet\Enum\' + $id + '\Device Parameters\Interrupt Management\MessageSignaledInterruptProperties'
+            if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -LiteralPath $key -Name 'MSISupported' -Value 0 -Type DWord -ErrorAction Stop
+        } catch {
+            Say ("INTX-FAILED {0} at={1} setting: {2}" -f $Round, $k, $_.Exception.Message)
+            continue
+        }
+        $out = (& pnputil.exe /restart-device $id 2>&1 | Out-String) -replace '\s+', ' '
+        Say ("INTX-RESTART {0} at={1} {2}" -f $Round, $k, $out.Trim())
+        $status = 'gone'
+        for ($t = 0; $t -lt 45; $t++) {
+            Start-Sleep -Seconds 2
+            $d = Get-PnpDevice -InstanceId $id -ErrorAction SilentlyContinue
+            if ($d) { $status = $d.Status }
+            if ($status -eq 'OK') { break }
+        }
+        Say ("INTX {0} at={1} status={2} irqs={3}" -f $Round, $k, $status, (Irq-Numbers $id))
+        if ($status -eq 'OK') { Read-Drive $Round $k $id }
+    }
+    Say ("INTX-DONE {0}" -f $Round)
+}
+
+$intxDone = $false
 $seen = Behind-Bridges
 foreach ($k in $seen.Keys) {
     Say ("PRESENT 0 at={0} id={1}" -f $k, $seen[$k])
@@ -302,7 +351,14 @@ $rounds = [int]($AliveSeconds / 5)
 for ($i = 1; $i -le $rounds; $i++) {
     Say ("ALIVE {0}" -f $i)
     Start-Sleep -Seconds 5
-    if ((Host-Command) -eq 'shutdown') {
+    $cmd = Host-Command
+    if ($cmd -eq 'intx' -and -not $intxDone) {
+        $intxDone = $true
+        Use-LineInterrupt $i
+        $seen = Behind-Bridges
+        continue
+    }
+    if ($cmd -eq 'shutdown') {
         Say 'SHUTDOWN'
         & shutdown.exe /s /t 0 /f
         break
