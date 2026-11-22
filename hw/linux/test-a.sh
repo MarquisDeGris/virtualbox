@@ -118,9 +118,10 @@ finish()
     exit $?
 }
 
-# A VM of its own, made anew.
+# A VM of its own, made anew, with all it has under the work directory.
 vbm controlvm "$VM" poweroff > /dev/null 2>&1
 vbm unregistervm "$VM" --delete > /dev/null 2>&1
+run setproperty machinefolder "$work/vms"
 if ! run createvm --name "$VM" --ostype Linux_64 --register; then
     check "the VM is created" FAILED "$(short 160 < "$work/last.out" | sed -n '1p')"
     finish
