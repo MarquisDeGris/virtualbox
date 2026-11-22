@@ -6639,6 +6639,49 @@ static void tstIntxPass(RTMSINTERVAL cMs)
 
 
 /**
+ * INTx: how long the device waits until it asks a function for its next
+ * interrupt.  This goes through the rule by its numbers, which the tests with a
+ * device can only do by their timing.
+ */
+static void tstIntxAskDelay(void)
+{
+    RTTestISub("INTx: the time until the device is asked again");
+
+    uint64_t const nsAsked = UINT64_C(5000000000);
+
+    /* A device which answers while it is being asked has not been dealt with: 100
+       microseconds become 200, 400, 800, 1600 and 2000, and it stays at that. */
+    static const uint32_t s_acUsGrowing[] = { 200, 400, 800, 1600, 2000, 2000 };
+    uint32_t cUs = 100;
+    for (unsigned i = 0; i < RT_ELEMENTS(s_acUsGrowing); i++)
+    {
+        cUs = pciVfioIntxNextAskDelay(cUs, true /*fAnswered*/, nsAsked, nsAsked + RT_NS_1SEC);
+        RTTESTI_CHECK_MSG(cUs == s_acUsGrowing[i], ("step %u: %u microseconds, expected %u\n", i, cUs, s_acUsGrowing[i]));
+    }
+
+    /* An interrupt which is no answer is a new one of a device which was dealt with: the
+       time starts short again, from wherever it was. */
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(2000, false /*fAnswered*/, nsAsked, nsAsked + 10 * RT_NS_1MS) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(400,  false /*fAnswered*/, nsAsked, nsAsked + 10 * RT_NS_1MS) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked + 10 * RT_NS_1MS) == 100);
+
+    /* A device which the host cannot ask directly answers a little later.  What comes within
+       twice the time waited before is its answer, what comes later is not. */
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked) == 200);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked + 199 * RT_NS_1US) == 200);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked + 200 * RT_NS_1US) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(800,  false /*fAnswered*/, nsAsked, nsAsked + 1599 * RT_NS_1US) == 1600);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(800,  false /*fAnswered*/, nsAsked, nsAsked + 1600 * RT_NS_1US) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(2000, false /*fAnswered*/, nsAsked, nsAsked + 3999 * RT_NS_1US) == 2000);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(2000, false /*fAnswered*/, nsAsked, nsAsked + 4000 * RT_NS_1US) == 100);
+
+    /* A function which was not asked under its interrupt setup yet has not answered by its timing. */
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100, false /*fAnswered*/, 0 /*nsAsked*/, 50 * RT_NS_1US) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100, true  /*fAnswered*/, 0 /*nsAsked*/, 50 * RT_NS_1US) == 200);
+}
+
+
+/**
  * INTx: each interrupt of the device is a pulse on the interrupt line for the
  * guest, the line does not stay high, and the device is asked for its next
  * interrupt.  A device which holds its interrupt is asked again and again, with
@@ -6697,7 +6740,8 @@ static void tstIntx(void)
         uint64_t const cMsHeld     = RTTimeMilliTS() - msHeld;
         RTTESTI_CHECK_MSG(cPulsesHeld <= 8 + cMsHeld / 2 + cMsHeld / 4 + 4,
                           ("%u pulses in %RU64 ms: the times between do not grow\n", cPulsesHeld, cMsHeld));
-        RTTESTI_CHECK_MSG(cPulsesHeld >= 8, ("%u pulses in %RU64 ms: the device is not asked often enough\n", cPulsesHeld, cMsHeld));
+        RTTESTI_CHECK_MSG(cPulsesHeld >= RT_MAX(UINT64_C(8), cMsHeld / 6),
+                          ("%u pulses in %RU64 ms: the device is not asked often enough\n", cPulsesHeld, cMsHeld));
         RTTESTI_CHECK(!tstPdmIntxIsHigh());
 
         /* The driver deals with it and the device lets go: the pulses end. */
@@ -6713,6 +6757,42 @@ static void tstIntx(void)
         cPulses++;
         RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses, RT_MS_5SEC), ("the interrupt after the held one did not arrive\n"));
         RTTESTI_CHECK_MSG(tstIntxWaitAsked(pDev, cAsked + 1, RT_MS_5SEC), ("the device was not asked again\n"));
+
+        /*
+         * The host refuses once when the device is asked.  It has the interrupt of the device
+         * masked still then, and no interrupt brings anybody back to asking: the device is
+         * asked again without one.  A device which holds its interrupt shows that, as each of
+         * its pulses but the first follows from its having been asked.
+         */
+        tstIntxPass(10);
+        cPulses = tstPdmIntxGetRaisedCount();
+        tstVfioKrnlFailIoctl(VFIO_DEVICE_SET_IRQS, 0 /*cSkip*/, EIO);
+        tstVfioKrnlDevSetIntxLevel(pDev, true);
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 3, RT_MS_5SEC),
+                          ("the device was not asked again after the host had refused once, %u pulse(s)\n",
+                           tstPdmIntxGetRaisedCount() - cPulses));
+        tstVfioKrnlFailIoctl(VFIO_DEVICE_SET_IRQS, 0 /*cSkip*/, 0 /*iErrno*/);
+
+        /*
+         * The VM is suspended while the device holds its interrupt, and resumed.  The interrupt
+         * thread had taken an interrupt and was about to ask the device, or it had asked: either
+         * way the device is asked when the VM runs again and the pulses go on.  There is none
+         * while the VM stands still.
+         */
+        tstPdmSuspend();
+        tstPdmProcessRequests();
+        cPulses = tstPdmIntxGetRaisedCount();
+        RTThreadSleep(30);
+        tstPdmProcessRequests();
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses,
+                          ("%u pulse(s) while the VM was suspended\n", tstPdmIntxGetRaisedCount() - cPulses));
+        tstPdmResume();
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 3, RT_MS_5SEC),
+                          ("the device which holds its interrupt is not heard after the VM was resumed, %u pulse(s)\n",
+                           tstPdmIntxGetRaisedCount() - cPulses));
+        tstVfioKrnlDevSetIntxLevel(pDev, false);
+        tstIntxPass(40);
+        cPulses = tstPdmIntxGetRaisedCount();
 
         /*
          * The guest ends INTx while the device holds its interrupt: it disables INTx, or it
@@ -6899,7 +6979,7 @@ static void tstSlotIrqLeftOver(void)
 
         /* The guest goes back to INTx and the device holds its interrupt, so the guest gets
            pulses.  Then the device is taken out from under the guest: that is the end of the
-           pulses, the line is not high, and nobody asks the device which is gone. */
+           pulses, the line is not high, and nobody asks what stands in for the device. */
         tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2, fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_ENABLE, 2);
         RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
         uint32_t const cPulsesBefore = tstPdmIntxGetRaisedCount();
@@ -6908,12 +6988,13 @@ static void tstSlotIrqLeftOver(void)
         RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         tstPdmProcessRequests();
         uint32_t const cPulsesOut = tstPdmIntxGetRaisedCount();
-        uint32_t const cAskedOut  = tstVfioKrnlDevGetIntxUnmaskCount(pDev);
+        uint32_t const cStrayOut  = tstVfioKrnlGetStrayIoctlCount();
         tstIntxPass(50);
         RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulsesOut,
                           ("%u pulse(s) of a device which was taken out\n", tstPdmIntxGetRaisedCount() - cPulsesOut));
-        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIntxUnmaskCount(pDev) == cAskedOut,
-                          ("the device which was taken out was asked %u time(s)\n", tstVfioKrnlDevGetIntxUnmaskCount(pDev) - cAskedOut));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetStrayIoctlCount() == cStrayOut,
+                          ("%u request(s) to what stands in for the device which was taken out\n",
+                           tstVfioKrnlGetStrayIoctlCount() - cStrayOut));
         RTTESTI_CHECK(!tstPdmIntxIsHigh());
         tstSlotCheckEmpty(__LINE__, pDevInsPort);
         RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
@@ -7572,6 +7653,7 @@ int main()
     tstSavedState();
     tstSuspendResume();
     tstIrqHostShortOfVectors();
+    tstIntxAskDelay();
     tstIntx();
     tstIntxWhileSetupChanges();
     tstPortRegisters();

@@ -1882,12 +1882,52 @@ static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
  * thread.  A device which has its next interrupt ready each time it is asked
  * looks the same, so the longest time is also what a device with many
  * interrupts gets by with: 500 a second.
+ *
+ * That holds for a device which answers while it is being asked, see
+ * pciVfioIntxNextAskDelay().  One the host has to mask at its interrupt
+ * controller answers a little later and is told by how long it takes; a host
+ * which is slow passing that on has the time start short again, and what such
+ * a device costs is bounded by the shortest time plus that slowness then.
  * @{ */
 /** The shortest time, in microseconds. */
 #define PCIVFIO_INTX_ASK_DELAY_MIN_US   UINT32_C(100)
 /** The longest time, in microseconds. */
 #define PCIVFIO_INTX_ASK_DELAY_MAX_US   UINT32_C(2000)
 /** @} */
+
+
+RT_C_DECLS_BEGIN
+DECLHIDDEN(uint32_t) pciVfioIntxNextAskDelay(uint32_t cUsDelay, bool fAnswered, uint64_t nsAsked, uint64_t nsNow);
+RT_C_DECLS_END
+
+/**
+ * Works out how long to wait until a function is asked for its next INTx
+ * interrupt, when it has just raised one.
+ *
+ * An interrupt which is the answer of the device to being asked is one the guest
+ * has not dealt with yet, and the time grows.  A device answers while it is being
+ * asked if the host can tell by looking at the device, which it can for all but
+ * old ones.  One which the host has to mask at its interrupt controller takes a
+ * little longer: what comes within twice the time waited before counts as its
+ * answer.  Any other interrupt is a new one of a device which was dealt with,
+ * and the time starts short again.
+ *
+ * This has no caller outside of this file but the testcase.
+ *
+ * @returns The time to wait, in microseconds.
+ * @param   cUsDelay    The time waited before the device was asked last.
+ * @param   fAnswered   Whether the device answered while it was being asked.
+ * @param   nsAsked     When the device was asked last, 0 if it wasn't under this interrupt setup.
+ * @param   nsNow       The time now.
+ */
+DECLHIDDEN(uint32_t) pciVfioIntxNextAskDelay(uint32_t cUsDelay, bool fAnswered, uint64_t nsAsked, uint64_t nsNow)
+{
+    if (   fAnswered
+        || (   nsAsked
+            && nsNow - nsAsked < (uint64_t)cUsDelay * 2 * RT_NS_1US))
+        return RT_MIN(cUsDelay * 2, PCIVFIO_INTX_ASK_DELAY_MAX_US);
+    return PCIVFIO_INTX_ASK_DELAY_MIN_US;
+}
 
 
 /**
@@ -1946,28 +1986,46 @@ static DECLCALLBACK(int) pciVfioIntxPulseOnEmt(PPDMDEVINS pDevIns, uintptr_t iPc
  *
  * Asking a device which is not masked does nothing.
  *
+ * A function which is out of service is not asked: its file descriptor refers
+ * to a stand-in then, or to a device which was put into the slot this moment and
+ * has no interrupt setup yet.  Whoever takes a function out of service or puts a
+ * device into the slot holds the critical section of the slot meanwhile, and may
+ * wait for this thread while holding it, so this thread does not wait for that
+ * critical section.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_TRY_AGAIN if the critical section of the slot is busy.
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function.
  *
  * @thread  The interrupt thread of the function, which is what keeps this from
  *          meeting a change of the interrupt setup.
  */
-static void pciVfioIntxAskAgain(PVFIOPCI pThis, PCVFIOPCIFUN pFun)
+static int pciVfioIntxAskAgain(PVFIOPCI pThis, PCVFIOPCIFUN pFun)
 {
-    struct vfio_irq_set IrqSet;
-    IrqSet.argsz = sizeof(IrqSet);
-    IrqSet.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK;
-    IrqSet.index = VFIO_PCI_INTX_IRQ_INDEX;
-    IrqSet.start = 0;
-    IrqSet.count = 1;
-    if (ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &IrqSet) == -1)
+    if (RT_FAILURE(RTCritSectTryEnter(&pThis->CritSectSlot)))
+        return VERR_TRY_AGAIN;
+
+    int rc = VINF_SUCCESS;
+    if (!pFun->fGone)
     {
-        /* A function which went out of service has its stand-in refusing. */
-        int const iErrno = errno;
-        if (!pFun->fGone)
+        struct vfio_irq_set IrqSet;
+        IrqSet.argsz = sizeof(IrqSet);
+        IrqSet.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK;
+        IrqSet.index = VFIO_PCI_INTX_IRQ_INDEX;
+        IrqSet.start = 0;
+        IrqSet.count = 1;
+        if (ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &IrqSet) == -1)
+        {
+            int const iErrno = errno;
             LogRelMax(8, ("VFIO#%d.%u: Asking the device for its next interrupt failed with %d\n",
                           pThis->iInstance, pFun->uPciFun, iErrno));
+            rc = RTErrConvertFromErrno(iErrno);
+        }
     }
+
+    RTCritSectLeave(&pThis->CritSectSlot);
+    return rc;
 }
 
 
@@ -2061,8 +2119,10 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
             ASMAtomicWriteU8(&pFun->uIrqModeCur, uIrqModeNew);
             fPollSetUp = true;
 
-            /* With INTx the device is asked at once: the host has it masked if an interrupt
-               came while nobody looked at the eventfd, which is so while the VM is suspended. */
+            /* With INTx the device is asked at once: the host has it masked if this thread took
+               an interrupt out of the eventfd and was stopped before it got to asking, which is
+               so when the VM was suspended at that moment.  An interrupt which came while nobody
+               looked is in the eventfd still, and asking a device which is not masked does nothing. */
             nsIntxAsk     = uIrqModeNew == VFIO_PCI_INTX_IRQ_INDEX ? RTTimeNanoTS() : 0;
             nsIntxAsked   = 0;
             fIntxAnswered = false;
@@ -2129,18 +2189,11 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
                          * The host has the interrupt of the device masked now, and nothing tells
                          * when the guest is done with it (KVM could, with KVM_CAP_IRQFD_RESAMPLE and
                          * an interrupt controller in the kernel).  So the device is asked again in
-                         * a moment.  If this interrupt is the answer of the device to being asked,
-                         * it is one the guest has not dealt with yet, and the next moment is a
-                         * longer one.  A device answers at once, see below; one which the host has
-                         * to mask at its interrupt controller takes a little longer.
+                         * a moment, a longer one if this interrupt is the answer of the device to
+                         * being asked, see pciVfioIntxNextAskDelay().
                          */
                         uint64_t const nsNow = RTTimeNanoTS();
-                        if (   fIntxAnswered
-                            || (   nsIntxAsked
-                                && nsNow - nsIntxAsked < (uint64_t)cUsIntxDelay * 2 * RT_NS_1US))
-                            cUsIntxDelay = RT_MIN(cUsIntxDelay * 2, PCIVFIO_INTX_ASK_DELAY_MAX_US);
-                        else
-                            cUsIntxDelay = PCIVFIO_INTX_ASK_DELAY_MIN_US;
+                        cUsIntxDelay  = pciVfioIntxNextAskDelay(cUsIntxDelay, fIntxAnswered, nsIntxAsked, nsNow);
                         fIntxAnswered = false;
                         nsIntxAsk     = nsNow + (uint64_t)cUsIntxDelay * RT_NS_1US;
                     }
@@ -2155,21 +2208,34 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
             && pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX
             && RTTimeNanoTS() >= nsIntxAsk)
         {
-            nsIntxAsk = 0;
-            pciVfioIntxAskAgain(pThis, pFun);
-            nsIntxAsked = RTTimeNanoTS();
-
-            /* A device which still has its interrupt has said so by now, if the host can tell
-               by looking at the device, which it can for all but old ones.  This only looks,
-               the interrupt is taken in the next round. */
+            nsIntxAsk     = 0;
             fIntxAnswered = false;
-            if (cIrqs >= 1)
+            int const rcAsk = pciVfioIntxAskAgain(pThis, pFun);
+            if (RT_SUCCESS(rcAsk))
             {
-                struct pollfd IntxFd;
-                IntxFd.fd      = paIrqFds[1].fd;
-                IntxFd.events  = POLLIN;
-                IntxFd.revents = 0;
-                fIntxAnswered = poll(&IntxFd, 1, 0 /*timeout*/) == 1 && (IntxFd.revents & POLLIN);
+                nsIntxAsked = RTTimeNanoTS();
+
+                /* A device which still has its interrupt has said so by now, if the host can tell
+                   by looking at the device, which it can for all but old ones.  This only looks,
+                   the interrupt is taken in the next round. */
+                if (cIrqs >= 1)
+                {
+                    struct pollfd IntxFd;
+                    IntxFd.fd      = paIrqFds[1].fd;
+                    IntxFd.events  = POLLIN;
+                    IntxFd.revents = 0;
+                    fIntxAnswered = poll(&IntxFd, 1, 0 /*timeout*/) == 1 && (IntxFd.revents & POLLIN);
+                }
+            }
+            else
+            {
+                /* The device was not asked, and the host has its interrupt masked still: no
+                   interrupt brings this thread back to asking.  So it tries again, after the
+                   time it is at if the critical section of the slot was busy, and at the
+                   slowest pace if the host refused. */
+                if (rcAsk != VERR_TRY_AGAIN)
+                    cUsIntxDelay = PCIVFIO_INTX_ASK_DELAY_MAX_US;
+                nsIntxAsk = RTTimeNanoTS() + (uint64_t)cUsIntxDelay * RT_NS_1US;
             }
         }
     }
