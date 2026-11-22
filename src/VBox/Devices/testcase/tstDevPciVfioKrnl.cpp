@@ -242,8 +242,12 @@ typedef struct TSTVFIOKRNL
     /** Whether the IOMMU type of the container is set (legacy interface). */
     bool                fContainerIommuSet;
     /** Number of requests which were refused for being out of bounds: interrupt
-     * vectors a function hasn't got, accesses beyond the end of a region. */
+     * vectors a function hasn't got, accesses beyond the end of a region, masking
+     * or unmasking INTx which is not set up. */
     uint32_t            cViolations;
+    /** Number of VFIO requests on file descriptors which are none of the fake kernel:
+     * what is sent to the stand-in of a device which was let go of ends up there. */
+    uint32_t            cStrayIoctls;
     /** Fault injection: whether a failure is armed. */
     bool                fFailArmed;
     /** Fault injection: the ioctl request to fail. */
@@ -866,6 +870,12 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
     }
     else if (pSet->index == VFIO_PCI_INTX_IRQ_INDEX)
     {
+        /* vfio-pci refuses this for a function which INTx is not set up for. */
+        if (paiFds[0] == -1)
+        {
+            g_Krnl.cViolations++;
+            return errno = EINVAL, -1;
+        }
         pDev->fIntxMasked = fAction == VFIO_IRQ_SET_ACTION_MASK;
         if (fAction == VFIO_IRQ_SET_ACTION_UNMASK)
         {
@@ -1776,6 +1786,22 @@ uint32_t tstVfioKrnlGetViolationCount(void)
 
 
 /**
+ * Returns the number of VFIO requests which were made on file descriptors the
+ * fake kernel knows nothing of since it was initialized.  A request which is
+ * sent to a device after it was let go of ends up there.
+ *
+ * @returns Number of such requests.
+ */
+uint32_t tstVfioKrnlGetStrayIoctlCount(void)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    uint32_t const cStray = g_Krnl.cStrayIoctls;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cStray;
+}
+
+
+/**
  * Returns the number of bytes mapped for DMA in all I/O address spaces.
  *
  * @returns Number of bytes.
@@ -2085,6 +2111,8 @@ int __wrap_ioctl(int iFd, unsigned long uReq, ...)
                 errno = iErrno;
             return rcLnx;
         }
+        if (_IOC_TYPE(uReq) == (unsigned long)VFIO_TYPE)
+            g_Krnl.cStrayIoctls++;
         RTCritSectLeave(&g_Krnl.CritSect);
     }
     return __real_ioctl(iFd, uReq, pvArg);
