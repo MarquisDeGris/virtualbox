@@ -33,6 +33,34 @@ Later runs: `git pull` first, as the scripts change.
 A machine other than the first gets a name of its own for its results:
 `HW_TAG=pc2 sh hw/publish.sh`.
 
+## Where the machine runs Windows
+
+The inventory runs there as it is. Little else does: the passthrough device
+is for Linux hosts, and a VirtualBox built from this fork for a Windows host
+is not to be had here. So the plan for such a machine, of which only the
+inventory exists so far:
+
+1. The inventory under Windows, which also tells whether the drive of
+   Windows is encrypted with BitLocker. If it is, the recovery key should be
+   at hand before the settings of the firmware are changed.
+2. Linux on an external USB drive, started from the boot menu of the
+   firmware. Windows and the drives inside stay as they are. In the
+   firmware: hardware virtualization and the IOMMU (VT-d, AMD-Vi) switched
+   on. Secure Boot can stay on, a VirtualBox built with the KVM backend
+   loads no kernel modules of its own.
+3. The inventory under that Linux: whether the IOMMU is on, and whether the
+   graphics card which is to go to a VM is in an IOMMU group of its own.
+4. A VirtualBox built by the workflow of this fork, fetched; nothing is
+   built on the machine.
+5. The card bound to `vfio-pci`, the one step which takes root: the script
+   prints the commands, the person at the machine runs them.
+6. The tests, a command each: the card in a small Linux VM, out and in
+   again, taken back by the host; then a guest with a desktop and the
+   monitor on the card; later Windows as the guest.
+
+A card inside the machine is not a device on Thunderbolt: what happens on
+the host when a device is plugged in and pulled is not tested this way.
+
 ## What leaves the machine
 
 Only the text files in `hw-out/`, and those have what the scripts put into

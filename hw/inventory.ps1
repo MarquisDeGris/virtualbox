@@ -54,6 +54,13 @@ $sb = 'not told without an administrator'
 try { $sb = [string](Confirm-SecureBootUEFI -ErrorAction Stop) } catch { }
 Kv 'secure-boot' $sb
 
+# Whether the drive of Windows is encrypted with BitLocker, as the shell
+# tells it to everybody: a change to the settings of the firmware can have
+# such a drive ask for its recovery key at the next start.
+$bl = 'not told'
+try { $bl = [string](New-Object -ComObject Shell.Application).NameSpace($env:SystemDrive + '\').Self.ExtendedProperty('System.Volume.BitLockerProtection') } catch { }
+Kv 'bitlocker-on-the-drive-of-windows' ("{0} (1 on, 2 off, 3 being encrypted, 5 suspended)" -f $bl)
+
 # What there is for running VMs and for building.
 $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' -ClassName Win32_DeviceGuard
 if ($dg) { Kv 'virtualization-based-security' ("status {0}, services running {1}" -f $dg.VirtualizationBasedSecurityStatus, (@($dg.SecurityServicesRunning) -join ',')) }
