@@ -11,7 +11,7 @@
 #   sudo sh hw/linux/test-b.sh        writes hw-out/test-b.txt
 #
 # It runs as root, like hw/linux/test-a.sh, and after it.  It needs busybox as
-# a static program, cpio, gzip, zstd, mkfs.vfat, mtools and sgdisk, and tells
+# a static program, cpio, gzip, zstd, mkfs.vfat, mtools, sgdisk and ukify, and tells
 # what to install if one is missing.  HW_KERNEL names another kernel image
 # than /boot/vmlinuz-<the running one>, HW_GUEST_MB another size of the memory
 # of the VM than 4096 MB.
@@ -28,6 +28,14 @@ for t in busybox cpio gzip zstd mkfs.vfat mmd mcopy sgdisk modprobe modinfo; do
 done
 if [ -n "$missing" ]; then
     check "what it takes to put the guest together is there" FAILED "missing:$missing; as root: apt-get install busybox-static cpio zstd dosfstools mtools gdisk kmod"
+    test_end
+fi
+# A unified kernel image is what the firmware of the VM starts by itself.
+# The other way, a script for the shell of the firmware, did not start the
+# guest where it was tried (run 289 of the workflow).
+ukify=$(command -v ukify || ls /usr/lib/systemd/ukify 2> /dev/null)
+if [ -z "$ukify" ] || [ ! -e /usr/lib/systemd/boot/efi/linuxx64.efi.stub ]; then
+    check "what it takes to put the guest together is there" FAILED "ukify and the EFI stub of systemd are missing; as root: apt-get install systemd-ukify systemd-boot-efi"
     test_end
 fi
 bbx=$(command -v busybox)
@@ -92,8 +100,10 @@ nfw=$(find "$root/lib/firmware" -type f | wc -l)
 ( cd "$root" && find . | cpio -o -H newc -R 0:0 --quiet | gzip -1 ) > "$work/guest.cpio.gz"
 mb=$(( ( $(wc -c < "$work/guest.cpio.gz") + $(wc -c < "$kernel") ) / 1048576 + 1 ))
 
-# A disk with an EFI system partition which has the kernel, the initramfs and
-# a script for the shell of the firmware, which starts the kernel.
+# A disk with an EFI system partition which has the kernel and the initramfs
+# as one unified kernel image, where the firmware looks for something to
+# start.  HW_CMDLINE is added to the command line of the kernel.
+cmdline="console=tty0 console=ttyS0,115200 loglevel=4 rdinit=/init panic=30${HW_CMDLINE:+ $HW_CMDLINE}"
 esp="$work/guest-esp.img"
 espmb=$(( mb + 64 ))
 [ "$espmb" -ge 200 ] || espmb=200
@@ -103,10 +113,14 @@ rm -f "$esp" "$work/guest.raw" "$work/guest.vdi"
 truncate -s "${espmb}M" "$esp"
 built=yes
 mkfs.vfat -F 32 -n HWGUEST "$esp" > /dev/null 2>&1 || built=no
-mcopy -i "$esp" "$kernel" ::/vmlinuz.efi || built=no
-mcopy -i "$esp" "$work/guest.cpio.gz" ::/initrd.img || built=no
-printf 'echo -off\r\nfs0:\r\n\\vmlinuz.efi console=tty0 console=ttyS0,115200 loglevel=4 rdinit=/init panic=30 initrd=\\initrd.img\r\n' > "$work/startup.nsh"
-mcopy -i "$esp" "$work/startup.nsh" ::/startup.nsh || built=no
+rm -f "$work/BOOTX64.EFI"
+if "$ukify" build --linux="$kernel" --initrd="$work/guest.cpio.gz" --cmdline="$cmdline" --output="$work/BOOTX64.EFI" > "$work/ukify.log" 2>&1; then
+    mmd -i "$esp" ::/EFI ::/EFI/BOOT || built=no
+    mcopy -i "$esp" "$work/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI || built=no
+else
+    tail -n 5 "$work/ukify.log" | short 200
+    built=no
+fi
 truncate -s "$(( espmb + 4 ))M" "$work/guest.raw"
 sgdisk -n "1:2048:+${espmb}M" -t 1:ef00 "$work/guest.raw" > /dev/null 2>&1 || built=no
 dd if="$esp" of="$work/guest.raw" bs=1M seek=1 conv=notrunc status=none || built=no
@@ -128,8 +142,16 @@ if    ! run storagectl "$VM" --name sata --add sata --controller IntelAhci --por
 fi
 test_start
 
-# What the guest has said so far, without the escape sequences of the firmware.
-said() { tr -d '\r' < "$work/serial.log" 2> /dev/null | grep -a '^HW: '; }
+# What the guest has said so far.  A line of it may have what the firmware
+# left on the line in front of it.
+said() { tr -d '\r' < "$work/serial.log" 2> /dev/null | sed -n 's/^.*\(HW: .*\)$/\1/p'; }
+# The last of what came on the serial port, as text: for when the guest says
+# nothing.
+serial_tail()
+{
+    echo "---- the last of the serial port of the VM:" >> "$RESULT"
+    tr -c '\11\12\40-\176' ' ' < "$work/serial.log" 2> /dev/null | tr -s ' ' | grep -v '^ *$' | tail -n 15 | short 200 >> "$RESULT"
+}
 wait_said() # <regex> <seconds>
 {
     local i=0
@@ -142,10 +164,11 @@ wait_said() # <regex> <seconds>
     return 1
 }
 
-if wait_said '^HW: UP ' 180; then
+if wait_said '^HW: UP ' "${HW_BOOT_WAIT:-240}"; then
     check "the guest starts" ok "$(said | sed -n 's/^HW: UP //p' | sed -n '1p')"
 else
-    check "the guest starts" FAILED "nothing from it on the serial port after 180 seconds, the VM is in state '$(vmstate)'"
+    check "the guest starts" FAILED "nothing from it on the serial port after ${HW_BOOT_WAIT:-240} seconds, the VM is in state '$(vmstate)'"
+    serial_tail
     test_end
 fi
 if wait_said '^HW: READY' 300; then

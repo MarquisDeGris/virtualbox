@@ -207,7 +207,7 @@ if [ -f "$SIM_DIR/../hw/linux/test-a.sh" ]; then
             i=$((i + 1))
         done
         kimg=$(ls "$SIM_WS/sim-work/kroot/boot/vmlinuz-$(uname -r)" "$SIM_WS/sim-work/vmlinuz-$(uname -r)" 2> /dev/null | head -n 1)
-        HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr HW_KERNEL=$kimg HW_GUEST_MB=1536 \
+        HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr HW_KERNEL=$kimg HW_GUEST_MB=1536 HW_BOOT_WAIT=600 \
         HW_VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
             sh "$SIM_DIR/../hw/linux/test-b.sh" > "$OUT/$WHERE/hw-test-b.log" 2>&1
         rc=$?

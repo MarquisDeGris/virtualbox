@@ -49,6 +49,43 @@ for d in /sys/bus/pci/devices/*; do
     say "PCI ${d##*/} $(cat "$d/vendor" | sed 's/^0x//'):$(cat "$d/device" | sed 's/^0x//') class $(cat "$d/class") driver $drv irq $(cat "$d/irq" 2> /dev/null) msi $(ls "$d/msi_irqs" 2> /dev/null | wc -l)"
 done
 
+# The memory of the devices behind bridges, BAR by BAR: where the guest has it
+# and how large it is, and for one of a megabyte or more the first and the
+# last four bytes of it, read through /dev/mem: a device with gigabytes of
+# memory has to be reachable to its end.  A BAR a driver has is left alone,
+# the kernel does not let it be read this way, and the driver working is the
+# better news.  With "hwbarwrite=<vendor>:<device>" on the command line of the
+# kernel the same two places of such a device are written to first: only for
+# a device whose memory is nothing but memory, which the simulation has.
+wr=$(sed -n 's/^.*hwbarwrite=\([0-9a-f:]*\).*$/\1/p' /proc/cmdline)
+for d in /sys/bus/pci/devices/*; do
+    case "${d##*/}" in 0000:00:*) continue ;; esac
+    ids="$(cat "$d/vendor" | sed 's/^0x//'):$(cat "$d/device" | sed 's/^0x//')"
+    n=0
+    while read -r start end flags; do
+        bar=$n
+        n=$((n + 1))
+        [ "$bar" -le 5 ] || break
+        [ "$((start))" != 0 ] || continue
+        # Memory, not I/O ports (IORESOURCE_MEM).
+        [ "$(( flags & 0x200 ))" != 0 ] || continue
+        size=$(( end - start + 1 ))
+        line="BAR ${d##*/} $bar at=$start size=$size"
+        if [ "$size" -lt 1048576 ]; then
+            say "$line"
+            continue
+        fi
+        last=$(printf '0x%x' $(( end - 3 )))
+        if [ -n "$wr" ] && [ "$wr" = "$ids" ] && [ ! -e "$d/driver" ]; then
+            devmem "$start" 32 0x48574241 2> /dev/null || line="$line write-first=failed"
+            devmem "$last" 32 0x52454e44 2> /dev/null || line="$line write-last=failed"
+        fi
+        f=$(devmem "$start" 32 2> /dev/null) || f=refused
+        l=$(devmem "$last" 32 2> /dev/null) || l=refused
+        say "$line first=$f last=$l"
+    done < "$d/resource"
+done
+
 # The interrupts which are not the ones every VM has.
 grep -E '^ *[0-9]+:' /proc/interrupts \
     | grep -v -E 'timer|i8042|rtc0|acpi|ahci|cascade|ttyS|ehci|xhci|virtio|PCIe|pciehp|aerdrv|dmar' \
