@@ -78,20 +78,24 @@ with an IOMMU of AMD.
   branch for 7.1 with the KVM backend, the slot being empty). A TPM in a
   VM which has a device in the slot has not been tried anywhere, and
   neither has Secure Boot, which Windows 11 asks for as well.
-- A function whose driver uses INTx, the old kind of PCI interrupt, does
-  not work on these branches: its first interrupt reaches the guest, no
-  second one does, and the interrupt line of the guest stays raised
-  after the first, which a guest takes for an interrupt that does not
-  end. Drivers of current devices use MSI or MSI-X and never get there.
-  Windows uses INTx for a High Definition Audio controller unless it is
-  told otherwise, and that is what the audio function of a graphics card
-  is to it. For a first test with a graphics card and a Windows guest,
-  leave the audio function out of the VM: attach function 0 only. The
-  audio function has to be bound to `vfio-pci` on the host all the same,
-  being in the IOMMU group of the card. A change which passes every INTx
-  interrupt on is written and tested with the testcase; it is not on
-  these branches before the simulation has run it
-  ([STATUS.md](STATUS.md), "INTx (WP8)").
+- A function whose driver uses INTx, the old kind of PCI interrupt, gets
+  each of its interrupts on `pci-passthrough-hotplug-v1` since
+  2026-11-22 ([STATUS.md](STATUS.md), "INTx (WP8)"). The branches for
+  7.2 and 7.1 follow; until then such a function gets its first
+  interrupt there and no more. It is slower with INTx than a function
+  with MSI or MSI-X: the device is asked for its next
+  interrupt a moment after each one, at most 2 milliseconds later, so a
+  function which has interrupts all the time gets about 500 a second.
+  Seen so far with the testcase and in the simulation, where the drive
+  was used by a guest told not to use MSI (run 277); with no real
+  device. Windows uses INTx for a High Definition Audio controller
+  unless it is told otherwise, and that is what the audio function of a
+  graphics card is to it. For a first test with a graphics card and a
+  Windows guest, leave the audio function out of the VM: attach function
+  0 only. The audio function has to be bound to `vfio-pci` on the host
+  all the same, being in the IOMMU group of the card. Then try with it:
+  whether sound over the card plays without breaks is one of the things
+  only the hardware can tell.
 - For a Windows guest: `VBoxManage modifyvm <vm> --paravirt-provider none`.
   With KVM VirtualBox cannot show a Windows guest the interface of Hyper-V,
   which is what it shows such a guest otherwise. It shows a minimal one
@@ -216,7 +220,9 @@ not go as described.
 3. Windows guest: the device shows in the device manager without a warning
    sign once its driver is installed, and works.
 
-Note: devices which only have INTx interrupts do not work, that is known.
+Note: a function whose driver uses INTx shows an interrupt of the I/O
+APIC there instead (`IO-APIC`), counting as well; the list of what is
+needed, further up, says what to expect of such a function.
 
 ### B. Pause, resume, snapshot
 

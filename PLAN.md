@@ -266,10 +266,13 @@ part of the hardware test, not an operation of its own.
   the hypervisor backend offer. May require a narrowly scoped VMM helper;
   decided after WP5 when the interrupt paths are fully understood.
 
-Not started. What is there: the first interrupt reaches the
-guest, raised on an EMT, and the line is lowered when the device cannot be
-the one raising it any more. A device or a guest which depends on INTx still
-does not work.
+Done another way, from 2026-11-22, see [STATUS.md](STATUS.md), "INTx
+(WP8)": nothing tells the device of the EOI of the guest, and making
+that so would have changed the I/O APIC and the interfaces around it for
+every VM. Each interrupt of the device is a pulse on the line of the
+guest instead, and the device is asked for its next interrupt a moment
+later. A function with INTx works with that; it is slower than one with
+MSI or MSI-X.
 
 ## 6. Test strategy
 
