@@ -139,6 +139,8 @@ int         tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev);
 int         tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg);
 void       *tstVfioKrnlDevGetRegionPtr(PTSTVFIODEV pDev, uint32_t iRegion);
 int         tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVector);
+void        tstVfioKrnlDevSetIntxLevel(PTSTVFIODEV pDev, bool fAsserted);
+uint32_t    tstVfioKrnlDevGetIntxUnmaskCount(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex);
 void        tstVfioKrnlDevSetIrqsAvailable(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t cIrqs);
 uint32_t    tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev);
