@@ -36,12 +36,17 @@
  *
  * @section sec_dev_vfio_shortcomings
  *
- * The emulation supports MSI and MSI-X interrupts. The legacy INTx style
- * doesn't work currently because VFIO auto masks those after they fired to prevent
- * an interrupt storm on the host and requires explicit unmasking after the guest
- * handled it but we currently lack a callback mechanism from the I/O APIC to get notified
- * about EOI events from the guest for the device.
- * The passed through device therefore needs to support MSI or MSI-X.
+ * The emulation supports MSI and MSI-X interrupts, and the legacy INTx style in a
+ * way which is good for devices which interrupt now and then.  VFIO masks the INTx
+ * interrupt of a device when it passes one on, to prevent an interrupt storm on the
+ * host, and wants it unmasked once the guest has dealt with it.  We lack a callback
+ * from the I/O APIC about the EOI of the guest, so the device doesn't know when
+ * that is.  The guest therefore gets a pulse on the interrupt line for each
+ * interrupt instead of a line which stays raised, and the device is asked again a
+ * moment later, which is what unmasking comes to: a device which still has an
+ * interrupt says so at once and the guest gets another pulse.  The time until the
+ * device is asked again grows as long as it keeps saying so.  See pciVfioIrqPoller().
+ * A device with many interrupts is better off with MSI or MSI-X.
  *
  * The state of the device can't be saved, and never will be as we can't capture the PCIe device
  * state and replay it when resuming. Saving the state of the VM and teleporting it are refused
@@ -295,6 +300,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <time.h>
 #include <unistd.h>
 
 # include "DevPciInternal.h"
@@ -558,10 +564,8 @@ typedef struct VFIOPCIFUN
     /** Sequence number of the last mode switch the poller has completed. */
     volatile uint32_t    uIrqSeqAck;
     /** Counts how often INTx was set up with VFIO.  An INTx interrupt is good for the
-     * setup it came from only, see pciVfioIntxRaiseOnEmt(). */
+     * setup it came from only, see pciVfioIntxPulseOnEmt(). */
     volatile uint32_t    uIntxGen;
-    /** Whether the INTx interrupt of the function is raised for the guest. */
-    bool volatile        fIntxHigh;
 
     /** The interrupt polling thread. */
     PPDMTHREAD           pThrdIrq;
@@ -1867,10 +1871,34 @@ static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
 }
 
 
-/**
- * Raises the INTx interrupt of a function for the guest, on an EMT.
+/** @name INTx: how long after an interrupt the device is asked for the next one.
  *
- * Raising it takes the PCI lock, and the interrupt thread must not wait for that
+ * The first time is short: a guest which deals with the interrupt right away
+ * gets the next one without much of a delay.  A device which says each time it
+ * is asked that it has an interrupt is one the guest has not dealt with yet, or
+ * one the guest doesn't deal with at all.  The time is doubled then, up to the
+ * longest one, which bounds what such a device costs: the pulses for the guest,
+ * each of which takes an EMT out of the guest, and the turns of the interrupt
+ * thread.
+ * @{ */
+/** The shortest time, in microseconds. */
+#define PCIVFIO_INTX_ASK_DELAY_MIN_US   UINT32_C(100)
+/** The longest time, in microseconds. */
+#define PCIVFIO_INTX_ASK_DELAY_MAX_US   UINT32_C(8000)
+/** @} */
+
+
+/**
+ * Passes an INTx interrupt of a function on to the guest, on an EMT.
+ *
+ * The guest gets a pulse on the interrupt line: the line goes up and down again.
+ * A line which stays up would be an interrupt which never ends for the guest, as
+ * nothing tells the device when the guest is done with it, see the remarks on
+ * shortcomings at the top of this file.  An interrupt controller which is busy
+ * with an earlier pulse lets this one pass; pciVfioIrqPoller() keeps asking the
+ * device, so a pulse follows for as long as the device has something.
+ *
+ * This takes the PCI lock, and the interrupt thread must not wait for that
  * lock: whoever changes the interrupt setup holds it and waits for the thread,
  * see pciVfioIrqPollerSwitchMode().  By the time this gets its turn the setup
  * the interrupt came from may be history, the interrupt is dropped then.
@@ -1880,7 +1908,7 @@ static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
  * @param   iPciFun     The function.
  * @param   uIntxGen    VFIOPCIFUN::uIntxGen when the interrupt came.
  */
-static DECLCALLBACK(int) pciVfioIntxRaiseOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciFun, uintptr_t uIntxGen)
+static DECLCALLBACK(int) pciVfioIntxPulseOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciFun, uintptr_t uIntxGen)
 {
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     AssertReturn(iPciFun < RT_ELEMENTS(pThis->aPciFuns), VERR_INVALID_PARAMETER);
@@ -1898,10 +1926,7 @@ static DECLCALLBACK(int) pciVfioIntxRaiseOnEmt(PPDMDEVINS pDevIns, uintptr_t iPc
         if (   !pFun->fGone
             && pFun->uIrqMode == VFIO_PCI_INTX_IRQ_INDEX
             && ASMAtomicReadU32(&pFun->uIntxGen) == (uint32_t)uIntxGen)
-        {
-            ASMAtomicWriteBool(&pFun->fIntxHigh, true);
-            PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, 0 /*iIrq*/, PDM_IRQ_LEVEL_HIGH);
-        }
+            PDMDevHlpPCISetIrqEx(pDevIns, pPciDev, 0 /*iIrq*/, PDM_IRQ_LEVEL_FLIP_FLOP);
         pPciHlp->pfnUnlock(pDevIns);
     }
     else
@@ -1912,18 +1937,35 @@ static DECLCALLBACK(int) pciVfioIntxRaiseOnEmt(PPDMDEVINS pDevIns, uintptr_t iPc
 
 
 /**
- * Lowers the INTx interrupt of a function if it is raised for the guest.  This
- * is for when the interrupt can't be coming from the device any more: the guest
- * has disabled it or uses another kind of interrupt, the device was reset or it
- * is gone.
+ * Asks the device again whether it has an INTx interrupt.  The host has masked
+ * the interrupt of the device when it passed the last one on; this unmasks it.
+ * A device which has an interrupt at that moment is masked again at once and
+ * the interrupt arrives the usual way.
+ *
+ * Asking a device which is not masked does nothing.
  *
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function.
+ *
+ * @thread  The interrupt thread of the function, which is what keeps this from
+ *          meeting a change of the interrupt setup.
  */
-static void pciVfioIntxLower(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+static void pciVfioIntxAskAgain(PVFIOPCI pThis, PCVFIOPCIFUN pFun)
 {
-    if (ASMAtomicXchgBool(&pFun->fIntxHigh, false))
-        PDMDevHlpPCISetIrqEx(pThis->pDevIns, pThis->pDevIns->apPciDevs[pFun->uPciFun], 0 /*iIrq*/, PDM_IRQ_LEVEL_LOW);
+    struct vfio_irq_set IrqSet;
+    IrqSet.argsz = sizeof(IrqSet);
+    IrqSet.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_UNMASK;
+    IrqSet.index = VFIO_PCI_INTX_IRQ_INDEX;
+    IrqSet.start = 0;
+    IrqSet.count = 1;
+    if (ioctl(pFun->iFdVfio, VFIO_DEVICE_SET_IRQS, &IrqSet) == -1)
+    {
+        /* A function which went out of service has its stand-in refusing. */
+        int const iErrno = errno;
+        if (!pFun->fGone)
+            LogRelMax(8, ("VFIO#%d.%u: Asking the device for its next interrupt failed with %d\n",
+                          pThis->iInstance, pFun->uPciFun, iErrno));
+    }
 }
 
 
@@ -1986,6 +2028,14 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
      */
     uint32_t cIrqs      = 0;
     bool     fPollSetUp = false;
+    /* INTx: when the device is to be asked again whether it has an interrupt (0 if it
+       isn't waiting to be asked), when it was asked last, whether it answered that
+       with an interrupt, and the time between an interrupt and asking, see
+       PCIVFIO_INTX_ASK_DELAY_MIN_US. */
+    uint64_t nsIntxAsk      = 0;
+    uint64_t nsIntxAsked    = 0;
+    bool     fIntxAnswered  = false;
+    uint32_t cUsIntxDelay   = PCIVFIO_INTX_ASK_DELAY_MIN_US;
     while (pThread->enmState == PDMTHREADSTATE_RUNNING)
     {
         /* The sequence number has to be read before the mode, see pciVfioIrqPollerSwitchMode(). */
@@ -2008,6 +2058,13 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
 
             ASMAtomicWriteU8(&pFun->uIrqModeCur, uIrqModeNew);
             fPollSetUp = true;
+
+            /* With INTx the device is asked at once: the host has it masked if an interrupt
+               came while nobody looked at the eventfd, which is so while the VM is suspended. */
+            nsIntxAsk     = uIrqModeNew == VFIO_PCI_INTX_IRQ_INDEX ? RTTimeNanoTS() : 0;
+            nsIntxAsked   = 0;
+            fIntxAnswered = false;
+            cUsIntxDelay  = PCIVFIO_INTX_ASK_DELAY_MIN_US;
         }
 
         /* Inform the initiator of a mode switch that we are done with it. */
@@ -2017,7 +2074,18 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
             RTThreadUserSignal(pThread->Thread);
         }
 
-        int rcPsx = poll(&paIrqFds[0], 1 + cIrqs, -1);
+        /* Wait for an interrupt, for being woken up, or until it is time to ask the device again. */
+        struct timespec  Timeout;
+        struct timespec *pTimeout = NULL;
+        if (nsIntxAsk)
+        {
+            uint64_t const nsNow   = RTTimeNanoTS();
+            uint64_t const cNsLeft = nsIntxAsk > nsNow ? nsIntxAsk - nsNow : 0;
+            Timeout.tv_sec  = (time_t)(cNsLeft / RT_NS_1SEC);
+            Timeout.tv_nsec = (long)(cNsLeft % RT_NS_1SEC);
+            pTimeout = &Timeout;
+        }
+        int rcPsx = ppoll(&paIrqFds[0], 1 + cIrqs, pTimeout, NULL /*pSigMask*/);
         if (rcPsx > 0)
         {
             if (paIrqFds[0].revents)
@@ -2048,45 +2116,60 @@ static DECLCALLBACK(int) pciVfioIrqPoller(PPDMDEVINS pDevIns, PPDMTHREAD pThread
                         pciVfioMsiRaise(pDevIns, pFun, pPciDev, uVec);
                     else
                     {
-                        /* An EMT raises it, this thread must not wait for the PCI lock which that takes. */
-                        int rc2 = PDMDevHlpVMReqCallNoWait(pDevIns, VMCPUID_ANY, (PFNRT)pciVfioIntxRaiseOnEmt, 3, pDevIns,
+                        /* An EMT passes it on, this thread must not wait for the PCI lock which that takes. */
+                        int rc2 = PDMDevHlpVMReqCallNoWait(pDevIns, VMCPUID_ANY, (PFNRT)pciVfioIntxPulseOnEmt, 3, pDevIns,
                                                            (uintptr_t)pFun->uPciFun, (uintptr_t)ASMAtomicReadU32(&pFun->uIntxGen));
                         if (RT_FAILURE(rc2))
-                            LogRelMax(16, ("VFIO#%d.%u: Failed to schedule raising the interrupt of the function (%Rrc)\n",
+                            LogRelMax(16, ("VFIO#%d.%u: Failed to schedule passing on the interrupt of the function (%Rrc)\n",
                                            pThis->iInstance, pFun->uPciFun, rc2));
-                    }
 
-                    if (pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX)
-                    {
-                        /** @todo The interrupt seems to be masked and we would need a mechanism
-                         * to get notified when the interrupt is de-asserted in the interrupt controller
-                         * (through an EOI for example) so we can unmask them. With KVM this is supported
-                         * when KVM_CAP_IRQFD_RESAMPLE is available.
+                        /*
+                         * The host has the interrupt of the device masked now, and nothing tells
+                         * when the guest is done with it (KVM could, with KVM_CAP_IRQFD_RESAMPLE and
+                         * an interrupt controller in the kernel).  So the device is asked again in
+                         * a moment.  If this interrupt is the answer of the device to being asked,
+                         * it is one the guest has not dealt with yet, and the next moment is a
+                         * longer one.  A device answers at once, see below; one which the host has
+                         * to mask at its interrupt controller takes a little longer.
                          */
-#if 0
-                        union
-                        {
-                            struct vfio_irq_set IrqSet;
-                            uint32_t            au32[sizeof(struct vfio_irq_set) / sizeof(uint32_t) + 1];
-                        } uBuf;
-
-                        uBuf.IrqSet.argsz = sizeof(uBuf);
-                        uBuf.IrqSet.flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_UNMASK;
-                        uBuf.IrqSet.index = i;
-                        uBuf.IrqSet.start = 0;
-                        uBuf.IrqSet.count = 1;
-                        uBuf.au32[sizeof(struct vfio_irq_set) / sizeof(uint32_t)] = pThis->aIrqFds[i].fd;
-
-                        int rcLnx = ioctl(pThis->iFdVfio, VFIO_DEVICE_SET_IRQS, &uBuf);
-                        if (rcLnx == -1)
-                            LogRel(("Unmasking one INTX interrupt failed with %d", errno));
-#endif
+                        uint64_t const nsNow = RTTimeNanoTS();
+                        if (   fIntxAnswered
+                            || (   nsIntxAsked
+                                && nsNow - nsIntxAsked < (uint64_t)cUsIntxDelay * 2 * RT_NS_1US))
+                            cUsIntxDelay = RT_MIN(cUsIntxDelay * 2, PCIVFIO_INTX_ASK_DELAY_MAX_US);
+                        else
+                            cUsIntxDelay = PCIVFIO_INTX_ASK_DELAY_MIN_US;
+                        fIntxAnswered = false;
+                        nsIntxAsk     = nsNow + (uint64_t)cUsIntxDelay * RT_NS_1US;
                     }
                 }
             }
         }
         else
-            AssertFailed();
+            Assert(rcPsx == 0 || errno == EINTR);
+
+        /* INTx: ask the device again when it is time. */
+        if (   nsIntxAsk
+            && pFun->uIrqModeCur == VFIO_PCI_INTX_IRQ_INDEX
+            && RTTimeNanoTS() >= nsIntxAsk)
+        {
+            nsIntxAsk = 0;
+            pciVfioIntxAskAgain(pThis, pFun);
+            nsIntxAsked = RTTimeNanoTS();
+
+            /* A device which still has its interrupt has said so by now, if the host can tell
+               by looking at the device, which it can for all but old ones.  This only looks,
+               the interrupt is taken in the next round. */
+            fIntxAnswered = false;
+            if (cIrqs >= 1)
+            {
+                struct pollfd IntxFd;
+                IntxFd.fd      = paIrqFds[1].fd;
+                IntxFd.events  = POLLIN;
+                IntxFd.revents = 0;
+                fIntxAnswered = poll(&IntxFd, 1, 0 /*timeout*/) == 1 && (IntxFd.revents & POLLIN);
+            }
+        }
     }
 
     RTMemFree(paIrqFds);
@@ -2224,14 +2307,10 @@ static int pciVfioIrqReconfigure(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint8_t uVfio
      */
     if (pFun->uIrqMode != UINT8_MAX)
     {
-        /* INTx doesn't stay raised for the guest when the device is to lose the means of
-           raising it, and an interrupt which is on its way to the guest is not wanted any
-           more.  This comes first, as what follows can fail. */
+        /* An INTx interrupt which is on its way to the guest is not wanted any more.  This
+           comes first, as what follows can fail. */
         if (pFun->uIrqMode == VFIO_PCI_INTX_IRQ_INDEX)
-        {
             ASMAtomicIncU32(&pFun->uIntxGen);
-            pciVfioIntxLower(pThis, pFun);
-        }
 
         int rc = pciVfioIrqPollerSwitchMode(pThis, pFun, UINT8_MAX);
         if (RT_FAILURE(rc))
@@ -4020,9 +4099,6 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
             VBOXSTRICTRC rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), u16Cmd & ~fCmdActive);
             Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
         }
-
-        /* A function which isn't there has no interrupt raised. */
-        pciVfioIntxLower(pThis, pFun);
 
         /* From here on the guest finds nothing where the function was. */
         ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
