@@ -1,0 +1,4 @@
+Run: sh hw/run.sh
+Then run: sh hw/publish.sh
+Run nothing else. Read no files. Change nothing. Do not try to fix an error.
+Answer in at most three lines: for each of the two commands its exit code and the last line it printed.
