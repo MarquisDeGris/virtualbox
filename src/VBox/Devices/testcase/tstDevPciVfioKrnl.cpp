@@ -155,6 +155,10 @@ typedef struct TSTVFIODEV
     bool                fRemoved;
     /** Whether INTx is masked. */
     bool                fIntxMasked;
+    /** Whether the function holds its INTx interrupt, see tstVfioKrnlDevSetIntxLevel(). */
+    bool                fIntxAsserted;
+    /** How often the user has unmasked INTx. */
+    uint32_t            cIntxUnmasks;
     /** Whether the host is busy with the function itself: it has asked its user to let
      * go of it and waits for that.  Like the kernel, which has the device locked for as
      * long, it refuses to reset the function or its bus meanwhile. */
@@ -404,6 +408,34 @@ static void tstVfioKrnlDevIrqDisable(PTSTVFIODEV pDev, uint32_t uIrqIndex)
 
 
 /**
+ * Passes the INTx interrupt of a function on to its user if the function
+ * holds it, it is not masked and there is somebody to tell.  INTx is level
+ * triggered: vfio-pci masks it when it passes one on, and the user gets the next
+ * one after unmasking it.
+ *
+ * @param   pDev                The PCI function.
+ *
+ * @note    The caller owns the lock of the fake kernel.
+ */
+static void tstVfioKrnlDevIntxFire(PTSTVFIODEV pDev)
+{
+    if (   pDev->fIntxAsserted
+        && !pDev->fIntxMasked
+        && pDev->Cfg.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] > 0
+        && pDev->apaiIrqFds[VFIO_PCI_INTX_IRQ_INDEX]
+        && pDev->apaiIrqFds[VFIO_PCI_INTX_IRQ_INDEX][0] != -1)
+    {
+        uint64_t const uOne = 1;
+        if (write(pDev->apaiIrqFds[VFIO_PCI_INTX_IRQ_INDEX][0], &uOne, sizeof(uOne)) == (ssize_t)sizeof(uOne))
+        {
+            pDev->acIrqsTriggered[VFIO_PCI_INTX_IRQ_INDEX]++;
+            pDev->fIntxMasked = true;
+        }
+    }
+}
+
+
+/**
  * Releases everything a user of the PCI function has set up, called when the
  * last file descriptor goes away.
  *
@@ -420,8 +452,9 @@ static void tstVfioKrnlDevRelease(PTSTVFIODEV pDev)
         for (unsigned i = 0; i < RT_ELEMENTS(g_Krnl.aMaps); i++)
             if (g_Krnl.aMaps[i].pv && g_Krnl.aMaps[i].pDev == pDev)
                 mprotect(g_Krnl.aMaps[i].pv, g_Krnl.aMaps[i].cb, PROT_NONE);
-    pDev->fIntxMasked = false;
-    pDev->fHeld       = false; /* The host has what it waited for. */
+    pDev->fIntxMasked   = false;
+    pDev->fIntxAsserted = false;
+    pDev->fHeld         = false; /* The host has what it waited for. */
 }
 
 
@@ -810,6 +843,10 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
                     __real_close(paiFds[pSet->start + i]);
                 paiFds[pSet->start + i] = iFdNew;
             }
+
+            /* A function which holds its INTx interrupt says so as soon as it is listened to. */
+            if (pSet->index == VFIO_PCI_INTX_IRQ_INDEX)
+                tstVfioKrnlDevIntxFire(pDev);
         }
         else if (fData == VFIO_IRQ_SET_DATA_NONE && !pSet->count)
             tstVfioKrnlDevIrqDisable(pDev, pSet->index);
@@ -828,7 +865,14 @@ static int tstVfioKrnlDevSetIrqs(PTSTVFIODEV pDev, struct vfio_irq_set *pSet)
         }
     }
     else if (pSet->index == VFIO_PCI_INTX_IRQ_INDEX)
+    {
         pDev->fIntxMasked = fAction == VFIO_IRQ_SET_ACTION_MASK;
+        if (fAction == VFIO_IRQ_SET_ACTION_UNMASK)
+        {
+            pDev->cIntxUnmasks++;
+            tstVfioKrnlDevIntxFire(pDev);
+        }
+    }
     else
         return errno = EINVAL, -1; /* vfio-pci has no mask/unmask for MSI and MSI-X either. */
 
@@ -1329,10 +1373,12 @@ int tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg)
             }
 
         /* It is there and it answers. */
-        pDev->fGone       = false;
-        pDev->fRemoved    = false;
-        pDev->fIntxMasked = false;
-        pDev->fHeld       = false;
+        pDev->fGone         = false;
+        pDev->fRemoved      = false;
+        pDev->fIntxMasked   = false;
+        pDev->fIntxAsserted = false;
+        pDev->cIntxUnmasks  = 0;
+        pDev->fHeld         = false;
         RT_ZERO(pDev->acIrqsAvailable);
     }
     else
@@ -1402,6 +1448,42 @@ int tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVec
     }
     RTCritSectLeave(&g_Krnl.CritSect);
     return rc;
+}
+
+
+/**
+ * Lets the PCI function hold its INTx interrupt, or let go of it.  A function
+ * which holds it raises an interrupt whenever it is not masked, until it lets go:
+ * what a device does whose driver has not dealt with it yet.
+ *
+ * tstVfioKrnlDevTriggerIrq() with INTx is a function which holds the interrupt
+ * for a moment only: its driver was there at once.
+ *
+ * @param   pDev                The PCI function.
+ * @param   fAsserted           Whether the function holds the interrupt.
+ */
+void tstVfioKrnlDevSetIntxLevel(PTSTVFIODEV pDev, bool fAsserted)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    pDev->fIntxAsserted = fAsserted;
+    tstVfioKrnlDevIntxFire(pDev);
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Returns how often the user has unmasked INTx of the PCI function: how often
+ * the function was asked for its next interrupt.
+ *
+ * @returns Number of times.
+ * @param   pDev                The PCI function.
+ */
+uint32_t tstVfioKrnlDevGetIntxUnmaskCount(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    uint32_t const cUnmasks = pDev->cIntxUnmasks;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cUnmasks;
 }
 
 
