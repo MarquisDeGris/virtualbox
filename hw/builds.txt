@@ -1,0 +1,2 @@
+# The builds hw/linux/fetch.sh can fetch from the release "hw-builds" of the
+# fork, the newest last: <file> <sha256> <the branch it was built from>.

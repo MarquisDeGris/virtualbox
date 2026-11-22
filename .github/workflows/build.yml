@@ -695,6 +695,7 @@ jobs:
           sparse-checkout: |
             sim
             tools
+            hw
 
       - name: Simulation
         if: inputs.flavor == 'sim' || inputs.flavor == 'winsim' || inputs.flavor == 'allsim'

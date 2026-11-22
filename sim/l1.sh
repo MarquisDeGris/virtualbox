@@ -174,6 +174,31 @@ SIM_BOOT_WAIT=${SIM_BOOT_WAIT:-300} \
 SIM_PATIENCE=${SIM_PATIENCE:-3} \
     bash "$SIM_DIR/vbox-phases.sh" $PHASES
 
+# The first test for a machine with real hardware (hw/linux/test-a.sh), with
+# the drive in the place of a graphics card: it is to have run here before it
+# runs where a run costs somebody's time.
+if [ -f "$SIM_DIR/../hw/linux/test-a.sh" ]; then
+    echo "==== $WHERE: hw/linux/test-a.sh, with the drive as the device"
+    i=0
+    while pgrep -x VBoxSVC > /dev/null 2>&1 && [ "$i" -lt 30 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    mkdir -p "$OUT/$WHERE/hw-out"
+    HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr \
+    HW_VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
+        sh "$SIM_DIR/../hw/linux/test-a.sh" > "$OUT/$WHERE/hw-test-a.log" 2>&1
+    rc=$?
+    cut -c1-220 "$OUT/$WHERE/hw-test-a.log" | sed 's/^/    /'
+    if [ "$rc" = 0 ]; then
+        stage "the first script for a machine with real hardware goes through its checks with the drive" ok \
+              "$(grep -c ': ok' "$OUT/$WHERE/hw-out/test-a.txt" 2> /dev/null) checks"
+    else
+        stage "the first script for a machine with real hardware goes through its checks with the drive" FAILED \
+              "$(grep -c ': FAILED' "$OUT/$WHERE/hw-out/test-a.txt" 2> /dev/null) of its checks failed, or it did not get to them"
+    fi
+fi
+
 echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
 dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40
 dmesg > "$OUT/$WHERE/dmesg.log" 2> /dev/null

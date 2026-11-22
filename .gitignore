@@ -1,4 +1,6 @@
-# What hw/run.sh writes and the clone hw/publish.sh works in: results of
-# one machine, which go to the branch hw-results and not here.
+# What hw/run.sh and the scripts in hw/linux/ write and work in, and the clone
+# hw/publish.sh works in: results of one machine, which go to the branch
+# hw-results and not here.
 /hw-out/
+/hw-work/
 /hw-results/
