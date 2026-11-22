@@ -1482,6 +1482,19 @@ has given out. The two DVDs differ in name and size. Run 282, the part
 of the simulation with Windows on the same branch, is the first with
 that. The branches for 7.2 and 7.1 wait for it.
 
+**Run 279** (2026-11-22, `allsim`, for finding out,
+`scratch/intx-7.1-kvm` @ `9f8f5cba`, 110 minutes, Intel Xeon 6975P-C):
+the same on the 7.1 line, started before the simulation was changed:
+292 checks pass and 5 fail. Everything with the Linux guest passes, the
+phase `intx` with it. Windows got through its start with the drive of
+one function and with the device of two, and through every step with
+the slot. The five are those of run 278 again, in both parts with
+Windows: the script in the guest could not tell the interrupt of a
+controller, and the guest did not see the DVD which tells it to shut
+down. As there, Windows read from the drives after their controllers
+were started anew, and what it read is what is on them. Run 283 is the
+part with Windows on this branch with the simulation as it is since.
+
 Until then the branches of the merge requests are as they were, with
 the limitation as it was; the descriptions of the merge requests and
 HWTEST.md say what it means for a guest, see "What is missing" there.
@@ -1797,6 +1810,8 @@ in the merge request as six commits since:
     is lowered when the device cannot be the one raising it any more: the
     guest disabled it or uses MSI or MSI-X, the device was reset, or it
     is gone. INTx still does not work beyond the first interrupt (WP8).
+    (Written on 15 November. It works since 2026-11-22, and the line is
+    not left raised any more, see "INTx (WP8)".)
   - Passthrough device: an interrupt which the device raised under an
     earlier interrupt setup, and which nobody got around to, is no
     interrupt of the next setup or of the next device in the slot.
@@ -2177,7 +2192,7 @@ afterwards (run 219).
 | Hot-plug slot: random operations with devices coming and going | new test; found the interrupts lost after suspend and resume (run 195); deliberate defects are found (runs 207, 215) | pass |
 | Order of PCI addresses | not run without the change | pass |
 | Interrupts with a host which is short of vectors | fails, 3 checks (run 219) | pass |
-| INTx: raised for the guest and lowered again | fails, 12 checks (run 219) | pass |
+| INTx: raised for the guest and lowered again | fails, 12 checks (run 219) | pass, until 2026-11-22. The test "INTx: a pulse for each interrupt, and the device is asked for the next" took its place then, with the device changed; that one passes and was not run against the device as it was |
 | INTx: raised while the guest changes the interrupt setup | fails, 7 checks (run 219) | pass |
 | Root port: a device is put into the slot of a guest going by the attention button | fails, 9 checks (run 219) | pass |
 | Hot-plug slot: interrupts of a device which was taken out | fails, 3 checks (run 219) | pass |
@@ -2454,11 +2469,14 @@ The requirements are in PLAN.md, section 4.
 
 By the definition in PLAN.md, section 7:
 
-1. WP0 to WP7 are done. WP8 (INTx) is not, as allowed there.
+1. WP0 to WP7 are done. WP8 (INTx), which was allowed to be missing, is
+   done since 2026-11-22, another way than planned, see "INTx (WP8)".
 2. T1 and T2 are green on the head of the merge request, with and without
-   the sanitizers (runs 232 and 233).
-3. T4 passes on the head of the merge request (run 232; run 224 for the
-   head before the last two commits). T3 was not run; the table above
+   the sanitizers (runs 277 and 276, on `scratch/intx` with the tree the
+   head has; runs 232 and 233 for the head before the INTx commit).
+3. T4 passes on the head of the merge request (run 277, the same way;
+   run 232 for the head before the INTx commit, run 224 for the one
+   before the two commits ahead of that). T3 was not run; the table above
    says why.
 4. The security requirements are mapped to tests, see above. S9 is a
    matter of the hardware test.
@@ -2639,6 +2657,7 @@ virtual machine.
 | 276 | `scratch/intx` @ `6fe456f0` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The third commit, written after the change was read by a second reader: it builds, 60 tests pass with the sanitizers, no report |
 | 277 | `scratch/intx` @ `6fe456f0` | sim, exploring | passed | 45 minutes, AMD EPYC 7763. 177 checks, none failed, the phase `intx` with the third commit among them. `pci-passthrough-hotplug-v1` has the INTx change as one commit after this run (`4add131b`) |
 | 278 | `scratch/intx-7.2-kvm` @ `26e4045a` | allsim, exploring | passed | 133 minutes, AMD EPYC 7763. 264 checks pass, 5 fail, none for the device: Windows with one function stuck in its start twice (see "Run 268"), and the new step with Windows and INTx, which could not tell the kind of interrupt and after which the guest did not see the DVD telling it to shut down. Everything with the Linux guest passes, the phase `intx` with the KVM backend among it. See "Run 278" |
+| 279 | `scratch/intx-7.1-kvm` @ `9f8f5cba` | allsim, exploring | passed | 110 minutes, Intel Xeon 6975P-C. 292 checks pass, 5 fail, the same five as in run 278 and for the step itself: the kind of interrupt not told, the DVD for shutting down not seen. Everything with the Linux guest passes, the phase `intx` among it, and both parts with Windows get through their steps with the slot. See "Run 279" |
 | 280 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests, exploring | passed | 5 minutes. A branch from `main` without the passthrough work: it builds, the step for the testcase of the device ends well without one, and the two command line checks which need no 3D acceleration pass. See "Requests from the tracker of upstream" |
 | 281 | `feat/modifyvm-graphics-order` @ `ca3e5b3b` | tests with `VBOX_WITH_3D_ACCELERATION=1`, exploring | passed | 7 minutes. All six command line checks for `modifyvm` pass |
 
