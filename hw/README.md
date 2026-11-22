@@ -20,7 +20,7 @@ Linux, or Windows with Git for Windows (the commands in Git Bash):
 
 Later runs: `git pull` first, as the scripts change.
 
-- `hw/run.sh` is the inventory for now: processor, virtualization, IOMMU,
+- `hw/run.sh` is the inventory: processor, virtualization, IOMMU,
   the graphics cards and what shares their IOMMU groups, what there is for
   building. It only reads, needs no root and no administrator, changes
   nothing and installs nothing. It writes `hw-out/inventory.txt` and shows
@@ -32,6 +32,40 @@ Later runs: `git pull` first, as the scripts change.
 
 A machine other than the first gets a name of its own for its results:
 `HW_TAG=pc2 sh hw/publish.sh`.
+
+## Under Linux: the steps to a first test
+
+Each is one command, writes a text file to `hw-out/`, and can be published
+with `sh hw/publish.sh` before the next. What takes root is run with `sudo`
+by whoever is at the machine; the scripts are short enough to be read first.
+
+    sh hw/run.sh                    # the inventory
+    sh hw/linux/fetch.sh            # the VirtualBox the workflow built, into hw-work/bin
+    sh hw/linux/prereq.sh           # which device it is going to be, and the checklist for it
+    sh hw/linux/bind.sh             # shows what giving the device to vfio-pci takes
+    sudo sh hw/linux/bind.sh --do   # does it; --undo gives the device back to the host
+    sudo sh hw/linux/prereq.sh      # the checklist once more, as the tests will run
+    sudo sh hw/linux/test-a.sh      # the first test
+    sh hw/publish.sh
+
+- The device is the first graphics card which is not the one the firmware
+  shows its screen on, with all its functions. `HW_DEV=<address>` in front
+  of a command names another.
+- `fetch.sh` installs nothing. It tells which packages of the distribution
+  the build needs and are missing, as an `apt-get install` line to run.
+- `bind.sh` refuses the card the firmware shows its screen on. A card the
+  desktop of the host uses does not take being taken from its driver well;
+  no monitor on the card and nothing of the host using it is the safe way.
+  The binding lasts until the machine is started anew.
+- `test-a.sh` needs no operating system in the VM: a VM with the device in
+  the hot-plug capable slot starts, the device is taken out and put in
+  twice, the VM is reset and powered off. The result has what VirtualBox
+  tells of the device at each step and the lines the log of the VM has from
+  the device. It makes a VM called `hwtest` under `hw-work/` and touches
+  nothing else.
+
+The workflow runs `test-a.sh` in its simulation, with an emulated NVMe drive
+as the device. On hardware nothing here has run yet.
 
 ## Where the machine runs Windows
 
