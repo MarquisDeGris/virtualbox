@@ -6686,8 +6686,8 @@ static void tstIntx(void)
         /*
          * A device which holds its interrupt, as one does whose driver has not got around to
          * it.  Each time it is asked it says that it has an interrupt, which is a pulse for the
-         * guest each time.  The time until it is asked grows from 100 microseconds to 8
-         * milliseconds: seven pulses in the first 13 milliseconds, one every 8 after that.
+         * guest each time.  The time until it is asked grows from 100 microseconds to 2
+         * milliseconds: five pulses in the first 3 milliseconds, one every 2 after that.
          */
         uint64_t const msHeld = RTTimeMilliTS();
         tstVfioKrnlDevSetIntxLevel(pDev, true);
@@ -6695,7 +6695,7 @@ static void tstIntx(void)
         tstIntxPass(200);
         uint32_t const cPulsesHeld = tstPdmIntxGetRaisedCount() - cPulses;
         uint64_t const cMsHeld     = RTTimeMilliTS() - msHeld;
-        RTTESTI_CHECK_MSG(cPulsesHeld <= 8 + cMsHeld / 8 + cMsHeld / 16 + 4,
+        RTTESTI_CHECK_MSG(cPulsesHeld <= 8 + cMsHeld / 2 + cMsHeld / 4 + 4,
                           ("%u pulses in %RU64 ms: the times between do not grow\n", cPulsesHeld, cMsHeld));
         RTTESTI_CHECK_MSG(cPulsesHeld >= 8, ("%u pulses in %RU64 ms: the device is not asked often enough\n", cPulsesHeld, cMsHeld));
         RTTESTI_CHECK(!tstPdmIntxIsHigh());

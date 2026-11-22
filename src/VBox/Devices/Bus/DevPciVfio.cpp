@@ -1879,12 +1879,14 @@ static int pciVfioBarSetupMmio(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPci
  * one the guest doesn't deal with at all.  The time is doubled then, up to the
  * longest one, which bounds what such a device costs: the pulses for the guest,
  * each of which takes an EMT out of the guest, and the turns of the interrupt
- * thread.
+ * thread.  A device which has its next interrupt ready each time it is asked
+ * looks the same, so the longest time is also what a device with many
+ * interrupts gets by with: 500 a second.
  * @{ */
 /** The shortest time, in microseconds. */
 #define PCIVFIO_INTX_ASK_DELAY_MIN_US   UINT32_C(100)
 /** The longest time, in microseconds. */
-#define PCIVFIO_INTX_ASK_DELAY_MAX_US   UINT32_C(8000)
+#define PCIVFIO_INTX_ASK_DELAY_MAX_US   UINT32_C(2000)
 /** @} */
 
 
