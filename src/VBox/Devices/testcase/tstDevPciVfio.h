@@ -139,6 +139,8 @@ int         tstVfioKrnlDevAdd(PCTSTVFIODEVCFG pCfg, PTSTVFIODEV *ppDev);
 int         tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg);
 void       *tstVfioKrnlDevGetRegionPtr(PTSTVFIODEV pDev, uint32_t iRegion);
 int         tstVfioKrnlDevTriggerIrq(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t uVector);
+void        tstVfioKrnlDevSetIntxLevel(PTSTVFIODEV pDev, bool fAsserted);
+uint32_t    tstVfioKrnlDevGetIntxUnmaskCount(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlDevGetIrqCount(PTSTVFIODEV pDev, uint32_t uIrqIndex);
 void        tstVfioKrnlDevSetIrqsAvailable(PTSTVFIODEV pDev, uint32_t uIrqIndex, uint32_t cIrqs);
 uint32_t    tstVfioKrnlDevGetResetCount(PTSTVFIODEV pDev);
@@ -155,6 +157,7 @@ void        tstVfioKrnlDevSignalError(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlGetOpenFdCount(void);
 uint32_t    tstVfioKrnlGetInheritableFdCount(void);
 uint32_t    tstVfioKrnlGetViolationCount(void);
+uint32_t    tstVfioKrnlGetStrayIoctlCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
@@ -254,6 +257,12 @@ bool            tstPdmMsiWait(uint32_t cExpected, RTMSINTERVAL cMsTimeout);
 bool            tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi);
 bool            tstPdmMsiGetLast(PTSTPDMMSI pMsi);
 uint32_t        tstPdmGetHeapAllocCount(void);
+/** @} */
+
+
+/** @name What the device has for the testcase and for nobody else (DevPciVfio.cpp).
+ * @{ */
+DECLHIDDEN(uint32_t) pciVfioIntxNextAskDelay(uint32_t cUsDelay, bool fAnswered, uint64_t nsAsked, uint64_t nsNow);
 /** @} */
 
 RT_C_DECLS_END

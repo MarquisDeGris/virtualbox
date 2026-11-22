@@ -6575,12 +6575,121 @@ static bool tstIntxWait(uint32_t cReqsBefore, bool fDeliver)
 
 
 /**
- * INTx: the interrupt line goes high for the guest when the device raises its
- * interrupt, and low when the device can't be the one raising it any more.
+ * Waits until the guest has got at least the given number of INTx pulses, doing
+ * meanwhile what the device asks an EMT to do.
+ *
+ * @returns true if it has, false if the time is up.
+ * @param   cPulses             The number of pulses since the fixture was set up.
+ * @param   cMsWait             How long to wait.
+ */
+static bool tstIntxWaitPulses(uint32_t cPulses, RTMSINTERVAL cMsWait)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    for (;;)
+    {
+        tstPdmProcessRequests();
+        if (tstPdmIntxGetRaisedCount() >= cPulses)
+            return true;
+        if (RTTimeMilliTS() - msStart >= cMsWait)
+            return false;
+        RTThreadSleep(1);
+    }
+}
+
+
+/**
+ * Waits until the device was asked for its next INTx interrupt at least the
+ * given number of times, doing meanwhile what the device asks an EMT to do.
+ *
+ * @returns true if it was, false if the time is up.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   cAsked              The number of times since the function was added.
+ * @param   cMsWait             How long to wait.
+ */
+static bool tstIntxWaitAsked(PTSTVFIODEV pDev, uint32_t cAsked, RTMSINTERVAL cMsWait)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    for (;;)
+    {
+        tstPdmProcessRequests();
+        if (tstVfioKrnlDevGetIntxUnmaskCount(pDev) >= cAsked)
+            return true;
+        if (RTTimeMilliTS() - msStart >= cMsWait)
+            return false;
+        RTThreadSleep(1);
+    }
+}
+
+
+/**
+ * Lets time pass, doing meanwhile what the device asks an EMT to do.
+ *
+ * @param   cMs                 How long.
+ */
+static void tstIntxPass(RTMSINTERVAL cMs)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    do
+    {
+        tstPdmProcessRequests();
+        RTThreadSleep(1);
+    } while (RTTimeMilliTS() - msStart < cMs);
+    tstPdmProcessRequests();
+}
+
+
+/**
+ * INTx: how long the device waits until it asks a function for its next
+ * interrupt.  This goes through the rule by its numbers, which the tests with a
+ * device can only do by their timing.
+ */
+static void tstIntxAskDelay(void)
+{
+    RTTestISub("INTx: the time until the device is asked again");
+
+    uint64_t const nsAsked = UINT64_C(5000000000);
+
+    /* A device which answers while it is being asked has not been dealt with: 100
+       microseconds become 200, 400, 800, 1600 and 2000, and it stays at that. */
+    static const uint32_t s_acUsGrowing[] = { 200, 400, 800, 1600, 2000, 2000 };
+    uint32_t cUs = 100;
+    for (unsigned i = 0; i < RT_ELEMENTS(s_acUsGrowing); i++)
+    {
+        cUs = pciVfioIntxNextAskDelay(cUs, true /*fAnswered*/, nsAsked, nsAsked + RT_NS_1SEC);
+        RTTESTI_CHECK_MSG(cUs == s_acUsGrowing[i], ("step %u: %u microseconds, expected %u\n", i, cUs, s_acUsGrowing[i]));
+    }
+
+    /* An interrupt which is no answer is a new one of a device which was dealt with: the
+       time starts short again, from wherever it was. */
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(2000, false /*fAnswered*/, nsAsked, nsAsked + 10 * RT_NS_1MS) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(400,  false /*fAnswered*/, nsAsked, nsAsked + 10 * RT_NS_1MS) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked + 10 * RT_NS_1MS) == 100);
+
+    /* A device which the host cannot ask directly answers a little later.  What comes within
+       twice the time waited before is its answer, what comes later is not. */
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked) == 200);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked + 199 * RT_NS_1US) == 200);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100,  false /*fAnswered*/, nsAsked, nsAsked + 200 * RT_NS_1US) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(800,  false /*fAnswered*/, nsAsked, nsAsked + 1599 * RT_NS_1US) == 1600);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(800,  false /*fAnswered*/, nsAsked, nsAsked + 1600 * RT_NS_1US) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(2000, false /*fAnswered*/, nsAsked, nsAsked + 3999 * RT_NS_1US) == 2000);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(2000, false /*fAnswered*/, nsAsked, nsAsked + 4000 * RT_NS_1US) == 100);
+
+    /* A function which was not asked under its interrupt setup yet has not answered by its timing. */
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100, false /*fAnswered*/, 0 /*nsAsked*/, 50 * RT_NS_1US) == 100);
+    RTTESTI_CHECK(pciVfioIntxNextAskDelay(100, true  /*fAnswered*/, 0 /*nsAsked*/, 50 * RT_NS_1US) == 200);
+}
+
+
+/**
+ * INTx: each interrupt of the device is a pulse on the interrupt line for the
+ * guest, the line does not stay high, and the device is asked for its next
+ * interrupt.  A device which holds its interrupt is asked again and again, with
+ * growing times between, until it lets go or the guest ends INTx.
  */
 static void tstIntx(void)
 {
-    RTTestISub("INTx: raised for the guest and lowered again");
+    RTTestISub("INTx: a pulse for each interrupt, and the device is asked for the next");
 
     TSTVFIODEVCFG Model;
     tstModelInitDefault(&Model);
@@ -6593,34 +6702,152 @@ static void tstIntx(void)
         RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
         RTTESTI_CHECK(!tstPdmIntxIsHigh());
 
-        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
-        for (unsigned iVariant = 0; iVariant < 3; iVariant++)
-        {
-            /* The device raises its interrupt. */
-            uint32_t const cReqsBefore = tstPdmGetRequestCount();
-            RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_INTX_IRQ_INDEX, 0), VINF_SUCCESS);
-            RTTESTI_CHECK_MSG(tstIntxWait(cReqsBefore, true /*fDeliver*/), ("variant %u: the interrupt did not arrive\n", iVariant));
-            RTTESTI_CHECK_MSG(tstPdmIntxIsHigh(), ("variant %u\n", iVariant));
+        /* The device is asked once when the VM gets going: it could have raised its interrupt
+           while nobody was listening. */
+        RTTESTI_CHECK_MSG(tstIntxWaitAsked(pDev, 1, RT_MS_5SEC), ("the device was not asked when the VM got going\n"));
+        RTTESTI_CHECK(tstPdmIntxGetRaisedCount() == 0);
 
-            /* The guest disables INTx, switches to MSI, or the VM is reset. */
-            if (iVariant == 0)
-            {
-                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND + 1, VBOX_PCI_COMMAND_INTX_DISABLE >> 8, 1);
-                RTTESTI_CHECK(!tstPdmIntxIsHigh());
-                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND + 1, 0, 1);
-            }
-            else if (iVariant == 1)
-            {
-                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
-                RTTESTI_CHECK(!tstPdmIntxIsHigh());
-                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_ENABLE, 2);
-            }
-            else
-                tstPdmReset();
-            RTTESTI_CHECK_MSG(!tstPdmIntxIsHigh(), ("variant %u\n", iVariant));
-            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1, ("variant %u\n", iVariant));
+        /*
+         * A device whose driver deals with every interrupt at once.  Each interrupt is a pulse,
+         * and the next one arrives: with the line left high, or with the device not asked
+         * again, the first interrupt would be the last.
+         */
+        uint32_t cPulses = 0;
+        for (uint32_t i = 0; i < 5; i++)
+        {
+            uint32_t const cAskedBefore = tstVfioKrnlDevGetIntxUnmaskCount(pDev);
+            RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_INTX_IRQ_INDEX, 0), VINF_SUCCESS);
+            cPulses++;
+            RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses, RT_MS_5SEC), ("interrupt %u did not arrive\n", i));
+            RTTESTI_CHECK_MSG(!tstPdmIntxIsHigh(), ("interrupt %u: the line stays high\n", i));
+            RTTESTI_CHECK_MSG(tstIntxWaitAsked(pDev, cAskedBefore + 1, RT_MS_5SEC),
+                              ("the device was not asked again after interrupt %u\n", i));
         }
-        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == 3, ("%u\n", tstPdmIntxGetRaisedCount()));
+        tstIntxPass(30);
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses, ("%u pulses for %u interrupts\n", tstPdmIntxGetRaisedCount(), cPulses));
+
+        /*
+         * A device which holds its interrupt, as one does whose driver has not got around to
+         * it.  Each time it is asked it says that it has an interrupt, which is a pulse for the
+         * guest each time.  The time until it is asked grows from 100 microseconds to 2
+         * milliseconds: five pulses in the first 3 milliseconds, one every 2 after that.
+         */
+        uint64_t const msHeld = RTTimeMilliTS();
+        tstVfioKrnlDevSetIntxLevel(pDev, true);
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 3, RT_MS_5SEC), ("the device which holds its interrupt was not asked again\n"));
+        tstIntxPass(200);
+        uint32_t const cPulsesHeld = tstPdmIntxGetRaisedCount() - cPulses;
+        uint64_t const cMsHeld     = RTTimeMilliTS() - msHeld;
+        RTTESTI_CHECK_MSG(cPulsesHeld <= 8 + cMsHeld / 2 + cMsHeld / 4 + 4,
+                          ("%u pulses in %RU64 ms: the times between do not grow\n", cPulsesHeld, cMsHeld));
+        RTTESTI_CHECK_MSG(cPulsesHeld >= RT_MAX(UINT64_C(8), cMsHeld / 6),
+                          ("%u pulses in %RU64 ms: the device is not asked often enough\n", cPulsesHeld, cMsHeld));
+        RTTESTI_CHECK(!tstPdmIntxIsHigh());
+
+        /* The driver deals with it and the device lets go: the pulses end. */
+        tstVfioKrnlDevSetIntxLevel(pDev, false);
+        tstIntxPass(40);
+        cPulses = tstPdmIntxGetRaisedCount();
+        tstIntxPass(60);
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses, ("%u pulse(s) from a device which has let go\n", tstPdmIntxGetRaisedCount() - cPulses));
+
+        /* An interrupt after that arrives, and the device is asked soon again. */
+        uint32_t cAsked = tstVfioKrnlDevGetIntxUnmaskCount(pDev);
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_INTX_IRQ_INDEX, 0), VINF_SUCCESS);
+        cPulses++;
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses, RT_MS_5SEC), ("the interrupt after the held one did not arrive\n"));
+        RTTESTI_CHECK_MSG(tstIntxWaitAsked(pDev, cAsked + 1, RT_MS_5SEC), ("the device was not asked again\n"));
+
+        /*
+         * The host refuses once when the device is asked.  It has the interrupt of the device
+         * masked still then, and no interrupt brings anybody back to asking: the device is
+         * asked again without one.  A device which holds its interrupt shows that, as each of
+         * its pulses but the first follows from its having been asked.
+         */
+        tstIntxPass(10);
+        cPulses = tstPdmIntxGetRaisedCount();
+        tstVfioKrnlFailIoctl(VFIO_DEVICE_SET_IRQS, 0 /*cSkip*/, EIO);
+        tstVfioKrnlDevSetIntxLevel(pDev, true);
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 3, RT_MS_5SEC),
+                          ("the device was not asked again after the host had refused once, %u pulse(s)\n",
+                           tstPdmIntxGetRaisedCount() - cPulses));
+        tstVfioKrnlFailIoctl(VFIO_DEVICE_SET_IRQS, 0 /*cSkip*/, 0 /*iErrno*/);
+
+        /*
+         * The VM is suspended while the device holds its interrupt, and resumed.  The interrupt
+         * thread had taken an interrupt and was about to ask the device, or it had asked: either
+         * way the device is asked when the VM runs again and the pulses go on.  There is none
+         * while the VM stands still.
+         */
+        tstPdmSuspend();
+        tstPdmProcessRequests();
+        cPulses = tstPdmIntxGetRaisedCount();
+        RTThreadSleep(30);
+        tstPdmProcessRequests();
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses,
+                          ("%u pulse(s) while the VM was suspended\n", tstPdmIntxGetRaisedCount() - cPulses));
+        tstPdmResume();
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 3, RT_MS_5SEC),
+                          ("the device which holds its interrupt is not heard after the VM was resumed, %u pulse(s)\n",
+                           tstPdmIntxGetRaisedCount() - cPulses));
+        tstVfioKrnlDevSetIntxLevel(pDev, false);
+        tstIntxPass(40);
+        cPulses = tstPdmIntxGetRaisedCount();
+
+        /*
+         * The guest ends INTx while the device holds its interrupt: it disables INTx, or it
+         * switches to MSI.  No pulse after that and nobody asks the device.  When the guest
+         * goes back to INTx the device, which still holds its interrupt, says so at once.
+         */
+        uint32_t const fMsgCtrl = tstPdmPciCfgRead(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, 2);
+        for (unsigned iVariant = 0; iVariant < 2; iVariant++)
+        {
+            tstVfioKrnlDevSetIntxLevel(pDev, true);
+            RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 1, RT_MS_5SEC), ("variant %u: no pulse from the device\n", iVariant));
+
+            tstPdmSetRequestProcessing(false /*fAutomatic*/);
+            if (iVariant == 0)
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND + 1, VBOX_PCI_COMMAND_INTX_DISABLE >> 8, 1);
+            else
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl | VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 0, ("variant %u\n", iVariant));
+            cPulses = tstPdmIntxGetRaisedCount();
+            cAsked  = tstVfioKrnlDevGetIntxUnmaskCount(pDev);
+            tstIntxPass(40); /* What was on its way when the guest ended INTx is dropped here. */
+            RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses,
+                              ("variant %u: %u pulse(s) after INTx was ended\n", iVariant, tstPdmIntxGetRaisedCount() - cPulses));
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIntxUnmaskCount(pDev) == cAsked,
+                              ("variant %u: the device was asked %u time(s) after INTx was ended\n",
+                               iVariant, tstVfioKrnlDevGetIntxUnmaskCount(pDev) - cAsked));
+            RTTESTI_CHECK_MSG(!tstPdmIntxIsHigh(), ("variant %u\n", iVariant));
+
+            if (iVariant == 0)
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND + 1, 0, 1);
+            else
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, TST_MSI_CAP_OFF + 2, fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_ENABLE, 2);
+            tstPdmSetRequestProcessing(true /*fAutomatic*/);
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1, ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses + 1, RT_MS_5SEC),
+                              ("variant %u: the device which holds its interrupt is not heard when the guest is back at INTx\n", iVariant));
+
+            tstVfioKrnlDevSetIntxLevel(pDev, false);
+            tstIntxPass(40);
+            cPulses = tstPdmIntxGetRaisedCount();
+        }
+
+        /* A reset of the VM: the device is asked afterwards, and its next interrupt arrives. */
+        cAsked = tstVfioKrnlDevGetIntxUnmaskCount(pDev);
+        tstPdmReset();
+        RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
+        RTTESTI_CHECK_MSG(tstIntxWaitAsked(pDev, cAsked + 1, RT_MS_5SEC), ("the device was not asked after the reset\n"));
+        tstIntxPass(10);
+        cAsked = tstVfioKrnlDevGetIntxUnmaskCount(pDev);
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_INTX_IRQ_INDEX, 0), VINF_SUCCESS);
+        cPulses++;
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulses, RT_MS_5SEC), ("the interrupt after the reset did not arrive\n"));
+        RTTESTI_CHECK_MSG(tstIntxWaitAsked(pDev, cAsked + 1, RT_MS_5SEC), ("the device was not asked again after the reset\n"));
+        tstIntxPass(10);
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses, ("%u\n", tstPdmIntxGetRaisedCount()));
 
         /* An interrupt which is on its way when the guest ends the interrupt setup it came from is
            none of the setup which follows, be that of the same kind. */
@@ -6634,7 +6861,7 @@ static void tstIntx(void)
         tstPdmProcessRequests();
         tstPdmSetRequestProcessing(true /*fAutomatic*/);
         RTTESTI_CHECK(!tstPdmIntxIsHigh());
-        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == 3, ("%u\n", tstPdmIntxGetRaisedCount()));
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulses, ("%u\n", tstPdmIntxGetRaisedCount()));
         RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
     }
     tstFixtureTeardown();
@@ -6750,16 +6977,24 @@ static void tstSlotIrqLeftOver(void)
         RTTESTI_CHECK_MSG(tstPdmMsiGetCount() == cMsisBefore, ("%u interrupt(s) nobody raised\n", tstPdmMsiGetCount() - cMsisBefore));
         tstSlotCheckMsi(__LINE__, pDev);
 
-        /* The guest goes back to INTx and the device raises it.  Then the device is taken out
-           from under the guest: the interrupt line does not stay high. */
+        /* The guest goes back to INTx and the device holds its interrupt, so the guest gets
+           pulses.  Then the device is taken out from under the guest: that is the end of the
+           pulses, the line is not high, and nobody asks what stands in for the device. */
         tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, TST_MSI_CAP_OFF + 2, fMsgCtrl & ~(uint32_t)VBOX_PCI_MSI_FLAGS_ENABLE, 2);
         RTTESTI_CHECK(tstVfioKrnlDevGetIrqCount(pDev, VFIO_PCI_INTX_IRQ_INDEX) == 1);
-        uint32_t const cReqsBefore2 = tstPdmGetRequestCount();
-        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_INTX_IRQ_INDEX, 0), VINF_SUCCESS);
-        RTTESTI_CHECK_MSG(tstIntxWait(cReqsBefore2, true /*fDeliver*/), ("the interrupt did not arrive\n"));
-        RTTESTI_CHECK(tstPdmIntxIsHigh());
+        uint32_t const cPulsesBefore = tstPdmIntxGetRaisedCount();
+        tstVfioKrnlDevSetIntxLevel(pDev, true);
+        RTTESTI_CHECK_MSG(tstIntxWaitPulses(cPulsesBefore + 2, RT_MS_5SEC), ("the interrupt did not arrive\n"));
         RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
         tstPdmProcessRequests();
+        uint32_t const cPulsesOut = tstPdmIntxGetRaisedCount();
+        uint32_t const cStrayOut  = tstVfioKrnlGetStrayIoctlCount();
+        tstIntxPass(50);
+        RTTESTI_CHECK_MSG(tstPdmIntxGetRaisedCount() == cPulsesOut,
+                          ("%u pulse(s) of a device which was taken out\n", tstPdmIntxGetRaisedCount() - cPulsesOut));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetStrayIoctlCount() == cStrayOut,
+                          ("%u request(s) to what stands in for the device which was taken out\n",
+                           tstVfioKrnlGetStrayIoctlCount() - cStrayOut));
         RTTESTI_CHECK(!tstPdmIntxIsHigh());
         tstSlotCheckEmpty(__LINE__, pDevInsPort);
         RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
@@ -7418,6 +7653,7 @@ int main()
     tstSavedState();
     tstSuspendResume();
     tstIrqHostShortOfVectors();
+    tstIntxAskDelay();
     tstIntx();
     tstIntxWhileSetupChanges();
     tstPortRegisters();
