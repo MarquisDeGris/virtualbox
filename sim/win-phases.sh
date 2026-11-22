@@ -178,15 +178,19 @@ wait_win() # <regex> <seconds> [<seconds without a read from the disk>]
                 running|starting|restoring) ;;
                 *) echo "    the VM is in state '$st', not waiting any longer"; return 1 ;;
             esac
-            echo "    [$now s] waiting, the VM is $st; $(progress_note)"
+            echo "    [$now s] waiting, the VM is $st; $(progress_note)$(kvm_brief)"
             shot
+            # A start which works reads thousands of times in three minutes.
+            # One which reads a few times in a quarter of an hour is as stuck
+            # as one which does not read at all (run 268: 500 reads in an
+            # hour).
             if [ -n "${3:-}" ] && ! serial_has '^WIN: '; then
                 reads=$(disk_reads_now)
-                if [ -z "$reads" ] || [ "$reads" != "$lastreads" ]; then
+                if [ -z "$reads" ] || [ -z "$lastreads" ] || [ "$reads" -ge $((lastreads + 100)) ]; then
                     lastreads=$reads
                     since=$now
                 elif [ $((now - since)) -ge "$3" ]; then
-                    echo "    [$now s] nothing was read from the disk for $((now - since)) s ($reads reads in all) and the guest has not said a word"
+                    echo "    [$now s] next to nothing was read from the disk for $((now - since)) s ($reads reads in all, $lastreads then) and the guest has not said a word"
                     return 2
                 fi
             fi
@@ -221,6 +225,24 @@ kvm_counters()
         done
         echo
     done
+}
+
+# The same in a few words, all VMs of the machine together, for the lines
+# which tell how a start is getting on: a start which works and one which does
+# not differ in these numbers long before they differ in anything else.
+kvm_brief()
+{
+    local d f v e=0 i=0 h=0 n=0
+    mount -t debugfs debugfs /sys/kernel/debug 2> /dev/null
+    for d in /sys/kernel/debug/kvm/[0-9]*-[0-9]*; do
+        [ -r "$d/exits" ] || continue
+        n=$((n + 1))
+        v=$(cat "$d/exits" 2> /dev/null);          e=$((e + ${v:-0}))
+        v=$(cat "$d/irq_injections" 2> /dev/null); i=$((i + ${v:-0}))
+        v=$(cat "$d/halt_exits" 2> /dev/null);     h=$((h + ${v:-0}))
+    done
+    [ "$n" = 0 ] && return 0
+    printf ', for KVM: exits %s, interrupts put in %s, halts %s' "$e" "$i" "$h"
 }
 
 # A Windows which is stuck early in its start (run 265, once, on the branch
@@ -916,6 +938,10 @@ frozen_note()
         echo "    | exits $(exits_now), $(VBM_TIMEOUT=30 vbm debugvm "$VM" getregisters --cpu=0 rip rflags cr8 2>&1 | tr -d '\r' | grep -a -E '^(rip|rflags|cr8)|rror' | tr -s ' ' | tr '\n' ' ' | cut -c1-160)"
         sleep 3
     done
+    echo "    ---- what KVM counts for the VM, twice, ten seconds apart:"
+    kvm_counters | cut -c1-400 | sed 's/^/    | /'
+    sleep 10
+    kvm_counters | cut -c1-400 | sed 's/^/    | /'
     for what in apic lapic ioapic; do
         echo "    ---- debugvm info $what:"
         VBM_TIMEOUT=60 vbm debugvm "$VM" info "$what" 2>&1 | tr -d '\r' | grep -a -v '^ *$' | head -n 45 | cut -c1-160 | sed 's/^/    | /'
@@ -1064,7 +1090,8 @@ mode_nested()
     echo "==== phase win-hotplug on $WHERE"
     phase_hotplug
     stalls_stage
-    if [ "$RESETS_FORGOTTEN" = yes ]; then
+    # Without a Windows which got up there was no reset to look for.
+    if [ "$RESETS_FORGOTTEN" = yes ] && [ "$WIN_UP" = yes ]; then
         check_bus_resets
     fi
     # A Windows which did not get through its start is not asked to shut

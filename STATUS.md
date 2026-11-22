@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-21
+Updated: 2026-11-22
 
 ## Where things are
 
@@ -1203,6 +1203,66 @@ all three lines, and the reset of the bus on the development line and
 on 7.2. The device, the port and the testcase are the same code on the
 three.
 
+**Run 268** (2026-11-21, `allsim`, for finding out,
+`pci-passthrough-hotplug-7.1-kvm` @ `7f324666`, 145 minutes, AMD EPYC
+9V45): the branch for 7.1 with the changed root port, and a second look
+at Windows where the device is on an AMD processor. **222 passed, 4
+failed, none skipped.** The four are one thing: Windows did not get
+through its start in the VMs inside the virtual machine standing in for
+a host, in three starts out of three.
+
+- **The reset of the bus on the 7.1 line**: the 9 checks of the phase
+  pass, with the kernel doing the reset and reporting it done. With the
+  59 others the device of two functions passes all 68 with the Linux
+  guest; the 67 with the device of one function and everything on the
+  runner pass too.
+- **Windows on the runner**, which is one level of virtualization less
+  on the same processor, with the same build: installed in 259 seconds,
+  started in 25 and 21, all 36 checks pass.
+- **Windows where the device is does not get through its start**, with
+  the device of one function (an hour) and with the device of two (a
+  first start given up after 18 minutes, a second one after 18 more).
+  It is not stuck, as it looked in run 265: with the device of one
+  function its disk was read some 500 times in the hour, where a start
+  which works reads thousands of times in three minutes. It crawls.
+- **What it is busy with**, from the counters the KVM of that machine
+  keeps for the VM, which the simulation reads since run 265: in 18
+  minutes the guest left 6.9 million times, 6300 times a second, of
+  which VirtualBox saw 375000; 415000 interrupts were put into the
+  guest, 380 a second, more than nine in ten of them after waiting for
+  the guest to take interrupts again; it halted 13 times in all. No
+  device of VirtualBox is involved (nothing by the I/O APIC, no access
+  to a device since the firmware), so these are most likely interrupts
+  of the timers which the kernel emulates for the guest, and what the
+  guest does about each: some sixteen exits an interrupt. The CPU is at 100 per cent with
+  that. At this depth an exit costs a hundred times and more what it
+  costs on hardware (a millisecond to VirtualBox in run 220), and 6300
+  of them fill the second; on a host which is not itself a virtual
+  machine they would be next to nothing.
+- So this is the simulation at its limit, on these AMD processors, and
+  no finding about the device or about what a guest gets on hardware.
+  On Intel processors Windows got through its start at this depth in
+  every run so far (seven, runs 250 to 259 and 266),
+  on AMD ones it did twice (run 261 on the branch for 7.2, 521 seconds;
+  run 265 with the device of two functions, 607 seconds) and did not
+  four times (runs 265 and 268, both on the branch for 7.1). Whether
+  the two lines differ in this or the runs did is not known; the
+  backend is the same code on both.
+- What it does mean for the branch for 7.1: Windows with the device of
+  two functions rests on one run there (265), and Windows with
+  functions which can only be reset together has not run on that branch
+  at all. Windows with the device of one function has passed on it four
+  times (runs 250, 254, 258 and 259). The device code is the same on
+  the three lines, and on 7.2 all of it has passed (run 266).
+
+Changed in the simulation after it: every line which tells how a start
+of Windows is getting on has the counters of KVM, so that a start which
+works can be compared with one which does not; a start counts as stuck
+when its disk is read fewer than a hundred times in a quarter of an
+hour; the look at a guest which says nothing any more (run 251) has the
+counters too; and the check on the resets of the bus is left out when
+Windows never got up.
+
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
 one commit (source, licence and the one place merged by hand are in its
@@ -1916,15 +1976,21 @@ harness since WP5, saved states since the fourth part of WP6.
    the reset of the bus with the Linux guest, and Windows with a device
    of two functions which can only be reset together, and run 267 on
    the branch of the merge request passes the part with the Linux
-   guest, 169 checks in all. Left: the phase about the reset on the
-   branch for 7.1, which has it failing for the port (run 265); it
-   comes with the next run of that branch.
-4d. Windows stuck early in its start, once, in run 265 (the branch for
-   7.1 with the KVM backend, an AMD EPYC 7763, the VM inside the virtual
-   machine standing in for a host): not understood. The simulation
-   tells more of such a start from here on and tries a second one.
-   Every run with Windows at that depth is a look at whether it comes
-   again and on which processors.
+   guest, 169 checks in all, and run 268 on the branch for 7.1 has the
+   reset of the bus passing with the Linux guest. Not done: Windows with
+   functions which can only be reset together on the branch for 7.1,
+   where Windows did not get through its start in run 268 (see 4d).
+4d. Windows which does not get through its start in the VM inside the
+   virtual machine standing in for a host, on AMD processors: once in
+   run 265, three times out of three in run 268 (the branch for 7.1
+   with the KVM backend). Run 268 measured what goes on: the guest
+   leaves for the kernel 6300 times a second for 380 timer interrupts
+   a second, which at that depth of virtualization is all the time
+   there is. That is the simulation, not the device. Open: why a start
+   gets through on such a processor sometimes (twice so far), and what
+   the numbers are for a start which works; every start tells them from
+   here on. Should the stop of run 251 come again, the same counters
+   are read there.
 5. Windows where the drive is: passed in runs 250, 253, 254, 258, 259,
    261 and 266 (and with the device of two functions in runs 265 and
    266) and stopped after the first removal in run 251, on the
@@ -2248,5 +2314,6 @@ virtual machine.
 | 265 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | allsim, exploring | passed (two checks of the simulation fail) | 128 minutes, AMD EPYC 7763. 253 checks pass. New and passing: the device of two functions on the 7.1 line (59 checks), and Windows with such a device (41 checks: both controllers with the driver of Windows, both drives read, taken out, put in by naming the second function, taken by force, put in again). Failing: the kernel of the simulated host calls a reset of the bus failed which it has done, because the emulated root port never reports its link up (the phase about functions without a reset of their own, 8 of 9 pass); and Windows with the device of one function was stuck early in its start, once, for the hour the run gave it. See "Run 265" |
 | 266 | `pci-passthrough-hotplug-7.2-kvm` @ `e759aa6f` | allsim, exploring | passed | 68 minutes, Intel Xeon 6975P-C. Every check passes, 284 of them. With the changed root port of the simulated host the kernel does the reset of the bus which the device asks for and reports it done: with the Linux guest (9 checks) and with Windows, whose device of two functions can only be reset together from the start (43 checks). Windows with the device of one function passes again; no start was stuck. See "Run 266" |
 | 267 | `pci-passthrough-hotplug-v1` @ `f563e7f8` | sim, exploring | passed | 38 minutes, Intel Xeon 6975P-C. The branch of the merge request with what the simulation has got since run 232. Every check passes, 169 of them: the device of two functions (68, with the reset of the bus), the device of one function (67), and on the runner the VM behind NAT and the appliance for the first time on this branch. 12 testcases of the tree pass. See "Run 267" |
+| 268 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | allsim, exploring | passed (four checks of the simulation fail) | 145 minutes, AMD EPYC 9V45. 222 checks pass: everything with the Linux guest, with the reset of the bus now reported done on the 7.1 line too, and Windows on the runner. Windows in the VMs inside the virtual machine standing in for a host does not get through its start, three times out of three, which is the four failures. The counters of KVM tell what it is busy with: 6300 exits a second for 380 timer interrupts a second, which at that depth is all the time there is. See "Run 268" |
 
 Run numbers are those GitHub shows for the `build` workflow.
