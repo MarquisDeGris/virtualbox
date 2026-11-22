@@ -2,9 +2,10 @@
 # Init of the small Linux guest of hw/linux/test-b.sh: a kernel with this
 # script, busybox and the drivers of the device in its initramfs.  It tells on
 # the serial port what it makes of the device which was passed through to it:
-# the PCI devices behind bridges, which driver has them, what the kernel says
-# while the driver takes the device, the interrupts, and for a graphics card
-# the connectors and whether a monitor is on one.  Lines of this script start
+# the PCI devices behind bridges, which driver has them, their memory and
+# their ROM, what the kernel says while the driver takes the device, the
+# interrupts, and for a graphics card the connectors and whether a monitor is
+# on one.  Lines of this script start
 # with "HW: ".
 
 bb=/bin/busybox
@@ -19,6 +20,47 @@ export PATH=/bin
 say() { echo "HW: $*"; }
 
 say "UP $(uname -r)"
+
+# The legacy VGA ranges, where the VM was given those of the card
+# ("hwvga=1" on the command line of the kernel): before any driver has the
+# card, one register read through the I/O ports and the first two bytes of the
+# text memory.  With "hwvgawrite=1" registers of the sequencer are also set,
+# so that the memory at 0xa0000 takes bytes as they are written, and bytes
+# are written to both ends of that memory and read back: only for a card
+# nobody looks at, which the simulation has.
+hex1() # what comes in as hexadecimal digits, with whichever tool this busybox has for it
+{
+    if echo | od -A n -t x1 > /dev/null 2>&1; then
+        od -A n -t x1 | tr -d ' \n'
+    elif echo | hexdump -v -e '1/1 "%02x"' > /dev/null 2>&1; then
+        hexdump -v -e '1/1 "%02x"'
+    else
+        xxd -p | tr -d '\n'
+    fi
+}
+port_in() { dd if=/dev/port bs=1 skip="$(($1))" count=1 2> /dev/null | hex1; }
+port_out() { printf "\\$(printf '%03o' "$(($2))")" | dd of=/dev/port bs=1 seek="$(($1))" count=1 conv=notrunc 2> /dev/null; }
+if grep -q -w 'hwvga=1' /proc/cmdline; then
+    line="VGA misc=$(port_in 0x3cc) text=$(devmem 0xb8000 16 2> /dev/null || echo refused)"
+    if grep -q -w 'hwvgawrite=1' /proc/cmdline; then
+        # Sequencer: register 2, all four planes take what is written;
+        # register 4, a byte of memory for each address.  Graphics
+        # controller: register 6, the memory is at 0xa0000 to 0xbffff.
+        port_out 0x3c4 2
+        port_out 0x3c5 0x0f
+        line="$line seq2=$(port_in 0x3c4):$(port_in 0x3c5)"
+        port_out 0x3c4 4
+        port_out 0x3c5 0x0e
+        line="$line seq4=$(port_in 0x3c4):$(port_in 0x3c5)"
+        port_out 0x3ce 6
+        port_out 0x3cf 0x01
+        line="$line gfx6=$(port_in 0x3ce):$(port_in 0x3cf)"
+        devmem 0xa0000 32 0x48574241 2> /dev/null || line="$line write-first=failed"
+        devmem 0xbfffc 32 0x52454e44 2> /dev/null || line="$line write-last=failed"
+        line="$line first=$(devmem 0xa0000 32 2> /dev/null || echo refused) last=$(devmem 0xbfffc 32 2> /dev/null || echo refused)"
+    fi
+    say "$line"
+fi
 
 # The drivers, in the order they were put in.  One which is built into the
 # kernel is not in the list and has its devices already.
@@ -88,6 +130,24 @@ for d in /sys/bus/pci/devices/*; do
         l=$(devmem "$last" 32 2> /dev/null) || l=refused
         say "$line first=$f last=$l"
     done < "$d/resource"
+done
+
+# The ROM of the devices behind bridges, which a graphics card has its
+# firmware in and which its driver reads: how many bytes of it the guest
+# reads, and a checksum of them.
+for d in /sys/bus/pci/devices/*; do
+    case "${d##*/}" in 0000:00:*) continue ;; esac
+    if [ ! -e "$d/rom" ]; then
+        say "ROM ${d##*/} none"
+        continue
+    fi
+    if echo 1 > "$d/rom" 2> /dev/null && cat "$d/rom" > /tmp/rom 2> /dev/null && [ -s /tmp/rom ]; then
+        say "ROM ${d##*/} size=$(wc -c < /tmp/rom) md5=$(md5sum < /tmp/rom | cut -c1-32)"
+    else
+        say "ROM ${d##*/} unreadable"
+    fi
+    echo 0 > "$d/rom" 2> /dev/null
+    rm -f /tmp/rom
 done
 
 # The interrupts which are not the ones every VM has.

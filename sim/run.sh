@@ -61,10 +61,18 @@
 #      scripts for a machine with real hardware (hw/linux/) run with it: the
 #      VM, the slot, and a guest which tells where it has that memory and
 #      writes to its first and its last bytes, which are then looked for in
-#      the file.
+#      the file.  The device has a ROM as well, a file of the runner too: the
+#      guest is to read the bytes of that file.
+#
+#   2d. A graphics card, as far as the simulation has one (SIM_PARTS has
+#      "vgahost"): the standard VGA adapter of QEMU behind the root port.
+#      It has video memory, registers, a ROM with a BIOS in it and a driver
+#      in the kernel which makes a card with a connector of it, which is
+#      what the second script for real hardware looks for with a graphics
+#      card.  Nobody sees its picture.
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, barhost, win, winhost, mfwinhost, hdawinhost.  Without it:
+# mfhost, barhost, vgahost, win, winhost, mfwinhost, hdawinhost.  Without it:
 # runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
@@ -127,6 +135,9 @@ finish()
         missing=1
     fi
     if has_part barhost && ! grep -q '^barhost/setup: the first script' "$STAGES"; then
+        missing=1
+    fi
+    if has_part vgahost && ! grep -q '^vgahost/setup: the first script' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -383,6 +394,24 @@ part_simhost_prepare()
         return 1
     fi
 }
+# Makes a ROM for a device of the simulation: 64 KiB, with the header and the
+# PCI data structure a kernel wants to see before it takes a ROM for one, and
+# bytes of chance after them.  Its code type is Open Firmware, which no
+# firmware here takes for something to run.
+make_rom() # <file> <vendor ID> <device ID>, the IDs as four hexadecimal digits
+{
+    local f=$1 v=$2 d=$3
+    head -c 65536 /dev/urandom > "$f"
+    # The signature, and at 0x18 where the PCI data structure is: at 0x20.
+    printf '\x55\xaa' | dd of="$f" bs=1 seek=0 conv=notrunc status=none
+    printf '\x20\x00' | dd of="$f" bs=1 seek=24 conv=notrunc status=none
+    # "PCIR", the IDs, no list of devices, 24 bytes of structure in revision
+    # 0, the class (memory controller), the image with 128 blocks of 512
+    # bytes, revision 0 of the code, code type 1, the last image.
+    printf "PCIR\\x${v:2:2}\\x${v:0:2}\\x${d:2:2}\\x${d:0:2}\\x00\\x00\\x18\\x00\\x00\\x00\\x00\\x05\\x80\\x00\\x00\\x00\\x01\\x80\\x00\\x00" \
+        | dd of="$f" bs=1 seek=32 conv=notrunc status=none
+}
+
 # Runs the virtual machine which stands in for the host until its script is
 # done or the time is up.
 run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <warp or ""> <time limit in seconds> [<disk image of a Windows guest or ""> [<functions of the device: 1 or 2>]]
@@ -438,10 +467,24 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         # the machine is told to take that for the device, and to run the
         # scripts for real hardware instead of the phases with the drive.
         port="$port,x-speed=2_5,x-width=1"
-        cmdline="$cmdline SIM_DEVCLASS=0x050000 SIM_BARTEST=1"
+        cmdline="$cmdline SIM_DEVCLASS=0x050000 SIM_HWTEST=bar"
         rm -f "$WORK/bar.img"
+        # It has a ROM as well, as a graphics card has one with its firmware
+        # in it: the guest is to read the bytes which are in the file.
+        make_rom "$WORK/bar.rom" 1af4 1110
+        cmdline="$cmdline SIM_ROM=$(stat -c %s "$WORK/bar.rom"):$(md5sum < "$WORK/bar.rom" | cut -d' ' -f1)"
         dev=(-object "memory-backend-file,id=shm0,share=on,mem-path=$WORK/bar.img,size=4G"
-             -device "ivshmem-plain,memdev=shm0,bus=rp1")
+             -device "ivshmem-plain,memdev=shm0,bus=rp1,romfile=$WORK/bar.rom")
+    fi
+    if [ "$funcs" = vga ]; then
+        # A graphics card: the standard VGA adapter of QEMU, with 16 MB of
+        # video memory, its registers in memory, a ROM with its BIOS in it,
+        # and no reset of its own.  It is the only graphics adapter of this
+        # machine, so it is the one its firmware starts with.  The scripts for
+        # real hardware run with it, as with the device of part 2c.
+        port="$port,x-speed=2_5,x-width=1"
+        cmdline="$cmdline SIM_DEVCLASS=0x030000 SIM_HWTEST=vga"
+        dev=(-device "VGA,bus=rp1")
     fi
     if [ "$funcs" = hda ]; then
         # A drive and a High Definition Audio controller as the two functions
@@ -521,6 +564,13 @@ if has_part barhost; then
             stage "what the guest wrote to the first and to the last bytes of the memory of the device is there" FAILED "there is no file"
         fi
         sudo rm -f "$WORK/bar.img"
+    fi
+fi
+
+if has_part vgahost; then
+    note "Part 2d: a graphics card, as far as the simulation has one"
+    if part_simhost_prepare; then
+        run_simhost vgahost none 600 5 3000 "" vga
     fi
 fi
 

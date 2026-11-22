@@ -16,11 +16,43 @@
 # than /boot/vmlinuz-<the running one>, HW_GUEST_MB another size of the memory
 # of the VM than 4096 MB.  HW_EXPECT_DRIVER=no is for a device no driver of
 # the kernel takes although a module names it.
+#
+#   sudo HW_VGA=yes sh hw/linux/test-b.sh     writes hw-out/test-b-vga.txt
+#
+# is the same with a VM which has no graphics adapter of its own and gets the
+# legacy VGA ranges of the card, which is what it takes for a card to show
+# the guest from its start (ExposeVga, see the top of DevPciVfio.cpp).  The
+# guest reads a register of the card through them.
 . "$(dirname "$0")/common.sh"
 RESULT="$out/test-b.txt"
+[ "${HW_VGA:-no}" = yes ] && RESULT="$out/test-b-vga.txt"
 : > "$RESULT"
 
 test_begin test-b.sh
+
+# ---- The ROM of each function as the host has it, "<bytes> <md5>".  A
+# graphics card has its firmware there, and the driver in the guest is going
+# to read it.  It is what hw/linux/bind.sh read before the device went to
+# vfio-pci, or what the host reads now, while no VM has the device.  The host
+# does not get to read every ROM; where it does not, there is nothing to
+# compare with.
+: > "$work/rom-host.txt"
+for f in $FUNCS; do
+    when="read before the device went to vfio-pci"
+    r=$(sed -n "s/^$f $(ids_of "$f") //p" "$work/rom-seen.txt" 2> /dev/null | sed -n '1p')
+    if [ -z "$r" ]; then
+        when="read now"
+        r=$(rom_of "$f")
+    fi
+    if [ -n "$r" ]; then
+        echo "function $f: the ROM as the host has it, $when: $r" >> "$RESULT"
+        echo "${f##*.} $r" >> "$work/rom-host.txt"
+    elif [ -e "/sys/bus/pci/devices/$f/rom" ]; then
+        echo "function $f: a ROM which the host does not get to read" >> "$RESULT"
+    else
+        echo "function $f: no ROM" >> "$RESULT"
+    fi
+done
 
 # ---- The guest.
 missing=
@@ -105,6 +137,7 @@ mb=$(( ( $(wc -c < "$work/guest.cpio.gz") + $(wc -c < "$kernel") ) / 1048576 + 1
 # as one unified kernel image, where the firmware looks for something to
 # start.  HW_CMDLINE is added to the command line of the kernel.
 cmdline="console=tty0 console=ttyS0,115200 loglevel=4 rdinit=/init panic=30${HW_CMDLINE:+ $HW_CMDLINE}"
+[ "${HW_VGA:-no}" = yes ] && cmdline="$cmdline hwvga=1"
 esp="$work/guest-esp.img"
 espmb=$(( mb + 64 ))
 [ "$espmb" -ge 200 ] || espmb=200
@@ -135,7 +168,31 @@ fi
 rm -f "$work/guest.raw"
 
 # ---- The VM with it.
-test_vm --memory "${HW_GUEST_MB:-4096}" --boot1 disk --boot2 none --boot3 none --boot4 none
+vga=
+if [ "${HW_VGA:-no}" = yes ]; then
+    # No graphics adapter of the VM: the legacy VGA ranges can be those of one
+    # device only.  They go to the first function which is a graphics card.
+    vga="--graphicscontroller none"
+    vgafun=
+    for f in $FUNCS; do
+        case "$(first "/sys/bus/pci/devices/$f/class")" in
+            0x03*) [ -z "$vgafun" ] && vgafun=${f##*.} ;;
+        esac
+    done
+    if [ -z "$vgafun" ]; then
+        check "the device has a function which is a graphics card" FAILED "HW_VGA=yes is for a graphics card"
+        test_end
+    fi
+fi
+test_vm --memory "${HW_GUEST_MB:-4096}" --boot1 disk --boot2 none --boot3 none --boot4 none $vga
+if [ -n "$vga" ]; then
+    if run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/Config/Fun$vgafun/ExposeVga" 1; then
+        check "the VM has no graphics adapter of its own and is given the legacy VGA ranges of the card" ok
+    else
+        check "the VM has no graphics adapter of its own and is given the legacy VGA ranges of the card" FAILED "$(short 160 < "$work/last.out" | sed -n '1p')"
+        test_end
+    fi
+fi
 if    ! run storagectl "$VM" --name sata --add sata --controller IntelAhci --portcount 1 \
    || ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$work/guest.vdi"; then
     check "the VM has the disk of the guest" FAILED "$(short 160 < "$work/last.out" | sed -n '1p')"
@@ -242,6 +299,50 @@ for f in $FUNCS; do
         esac
     done < "/sys/bus/pci/devices/$f/resource"
 done
+
+# The ROM: the guest reads the bytes the host reads.
+for f in $FUNCS; do
+    g="0000:01:00.${f##*.}"
+    want=$(sed -n "s/^${f##*.} //p" "$work/rom-host.txt")
+    line=$(said | grep -F "HW: ROM $g " | sed -n '1p')
+    got=$(echo "$line" | sed -n 's/^.* size=\([0-9]*\) md5=\([0-9a-f]*\)$/\1 \2/p')
+    what="guest: reads the ROM of function ${f##*.} as the host has it"
+    if [ -n "$want" ]; then
+        if [ "$got" = "$want" ]; then
+            check "$what" ok "${want%% *} bytes"
+        else
+            check "$what" FAILED "the host: $want; the guest: $(echo "${line:-nothing of it}" | sed -e 's/^HW: ROM [^ ]* //')"
+        fi
+    elif [ -n "$got" ]; then
+        check "$what" look "the host reads none here to compare with; the guest reads ${got%% *} bytes"
+    elif [ -e "/sys/bus/pci/devices/$f/rom" ]; then
+        check "$what" skipped "neither of them reads one"
+    fi
+done
+
+# The legacy VGA ranges of the card, where the VM was given them.
+if [ -n "$vga" ]; then
+    line=$(said | grep '^HW: VGA ' | sed -n '1p')
+    misc=$(echo "$line" | sed -n 's/^HW: VGA misc=\([0-9a-f]*\) .*$/\1/p')
+    what="guest: reads a register of the card through the legacy VGA ports"
+    if [ -z "$line" ]; then
+        check "$what" FAILED "the guest tells nothing of it"
+    elif [ -n "$misc" ] && [ "$misc" != ff ]; then
+        check "$what" ok "the miscellaneous output register is 0x$misc; the text memory starts with $(echo "$line" | sed -n 's/^.* text=\([^ ]*\).*$/\1/p')"
+    else
+        check "$what" look "it read '$misc', which is also what comes back where nothing answers"
+    fi
+    if echo " ${HW_CMDLINE:-} " | grep -q ' hwvgawrite=1 '; then
+        case "$line " in
+            *" seq2=02:0f seq4=04:0e gfx6=06:01 "*) check "guest: what it writes to registers of the card through the legacy VGA ports it reads back" ok ;;
+            *) check "guest: what it writes to registers of the card through the legacy VGA ports it reads back" FAILED "$(echo "$line" | sed -e 's/^HW: VGA //')" ;;
+        esac
+        case "$line " in
+            *" first=0x48574241 last=0x52454E44 "*) check "guest: what it writes to both ends of the legacy VGA memory it reads back" ok ;;
+            *) check "guest: what it writes to both ends of the legacy VGA memory it reads back" FAILED "$(echo "$line" | sed -e 's/^HW: VGA //')" ;;
+        esac
+    fi
+fi
 
 # A graphics card: the driver has made a card of it, and a monitor.
 display=no

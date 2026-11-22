@@ -63,6 +63,21 @@ ids_of() # <address>
     echo "$(first "/sys/bus/pci/devices/$1/vendor" | sed 's/^0x//'):$(first "/sys/bus/pci/devices/$1/device" | sed 's/^0x//')"
 }
 
+# The ROM of a function as the host reads it: "<bytes> <md5>", nothing if the
+# function has none or the host does not get to read it.  A graphics card has
+# its firmware there.  It takes root, and leaves the device as it was.
+rom_of() # <address>
+{
+    local r="/sys/bus/pci/devices/$1/rom"
+    [ -e "$r" ] || return 0
+    echo 1 > "$r" 2> /dev/null || return 0
+    if cat "$r" > "$work/rom.bin" 2> /dev/null && [ -s "$work/rom.bin" ]; then
+        echo "$(wc -c < "$work/rom.bin") $(md5sum < "$work/rom.bin" | sed -e 's/ .*$//')"
+    fi
+    echo 0 > "$r" 2> /dev/null
+    rm -f "$work/rom.bin"
+}
+
 # Nothing which names this machine or who uses it may be in a result.  The
 # file is removed if it has; that is told and the script ends.
 privacy_check() # <file>

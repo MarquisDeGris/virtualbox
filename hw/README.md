@@ -68,14 +68,23 @@ by whoever is at the machine; the scripts are short enough to be read first.
 - `test-b.sh` puts a small Linux guest together from the kernel the machine
   runs, the modules that kernel has for the device and their firmware, and
   starts it in the VM. The guest tells on the serial port of the VM which
-  driver has the device, its interrupts, and for a graphics card its
-  connectors and whether a monitor is on one; the script turns that into
-  checks. Nobody has to look at a screen for it. It needs a few small
+  driver has the device, where its memory is and whether it reaches to the
+  end of it, whether it reads the ROM of the device as the host does (a
+  graphics card has its firmware there), its interrupts, and for a graphics
+  card its connectors and whether a monitor is on one; the script turns that
+  into checks. Nobody has to look at a screen for it. It needs a few small
   programs (busybox as a static program, cpio, zstd, mkfs.vfat, mtools,
   sgdisk) and names the packages if one is missing.
+- `sudo HW_VGA=yes sh hw/linux/test-b.sh` is the second test with a VM which
+  has no graphics adapter of its own and is given the legacy VGA ranges of
+  the card, which is what it takes for a card to show the guest from its
+  start. The guest reads a register of the card through them. The result is
+  `hw-out/test-b-vga.txt`.
 
 The workflow runs both tests in its simulation, with an emulated NVMe drive
-as the device. On hardware nothing here has run yet.
+as the device, with a device which has four gigabytes of memory and a ROM,
+and with the graphics adapter an emulator has. On hardware nothing here has
+run yet.
 
 ## Where the machine runs Windows
 

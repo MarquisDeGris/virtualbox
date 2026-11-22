@@ -90,15 +90,25 @@ if [ "$funcs" != "$addr" ]; then
 fi
 
 bound=yes
-for f in $funcs; do
-    cur=
-    [ -e "/sys/bus/pci/devices/$f/driver" ] && cur=$(basename "$(readlink "/sys/bus/pci/devices/$f/driver")")
-    [ -n "$cur" ] && [ "$cur" != vfio-pci ] && echo "$f" > "/sys/bus/pci/devices/$f/driver/unbind"
-    echo vfio-pci > "/sys/bus/pci/devices/$f/driver_override"
-    echo "$f" > /sys/bus/pci/drivers_probe
-    ls "/sys/bus/pci/devices/$f/vfio-dev/" 2>&1 | tr '\n' ' '
-    ls /sys/bus/pci/devices/"$f"/vfio-dev/vfio* > /dev/null 2>&1 || bound=no
-done
+if [ "${SIM_HWTEST:-}" = bar ]; then
+    # The script for a machine with real hardware binds the device, as it
+    # would there, and keeps what the ROM of the device is.
+    echo "==== $WHERE: hw/linux/bind.sh --do"
+    HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr sh "$SIM_DIR/../hw/linux/bind.sh" --do || bound=no
+    for f in $funcs; do
+        ls /sys/bus/pci/devices/"$f"/vfio-dev/vfio* > /dev/null 2>&1 || bound=no
+    done
+else
+    for f in $funcs; do
+        cur=
+        [ -e "/sys/bus/pci/devices/$f/driver" ] && cur=$(basename "$(readlink "/sys/bus/pci/devices/$f/driver")")
+        [ -n "$cur" ] && [ "$cur" != vfio-pci ] && echo "$f" > "/sys/bus/pci/devices/$f/driver/unbind"
+        echo vfio-pci > "/sys/bus/pci/devices/$f/driver_override"
+        echo "$f" > /sys/bus/pci/drivers_probe
+        ls "/sys/bus/pci/devices/$f/vfio-dev/" 2>&1 | tr '\n' ' '
+        ls /sys/bus/pci/devices/"$f"/vfio-dev/vfio* > /dev/null 2>&1 || bound=no
+    done
+fi
 ls /dev/vfio/devices/ 2>&1 | tr '\n' ' '
 echo
 if [ "$bound" = yes ] && ls /dev/vfio/devices/vfio* > /dev/null 2>&1; then
@@ -165,46 +175,69 @@ fi
 # The scripts for a machine with real hardware, one after the other, with the
 # device of this machine in the place of a graphics card.  HW_CMDLINE is for
 # the guest of the second one.
-hw_scripts()
+hw_script() # <a|b> <what the stage calls it> <name of its result, without .txt> [<VARIABLE=value>...]
 {
-    local t rc kimg i name
+    local t=$1 name=$2 res=$3 rc kimg i=0
+    shift 3
+    [ -f "$SIM_DIR/../hw/linux/test-$t.sh" ] || return 0
     kimg=$(ls "$SIM_WS/sim-work/kroot/boot/vmlinuz-$(uname -r)" "$SIM_WS/sim-work/vmlinuz-$(uname -r)" 2> /dev/null | head -n 1)
     mkdir -p "$OUT/$WHERE/hw-out"
-    for t in a b; do
-        [ -f "$SIM_DIR/../hw/linux/test-$t.sh" ] || continue
-        echo "==== $WHERE: hw/linux/test-$t.sh, with the device of this machine"
-        i=0
-        while pgrep -x VBoxSVC > /dev/null 2>&1 && [ "$i" -lt 30 ]; do
-            sleep 1
-            i=$((i + 1))
-        done
-        HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr HW_KERNEL=$kimg HW_GUEST_MB=1536 HW_BOOT_WAIT=600 \
-        HW_CPUS=1 HW_WARP=${SIM_WARP:-5} \
-        HW_VBOX_BIN=$SIM_WS/out/linux.amd64/release/bin \
-            sh "$SIM_DIR/../hw/linux/test-$t.sh" > "$OUT/$WHERE/hw-test-$t.log" 2>&1
-        rc=$?
-        cut -c1-220 "$OUT/$WHERE/hw-test-$t.log" | sed 's/^/    /'
-        name=first
-        [ "$t" = b ] && name=second
-        if [ "$rc" = 0 ]; then
-            stage "the $name script for a machine with real hardware goes through its checks with the device" ok \
-                  "$(grep -c ': ok' "$OUT/$WHERE/hw-out/test-$t.txt" 2> /dev/null) checks"
-        else
-            stage "the $name script for a machine with real hardware goes through its checks with the device" FAILED \
-                  "$(grep -c ': FAILED' "$OUT/$WHERE/hw-out/test-$t.txt" 2> /dev/null) of its checks failed, or it did not get to them"
-        fi
+    echo "==== $WHERE: hw/linux/test-$t.sh${*:+ with $*}, with the device of this machine"
+    while pgrep -x VBoxSVC > /dev/null 2>&1 && [ "$i" -lt 30 ]; do
+        sleep 1
+        i=$((i + 1))
     done
+    env HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV="$addr" HW_KERNEL="$kimg" HW_GUEST_MB=1536 HW_BOOT_WAIT=600 \
+        HW_CPUS=1 HW_WARP="${SIM_WARP:-5}" \
+        HW_VBOX_BIN="$SIM_WS/out/linux.amd64/release/bin" "$@" \
+        sh "$SIM_DIR/../hw/linux/test-$t.sh" > "$OUT/$WHERE/hw-$res.log" 2>&1
+    rc=$?
+    cut -c1-220 "$OUT/$WHERE/hw-$res.log" | sed 's/^/    /'
+    if [ "$rc" = 0 ]; then
+        stage "$name goes through its checks with the device" ok \
+              "$(grep -c ': ok' "$OUT/$WHERE/hw-out/$res.txt" 2> /dev/null) checks"
+    else
+        stage "$name goes through its checks with the device" FAILED \
+              "$(grep -c ': FAILED' "$OUT/$WHERE/hw-out/$res.txt" 2> /dev/null) of its checks failed, or it did not get to them"
+    fi
 }
 
-if [ "${SIM_BARTEST:-}" = 1 ]; then
-    # A device with gigabytes of memory, see run.sh, part 2c: nothing of the
-    # phases with the drive applies, the scripts for real hardware do.  The
-    # guest of the second one writes to the memory of the device.
+hw_scripts()
+{
+    hw_script a "the first script for a machine with real hardware" test-a
+    hw_script b "the second script for a machine with real hardware" test-b
+    if [ "${SIM_HWTEST:-}" = vga ]; then
+        # Once more with the legacy VGA ranges of the card given to the
+        # guest, which writes to registers and memory there: nobody looks at
+        # this card.
+        hw_script b "the second script, with a VM which is given the legacy VGA ranges of the card," test-b-vga \
+                  HW_VGA=yes HW_CMDLINE=hwvgawrite=1
+    fi
+}
+
+if [ -n "${SIM_HWTEST:-}" ]; then
+    # A device which is no drive, see run.sh, parts 2c and 2d: nothing of the
+    # phases with the drive applies, the scripts for real hardware do.
+    ids="$(cat "/sys/bus/pci/devices/$addr/vendor" | sed 's/^0x//'):$(cat "/sys/bus/pci/devices/$addr/device" | sed 's/^0x//')"
     echo "the memory of the device: $(cat "/sys/bus/pci/devices/$addr/resource" | awk '$1 != "0x0000000000000000" { printf "%s..%s ", $1, $2 }')"
-    export HW_CMDLINE="hwbarwrite=$(cat "/sys/bus/pci/devices/$addr/vendor" | sed 's/^0x//'):$(cat "/sys/bus/pci/devices/$addr/device" | sed 's/^0x//')"
-    # The device has the vendor of the virtio devices, whose driver names all
-    # of that vendor and takes this one not.
-    export HW_EXPECT_DRIVER=no
+    if [ "$SIM_HWTEST" = bar ]; then
+        # The guest of the second script writes to the memory of the device.
+        export HW_CMDLINE="hwbarwrite=$ids"
+        # The device has the vendor of the virtio devices, whose driver names
+        # all of that vendor and takes this one not.
+        export HW_EXPECT_DRIVER=no
+    fi
+    if [ -n "${SIM_ROM:-}" ]; then
+        # The ROM of the device is a file on the runner, which told how many
+        # bytes it has and their checksum.  What the script which bound the
+        # device kept of the ROM is what the second script compares with.
+        seen=$(grep "^$addr " /tmp/hw-work/rom-seen.txt 2> /dev/null | head -n 1)
+        if [ "$seen" = "$addr $ids ${SIM_ROM%%:*} ${SIM_ROM##*:}" ]; then
+            stage "the script which binds the device read its ROM as the file of the ROM is" ok "${SIM_ROM%%:*} bytes"
+        else
+            stage "the script which binds the device read its ROM as the file of the ROM is" FAILED "the file: ${SIM_ROM%%:*} ${SIM_ROM##*:}; kept: ${seen:-nothing}"
+        fi
+    fi
     hw_scripts
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40

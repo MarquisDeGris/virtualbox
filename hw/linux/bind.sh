@@ -72,6 +72,19 @@ if [ "$1" = --undo ]; then
     exit 0
 fi
 
+# What the ROM of each function is while the host has the device as it
+# started with it: the second test compares what its guest reads with that.
+# Once vfio-pci has the device the host may not get to read it any more.
+for f in $FUNCS; do
+    [ "$(driver_of "$f")" = vfio-pci ] && continue
+    r=$(rom_of "$f")
+    grep -v "^$f " "$work/rom-seen.txt" > "$work/rom-seen.new" 2> /dev/null
+    [ -n "$r" ] && echo "$f $(ids_of "$f") $r" >> "$work/rom-seen.new"
+    mv "$work/rom-seen.new" "$work/rom-seen.txt"
+    echo "$f has a ROM the host reads: ${r:-no}"
+done
+give_back
+
 modprobe vfio-pci 2> /dev/null
 bound=yes
 for f in $FUNCS; do
