@@ -659,7 +659,10 @@ jobs:
             echo "source: https://github.com/${{ github.repository }} at commit $sha (built as ${{ inputs.ref }})"
             echo "licence: GPL-3.0-only, as VirtualBox; the source of this build is that commit"
             echo "built: $(date -u '+%Y-%m-%d %H:%M UTC') on $(sed -n 's/^PRETTY_NAME="\(.*\)"$/\1/p' /etc/os-release), gcc $(gcc -dumpfullversion)"
-            echo "configure: $(sed -n 's/^#   configure\(\.py\)\{0,1\} *//p' AutoConfig.kmk | head -n 1)"
+            # AutoConfig.kmk has the command line of configure in a comment, with
+            # quotes around it and "./" in front on the lines before the
+            # development line.
+            echo "configure: $(grep -m 1 -E "^#   '?(\./)?configure(\.py)? " AutoConfig.kmk | sed -e "s/^#   '\{0,1\}\(\.\/\)\{0,1\}configure\(\.py\)\{0,1\} *//" -e "s/'\$//")"
             echo "kvm backend of the build: $(grep -E '^VBOX_WITH_KVM' AutoConfig.kmk | tr -s ' ' | tr '\n' ' ')"
             echo "It runs from its directory, without installation and without kernel modules of VirtualBox."
             echo
