@@ -157,6 +157,7 @@ void        tstVfioKrnlDevSignalError(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlGetOpenFdCount(void);
 uint32_t    tstVfioKrnlGetInheritableFdCount(void);
 uint32_t    tstVfioKrnlGetViolationCount(void);
+uint32_t    tstVfioKrnlGetStrayIoctlCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);
@@ -256,6 +257,12 @@ bool            tstPdmMsiWait(uint32_t cExpected, RTMSINTERVAL cMsTimeout);
 bool            tstPdmMsiGet(uint32_t idxMsi, PTSTPDMMSI pMsi);
 bool            tstPdmMsiGetLast(PTSTPDMMSI pMsi);
 uint32_t        tstPdmGetHeapAllocCount(void);
+/** @} */
+
+
+/** @name What the device has for the testcase and for nobody else (DevPciVfio.cpp).
+ * @{ */
+DECLHIDDEN(uint32_t) pciVfioIntxNextAskDelay(uint32_t cUsDelay, bool fAnswered, uint64_t nsAsked, uint64_t nsNow);
 /** @} */
 
 RT_C_DECLS_END
