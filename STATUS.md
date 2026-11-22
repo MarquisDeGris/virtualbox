@@ -1266,10 +1266,10 @@ Windows never got up.
 ### INTx (WP8), from 2026-11-22
 
 Not on any branch of a merge request yet: the work is on
-`scratch/intx`, two commits on the head of `pci-passthrough-hotplug-v1`
-(`b2b6e1ee`). The same two apply to the branches for 7.2 and 7.1 as
-they are and are on `scratch/intx-7.2` and `scratch/intx-7.1`, not
-built.
+`scratch/intx`, three commits on the head of
+`pci-passthrough-hotplug-v1` (`6fe456f0`). The same three apply to the
+branches for 7.2 and 7.1 as they are and are on `scratch/intx-7.2` and
+`scratch/intx-7.1`. See "Where it is now" at the end of this section.
 
 What was wrong is more than the notes said. They said that a device
 which only has INTx does not work beyond its first interrupt. Reading
@@ -1302,7 +1302,7 @@ are as they were.
 
 The longest time was 8 milliseconds in the first commit, which is what
 runs 269 and 270 built, and is 2 milliseconds since the second, which
-no run has built. A device which has its next interrupt ready every
+runs 271 and 272 built. A device which has its next interrupt ready every
 time it is asked cannot be told from one nobody deals with, so the
 longest time is also the pace of a device with many interrupts: 125 a
 second with 8 milliseconds, 500 with 2. That is the price of sampling
@@ -1347,26 +1347,107 @@ same with AddressSanitizer, LeakSanitizer and
 UndefinedBehaviorSanitizer and the random tests in full length: all
 pass, no report.
 
-Not done, and why. Two runs which were to follow could not be started
-on 2026-11-22: the session which does this work was refused the start
-of further runs, and it is a rule of this work not to try again or
-around that without the word of who it is for. They are:
+**Run 271** (2026-11-22, `tests`, for finding out, `scratch/intx` @
+`b2b6e1ee`, 10 minutes, AMD EPYC 7763): the second commit, with the
+longest time at 2 milliseconds and the bounds of the test changed with
+it. It builds, and all tests pass.
 
-- The simulation on `scratch/intx`. It has a phase for this since
-  (`intx`, on the `meta` branch): the Linux guest started with
-  `pci=nomsi`, so that the driver of the drive gets its INTx interrupt,
-  reading and writing, pause and resume, a reset of the VM, and the
-  kernel of the guest not saying that nobody cares for an interrupt.
-  The phase has not run; a build without the change leaves it out.
-- The new test against the device as it was (`scratch/intx-before`), a
-  run which ends well when the test fails. That the test fails there is
-  what reading says: the line is left high and the device is never asked
-  again, and the test checks both. It was not seen.
+**Run 272** (2026-11-22, `sanitize`, the same commit, 10 minutes, AMD
+EPYC 9V45): the same with the sanitizers and the random tests in full
+length: all pass, no report.
 
-Until both have run the change stays where it is. The branches of the
-merge requests are as they were, with the limitation as it was; the
-descriptions of the merge requests and HWTEST.md say what it means for a
-guest, see "What is missing" there.
+**Run 273** (2026-11-22, `sim`, for finding out, the same commit, 45
+minutes, Intel Xeon 6975P-C): the simulation with the change, 177
+checks, none failed. Its phase `intx` (on the `meta` branch) has the
+Linux guest started with `pci=nomsi`, so that the driver of the drive
+gets a line interrupt: the guest boots with the device, reads from the
+drive, has the interrupt of the drive at the I/O APIC (`IO-APIC
+16-fasteoi nvme0q0, nvme0q1`) and not as MSI or MSI-X, writes, reads
+again after the VM was paused and resumed, boots again after a reset of
+the VM and reads, and its kernel has no word of an interrupt nobody
+answered for, of a line switched off or of a command which timed out. A
+build without the change leaves the phase out. All other phases pass as
+before, the device of two functions and the reset of its bus among
+them.
+
+**Runs 274 and 275** (2026-11-22, `tests`, for finding out,
+`scratch/intx-7.2` @ `601e7710` and `scratch/intx-7.1` @ `97f447c7`, 10
+and 8 minutes, Intel Xeon 6975P-C and AMD EPYC 9V45): the two commits on
+the lines for 7.2 and 7.1, where they apply as they are. Both build, all
+tests pass.
+
+A reading by somebody who had not written it (2026-11-22). The change
+to the device and its tests were given to a reader who knew neither,
+with the questions a review asks: the threads and the file descriptors,
+the arithmetic of the times, whether a device can end up never asked
+again, and whether the tests check what they say. Nothing was found
+which keeps a device from working. What was found, and what became of
+it as a third commit (`6fe456f0`):
+
+- When asking the device failed it was not asked again, with the host
+  still masking its interrupt. It is tried again at the slowest pace
+  now, and a test has the host refuse once.
+- The check that a device which was taken out is not asked could not
+  fail: the fake kernel did not see a request to what stands in for the
+  device. It does now. And the device did send one such request, which
+  it does not any more: a function which is out of service is not
+  asked, and the interrupt thread takes the critical section of the
+  slot for asking, without waiting for it.
+- The fake kernel let INTx be unmasked which was not set up; vfio-pci
+  does not. It refuses now and counts that with what it refuses
+  otherwise, which the tests with interrupts check, the random ones
+  among them.
+- The rule for the time until the device is asked was tested by timing
+  only, and the half of it which is for a device the host cannot ask
+  directly not at all. It is a function of its own now, and a test goes
+  through it by its numbers.
+- The INTx test did not suspend and resume the VM. It does now, with
+  the device holding its interrupt. Its lower bound for the pulses of
+  such a device would have passed with a longest time of 25
+  milliseconds; it goes by the time now.
+- A comment was wrong about what asking at once is for when the thread
+  gets going.
+- Left as it is: for a device the host has to mask at its interrupt
+  controller, which old devices are, the bound of 500 interrupts a
+  second depends on how quickly the host passes the answer of the
+  device on, and a slow host has the time start short again. What such
+  a device costs stays bounded, by the shortest time plus that slowness.
+  A rule which is slower to start short again would also slow down a
+  device which is dealt with at once and has many interrupts, and
+  nothing here can tell which of the two matters more. The comment at
+  the times says so. Also left: each interrupt asks for an EMT by
+  itself, which is 500 requests a second at most.
+
+**Run 276** (2026-11-22, `sanitize`, for finding out, `scratch/intx` @
+`6fe456f0`, 13 minutes, Intel Xeon Platinum 8573C): the third commit
+with the sanitizers and the random tests in full length: it builds, 60
+tests pass, no report.
+
+Where it is now (2026-11-22, 11:17 UTC). The three commits are one
+commit for each line, with the tree which was tested (`git diff` between
+the two is empty): `4add131b` for `pci-passthrough-hotplug-v1`,
+`a170413a` for the 7.2 branch, `2486f750` for the 7.1 branch. They are
+not on those branches yet. Merged into the branches with the KVM
+backend they are `scratch/intx-7.2-kvm` @ `26e4045a` and
+`scratch/intx-7.1-kvm` @ `9f8f5cba`. Before the branches of the merge
+requests get them: run 277, the simulation on `scratch/intx` with the
+third commit; run 278, the whole simulation with Linux and Windows on
+`scratch/intx-7.2-kvm`; and the same on `scratch/intx-7.1-kvm`. The
+simulation has a step with Windows for this since (`win_intx` on the
+`meta` branch): the script in the guest sets `MSISupported` to 0 for
+the controller of the drive and starts the controller anew, so that
+Windows gives it a line interrupt, and reads from the drive again. That
+step has not run yet.
+
+Until then the branches of the merge requests are as they were, with
+the limitation as it was; the descriptions of the merge requests and
+HWTEST.md say what it means for a guest, see "What is missing" there.
+
+Not done: the new test against the device as it was
+(`scratch/intx-before`), a run which ends well when the test fails.
+That the test fails there is what reading says: the line is left high
+and the device is never asked again, and the test checks both. It was
+not seen.
 
 State of `pci-passthrough-hotplug-7.2-kvm` (pushed): the 7.2 branch as
 above, the backend of Cyberus Technology in its version of 2026-10-21 as
@@ -2106,15 +2187,12 @@ harness since WP5, saved states since the fourth part of WP6.
    Windows guest letting go of a device counts.
 6. The two slow VMs of run 231: every VM reports its pace now; the next
    slow one is looked at.
-4e. INTx (WP8), see "INTx (WP8)" above: written, built and tested on
-   `scratch/intx` (runs 269 and 270), with one change since which is
-   not built (the longest time between asking the device). Left, in
-   this order: the testcase and the sanitizers on the new head; the
-   simulation with a guest which does not use MSI; the new test seen
-   failing on the device as it was; the commits on the three lines and
-   their branches with the backend, each with a run (the scratch
-   branches for 7.2 and 7.1 are there for that); the descriptions of
-   the merge requests. All of it waits for runs to be allowed again.
+4e. INTx (WP8), see "INTx (WP8)" above: written, read by a second
+   reader, built and tested on all three lines, and run in the
+   simulation with a Linux guest which does not use MSI (runs 269 to
+   276). Left: the runs named under "Where it is now" there, then the
+   commit on the branches of the merge requests and their descriptions.
+   Not planned: seeing the new test fail on the device as it was.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
    device coming and going, a device pulled without notice and a device
    error in the simulation.
@@ -2221,6 +2299,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-21 | A Windows which is stuck early in its start is given up on after 15 minutes without a read from its disk, looked at, and started once more; the first start counts as failed | Run 265 waited an hour for such a start and learned little from it, and everything the part is for comes after the start. A second start which works tells that the first was chance and lets the checks about the device run; a second which is stuck too tells the opposite. The failure stays in the count either way |
 | 2026-11-22 | WP8 is taken up: a function which uses INTx gets every interrupt through to the guest. Each interrupt is a pulse on the line of the guest, and the device is asked for its next one after a time which grows while it keeps answering with one | Reading the device showed that the first INTx interrupt left the line of the guest raised for good, which is worse than the notes had it, and the audio function of a graphics card in a Windows guest is a device which uses INTx. The way taken stays inside the device, where the testcase goes through every step of it; a callback from the I/O APIC or trapping the memory of the device would have changed parts which every VM uses and which nothing here can test alone |
 | 2026-11-22 | The longest time between two questions to a device about its INTx interrupt is 2 milliseconds, not the 8 of the first version | It is the pace of a device with many interrupts as much as the bound for one nobody deals with. 500 pulses a second cost little on a host which is not a virtual machine; 125 interrupts a second would have been little for a graphics card whose driver uses INTx. What the right number is can only be told with such a device |
+| 2026-11-22 | The INTx change was read by somebody who had not written it before it goes to the branches of the merge requests, and what that found is a commit of its own on the working branch | The testcase and one phase of the simulation were all that had seen the change, and whoever writes a test and the code it tests makes the same mistake in both. The reading found a check which could not fail and a request to a device which was gone |
+| 2026-11-22 | Runs may overlap: a build of ten minutes next to a simulation, and two simulations at a time at most | One run at a time made a day of what three lines need, most of it waiting. The runs are no more for it |
 | 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -2434,5 +2514,11 @@ virtual machine.
 | 268 | `pci-passthrough-hotplug-7.1-kvm` @ `7f324666` | allsim, exploring | passed (four checks of the simulation fail) | 145 minutes, AMD EPYC 9V45. 222 checks pass: everything with the Linux guest, with the reset of the bus now reported done on the 7.1 line too, and Windows on the runner. Windows in the VMs inside the virtual machine standing in for a host does not get through its start, three times out of three, which is the four failures. The counters of KVM tell what it is busy with: 6300 exits a second for 380 timer interrupts a second, which at that depth is all the time there is. See "Run 268" |
 | 269 | `scratch/intx` @ `42d73998` | tests, exploring | passed | 10 minutes, Intel Xeon 6975P-C. The first build of the INTx change (WP8): it builds without a warning in a changed file, the tests pass, the rewritten INTx test among them. See "INTx (WP8)" |
 | 270 | `scratch/intx` @ `42d73998` | sanitize, exploring | passed | 11 minutes. The same with the sanitizers and the random tests in full length: all pass, no report |
+| 271 | `scratch/intx` @ `b2b6e1ee` | tests, exploring | passed | 10 minutes, AMD EPYC 7763. The second commit of the INTx change (the longest time between asking the device is 2 milliseconds): it builds, all tests pass |
+| 272 | `scratch/intx` @ `b2b6e1ee` | sanitize, exploring | passed | 10 minutes, AMD EPYC 9V45. The same with the sanitizers and the random tests in full length: all pass, no report |
+| 273 | `scratch/intx` @ `b2b6e1ee` | sim, exploring | passed | 45 minutes, Intel Xeon 6975P-C. 177 checks, none failed. The first run of the phase `intx`: a Linux guest which does not use MSI uses the drive with its line interrupt, through pause and resume and a reset of the VM. See "INTx (WP8)" |
+| 274 | `scratch/intx-7.2` @ `601e7710` | tests, exploring | passed | 10 minutes, Intel Xeon 6975P-C. The INTx change on the 7.2 line: it builds, all tests pass |
+| 275 | `scratch/intx-7.1` @ `97f447c7` | tests, exploring | passed | 8 minutes, AMD EPYC 9V45. The INTx change on the 7.1 line: it builds, all tests pass |
+| 276 | `scratch/intx` @ `6fe456f0` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The third commit, written after the change was read by a second reader: it builds, 60 tests pass with the sanitizers, no report |
 
 Run numbers are those GitHub shows for the `build` workflow.
