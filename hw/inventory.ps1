@@ -10,7 +10,7 @@
 # writes hw-out\inventory.txt and shows it.  See hw\README.md.
 
 $ErrorActionPreference = 'SilentlyContinue'
-$version = 1
+$version = 2
 $out = Join-Path (Split-Path -Parent $PSScriptRoot) 'hw-out'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $file = Join-Path $out 'inventory.txt'
@@ -48,6 +48,30 @@ foreach ($g in @(Get-CimInstance Win32_VideoController)) {
     Kv ("graphics-{0}" -f $n) ("{0}, {1}, driver {2}, {3} MB as Windows tells it" -f $g.Name, $ids, $g.DriverVersion, [int]($g.AdapterRAM / 1MB))
 }
 Kv 'graphics-cards' $n
+
+# Which kind of interrupt Windows runs the graphics cards and the sound
+# controllers on the PCI bus with.  A small number is a line interrupt (INTx),
+# numbers above four thousand million are messages (MSI or MSI-X).  It matters
+# for a card which is to go to a VM: its sound function is such a controller.
+$alloc = @(Get-CimInstance Win32_PnPAllocatedResource)
+$n = 0
+foreach ($d in @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\*' })) {
+    $hw = @($d.HardwareID) -join ' '
+    if ($hw -notmatch 'CC_(03[0-9A-Fa-f]{2}|0403)') { continue }
+    $cc = $Matches[1]
+    $ids = ''
+    if ($d.InstanceId -match '(VEN_[0-9A-Fa-f]{4}&DEV_[0-9A-Fa-f]{4})') { $ids = $Matches[1] }
+    $irqs = @($alloc | Where-Object { $_.Dependent.DeviceID -eq $d.InstanceId -and $_.Antecedent.CimSystemProperties.ClassName -eq 'Win32_IRQResource' } |
+              ForEach-Object { [uint32]$_.Antecedent.IRQNumber } | Sort-Object)
+    $kind = 'no interrupt'
+    if ($irqs.Count -gt 0) {
+        if ($irqs[0] -lt 4096) { $kind = "a line interrupt (INTx), IRQ $($irqs[0])" } else { $kind = "$($irqs.Count) message interrupt(s) (MSI or MSI-X)" }
+    }
+    $svc = [string](Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_Service').Data
+    $n++
+    Kv ("interrupt-{0}" -f $n) ("class {0}, {1}, {2}, driver {3}: {4}" -f $cc, $ids, $d.FriendlyName, $svc, $kind)
+}
+Kv 'graphics-and-sound-controllers' $n
 
 # Whether the firmware starts with Secure Boot; asking takes an administrator.
 $sb = 'not told without an administrator'

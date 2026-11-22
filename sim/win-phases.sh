@@ -919,6 +919,18 @@ win_second() # <what> [<seconds>]
         # Its driver has the controller, and it has found the codec behind it,
         # which takes commands to the controller and answers from it.
         local what=${1/and reads from its drive/and finds its codec}
+        # A Windows without a driver for such a controller has the function
+        # and nothing to run it with (problem 28, which is what the Server
+        # Core of the simulation tells: run 285).  That is told once, and
+        # what needs the driver is left out.
+        if    wait_serial '^WIN: PRESENT [0-9]+ at=1\.0\.1 ' "${2:-420}" \
+           && serial_has '^WIN: PRESENT [0-9]+ at=1\.0\.1 .* problem=28 '; then
+            if [ "${AUDIO_DRIVER:-}" != no ]; then
+                stage "guest: has a driver for the audio controller" skipped "this Windows has none for it (problem 28); the function is there"
+            fi
+            AUDIO_DRIVER=no
+            return 0
+        fi
         if    wait_serial "$AUDIO_RE" "${2:-420}" \
            && wait_serial '^WIN: AUDIO [0-9]+ at=1\.0\.1 codecs=[1-9]' 420; then
             stage "$what" ok "$(serial_new | grep -a '^WIN: AUDIO [0-9]* at=1\.0\.1 ' | tail -n 1 | sed -e 's/^WIN: AUDIO [0-9]* at=1\.0\.1 //' | cut -c1-60)"
@@ -1051,6 +1063,9 @@ win_audio() # <what is added to the name of the check>
 {
     second_is_audio || return 0
     [ -s "${WIN_CMD_AUDIO_ISO:-}" ] || return 0
+    # Without a driver for the controller there is nothing to play with and
+    # no interrupt set up by one, see win_second.
+    [ "${AUDIO_DRIVER:-}" = no ] && return 0
     local f=${HOSTFUNCS##* } before="$SIM_WORK/interrupts-before-audio" after="$SIM_WORK/interrupts-after-audio"
     local irq msgs line ms c0 c1 kind
     echo "    ---- the interrupts the host has for the audio controller:"
