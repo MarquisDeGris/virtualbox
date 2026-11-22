@@ -338,6 +338,11 @@ jobs:
       - name: Run device testcases
         if: inputs.flavor != 'baseline'
         run: |
+          # A branch which is not about the passthrough device does not have its testcase.
+          if [ ! -e src/VBox/Devices/testcase/tstDevPciVfio.cpp ]; then
+            echo "This tree does not have the testcase of the passthrough device."
+            exit 0
+          fi
           cd out/linux.amd64/release/bin/testcase
           ls -l tstDevPciVfio
           log="$GITHUB_WORKSPACE/test-tstDevPciVfio.log"
@@ -522,6 +527,104 @@ jobs:
           run_tc counts tstUsbMouse       $dv/Input/testcase/tstUsbMouse.cpp "$bin"
           run_tc tried  tstIntNetR0       $dv/Network/testcase/tstIntNetR0.cpp "$bin"
           rm -rf "$work"
+
+      - name: Command line checks
+        if: inputs.flavor != 'baseline'
+        run: |
+          # VBoxManage of the build with a VBoxSVC of its own, for settings which
+          # need no VM to run.  A check which fails does not end the run here;
+          # one which counts fails the last step, as with the testcases of the
+          # tree.  A check which is here for the first time is tried: what it
+          # does is told and does not count.
+          bin="$GITHUB_WORKSPACE/out/linux.amd64/release/bin"
+          if [ ! -x "$bin/VBoxManage" ]; then
+            echo "CLI: there is no VBoxManage, nothing to check"
+            exit 0
+          fi
+          export VBOX_USER_HOME="$RUNNER_TEMP/vbox-cli"
+          rm -rf "$VBOX_USER_HOME"
+          mkdir -p "$VBOX_USER_HOME"
+          vbm() { timeout -k 10 120 "$bin/VBoxManage" "$@"; }
+          # try <arguments of VBoxManage>: tells the command and its exit code, which it returns.
+          try() {
+            local rc=0
+            vbm "$@" > cli-last.log 2>&1 || rc=$?
+            echo "+ VBoxManage $* -> $rc"
+            if [ "$rc" != 0 ]; then grep -v '^$' cli-last.log | head -n 4 | cut -c1-200 | sed 's/^/    /'; fi
+            return "$rc"
+          }
+          field() { vbm showvminfo cli --machinereadable 2> /dev/null | sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}\$/\1/p" | head -n 1; }
+          # The graphics controller, the 3D acceleration and the video memory of the VM.
+          state() { echo "$(field graphicscontroller),$(field accelerate3d),$(field vram)"; }
+          # result <counts|tried> <what> <ok|failed> [<note>]
+          result() {
+            if [ "$3" = ok ]; then
+              echo "CLI $2: passed ($1)${4:+: $4}"
+            elif [ "$1" = counts ]; then
+              echo "CLI $2: FAILED${4:+: $4}"
+              echo "command line: $2" >> testcases-failed
+            else
+              echo "CLI $2: failed (tried, does not count)${4:+: $4}"
+            fi
+          }
+          # expect <counts|tried> <what> <ok|refused> <state afterwards> <arguments of modifyvm>
+          expect() {
+            local kind=$1 what=$2 how=$3 want=$4 rc=0 s
+            shift 4
+            try modifyvm cli "$@" || rc=$?
+            s=$(state)
+            if [ "$how" = ok ] && [ "$rc" = 0 ] && [ "$s" = "$want" ]; then
+              result "$kind" "$what" ok
+            elif [ "$how" = refused ] && [ "$rc" != 0 ] && [ "$s" = "$want" ]; then
+              result "$kind" "$what" ok "refused, and the VM is as it was"
+            else
+              result "$kind" "$what" failed "exit code $rc, the VM has $s, expected $want and the command to be $how"
+            fi
+          }
+          if ! try createvm --name cli --ostype Linux_64 --register; then
+            echo "CLI: no VM could be created with this build, nothing to check"
+            head -n 20 cli-last.log
+            exit 0
+          fi
+          echo "    the VM as created: $(state)"
+
+          # modifyvm: the 3D acceleration and the size of the video memory go by
+          # the graphics controller of the same command, wherever that stands.
+          if ! grep -q 'iAccelerate3D' src/VBox/Frontends/VBoxManage/VBoxManageModifyVM.cpp 2> /dev/null; then
+            echo "CLI: this tree applies the graphics options of modifyvm in the order they are given, which is not checked"
+          else
+            kind=tried
+            # The video memory: VBoxVGA takes 1 MB, VMSVGA does not.
+            try modifyvm cli --graphicscontroller vboxvga --vram 8 || true
+            expect $kind "video memory too small for the graphics controller which follows it" refused vboxvga,off,8 \
+              --vram 1 --graphicscontroller vmsvga
+            try modifyvm cli --graphicscontroller vmsvga --vram 8 || true
+            expect $kind "video memory which fits the graphics controller which follows it" ok vboxvga,off,1 \
+              --vram 1 --graphicscontroller vboxvga
+            # The 3D acceleration, where the build has it.
+            try modifyvm cli --graphicscontroller vmsvga --vram 16 --accelerate-3d on || true
+            if [ "$(state)" != vmsvga,on,16 ]; then
+              echo "CLI: this build has no 3D acceleration for VMSVGA, the checks with it are left out ($(state))"
+            else
+              try modifyvm cli --graphicscontroller vboxvga --vram 16 || true
+              expect $kind "3D acceleration in front of the graphics controller which has it" ok vmsvga,on,16 \
+                --accelerate-3d on --graphicscontroller vmsvga
+              try modifyvm cli --graphicscontroller vmsvga --accelerate-3d off --vram 16 || true
+              expect $kind "3D acceleration in front of a graphics controller which does not have it" refused vmsvga,off,16 \
+                --accelerate-3d on --graphicscontroller vboxvga
+              try modifyvm cli --graphicscontroller vboxvga --vram 8 || true
+              expect $kind "video memory too small for the 3D acceleration which follows it" refused vboxvga,off,8 \
+                --vram 8 --graphicscontroller vmsvga --accelerate-3d on
+              try modifyvm cli --graphicscontroller vmsvga --accelerate-3d on --vram 16 || true
+              expect $kind "video memory which fits once the 3D acceleration which follows it is off" ok vmsvga,off,8 \
+                --vram 8 --accelerate-3d off
+            fi
+          fi
+
+          vbm unregistervm cli --delete > /dev/null 2>&1 || true
+          # VBoxSVC ends by itself when nothing uses it any more; nobody waits for that here.
+          pkill -x VBoxSVC 2> /dev/null || true
+          pkill -x VBoxXPCOMIPCD 2> /dev/null || true
 
       - name: Result of the build of the tree
         if: inputs.flavor != 'baseline'
