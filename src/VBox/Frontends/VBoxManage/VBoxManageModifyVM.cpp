@@ -918,6 +918,14 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
     ComPtr<IGraphicsAdapter> pGraphicsAdapter;
     sessionMachine->COMGETTER(GraphicsAdapter)(pGraphicsAdapter.asOutParam());
 
+    /* The 3D acceleration and the size of the video memory depend on the graphics
+       controller: whether it has the one, and which sizes it takes of the other.  They
+       are set when all options have been gone through, so that they go by the graphics
+       controller the command asks for wherever on the command line that stands. */
+    int      iAccelerate3D  = -1;    /* -1: not given. */
+    bool     fVRamSizeGiven = false;
+    uint32_t cMbVRamSize    = 0;
+
     RTGETOPTSTATE GetOptState;
     RTGetOptInit(&GetOptState, a->argc, a->argv, g_aModifyVMOptions,
                  RT_ELEMENTS(g_aModifyVMOptions), 1, RTGETOPTINIT_FLAGS_NO_STD_OPTS);
@@ -1002,7 +1010,9 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
 
             case MODIFYVM_VRAM:
             {
-                CHECK_ERROR(pGraphicsAdapter, COMSETTER(VRAMSize)(ValueUnion.u32));
+                /* Set after the options have been gone through, see above. */
+                fVRamSizeGiven = true;
+                cMbVRamSize    = ValueUnion.u32;
                 break;
             }
 
@@ -1162,7 +1172,8 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
 
             case MODIFYVM_ACCELERATE3D:
             {
-                CHECK_ERROR(pGraphicsAdapter, SetFeature(GraphicsFeature_Acceleration3D, ValueUnion.f));
+                /* Set after the options have been gone through, see above. */
+                iAccelerate3D = ValueUnion.f ? 1 : 0;
                 break;
             }
 
@@ -3902,6 +3913,13 @@ RTEXITCODE handleModifyVM(HandlerArg *a)
             }
         }
     }
+
+    /* What depends on the graphics controller, see above.  The 3D acceleration comes
+       first, as the sizes the video memory can have depend on it as well. */
+    if (SUCCEEDED(hrc) && iAccelerate3D != -1)
+        CHECK_ERROR(pGraphicsAdapter, SetFeature(GraphicsFeature_Acceleration3D, iAccelerate3D != 0));
+    if (SUCCEEDED(hrc) && fVRamSizeGiven)
+        CHECK_ERROR(pGraphicsAdapter, COMSETTER(VRAMSize)(cMbVRamSize));
 
     /* commit changes */
     if (SUCCEEDED(hrc))
