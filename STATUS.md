@@ -1564,6 +1564,34 @@ at its start when it is for Windows two levels deep and its runner has
 an AMD processor, which the workflow tells in its first steps. Run 285
 is the part with Windows on the runner and the new part, nothing else.
 
+**Run 285** (2026-11-22, `winsim` with those two parts, for finding
+out, the same branch, 60 minutes, Intel Xeon 6975P-C): 116 checks pass,
+3 fail, 2 are skipped. The part ran. Windows started with the device of
+a drive and an audio controller and went through every step with the
+slot: asked to let go of it, the device put in again, taken away
+without asking, put in again, each time with the reset of the bus the
+device needs when its functions have no reset of their own (the audio
+controller as QEMU emulates it has none to begin with). The drive
+worked each time, at the end with a line interrupt.
+
+What the part was for it could not tell. The Windows of the simulation
+is a Server Core, and that has no driver for a High Definition Audio
+controller: the function is there and shows with problem 28, and
+Windows has nothing to play sound with. The three checks about the
+codec are the three which failed; since this run that is told once, as
+skipped. The line interrupt the host has for the audio function is the
+one a function has before any driver has set it up.
+
+What Windows does with such a controller where it has the driver is
+told another way since: the inventory for Windows (`hw/inventory.ps1`,
+see "Machines with real hardware") has a line for each graphics card
+and each sound controller on the PCI bus with the kind of interrupt
+Windows runs it with. Where it was tried, on a Windows 11 which is a VM
+itself, the High Definition Audio controller of that VM has the driver
+of Windows for it (`HDAudBus`) and a line interrupt. That is one
+emulated controller. The inventory of a machine with a graphics card
+tells it of the sound function of a real one.
+
 Not done: the new test against the device as it was
 (`scratch/intx-before`), a run which ends well when the test fails.
 That the test fails there is what reading says: the line is left high
@@ -1616,11 +1644,60 @@ For a machine which runs Windows the README has the plan: the
 inventory there, then Linux from an external drive with the IOMMU
 switched on in the firmware, a VirtualBox built by the workflow fetched
 instead of built, the card bound to `vfio-pci` by the person at the
-machine, and the tests as one command each. Of that only the inventory
-exists. The inventory for Windows was tried on one machine; the one for
-Linux, the publishing, and the command for an assistant were not run
-anywhere yet. No result has arrived on `hw-results` (2026-11-22, 18:23
-UTC).
+machine, and the tests as one command each.
+
+What exists for the steps under Linux (`hw/linux/`, the README lists
+them):
+
+- `fetch.sh` fetches the VirtualBox the workflow has built and tells
+  which packages of the distribution it needs and are missing. Nothing
+  is built or installed on the machine.
+- `prereq.sh` names the device the tests are going to be about, the
+  first graphics card which is not the one the firmware shows its
+  screen on, and goes through the checklist of INSTALL.md for it.
+- `bind.sh` prints what giving the device to `vfio-pci` takes and does
+  it when it is told to, as root. It refuses the card the firmware
+  shows its screen on.
+- `test-a.sh` is the first test and needs no operating system in the
+  VM: a VM with the device in the hot-plug capable slot starts, the
+  device is taken out and put in twice, the VM is reset and powered
+  off. The result has what VirtualBox tells of the device at each step
+  and the lines the log of the VM has from the device.
+
+**The build to fetch.** The workflow has a flavor `package`: like
+`tests`, and then the directory VirtualBox runs from is made one file,
+with a text in it which says what it was built from and what it needs
+at run time. A second workflow, `release.yml`, publishes the file of
+such a run in the release `hw-builds` of the fork, a pre-release, from
+where it can be fetched without logging in; that job is the one place
+in the workflows which may write to the repository. **Run 286**
+(2026-11-22, `package`, `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a`,
+11 minutes) made the first one, 110 MB, and the release workflow
+published it. `hw/builds.txt` lists it. That build is the 7.2 line with
+the KVM backend; it has no emulated 3D in it (`--disable-dxvk`).
+
+**The scripts tried here.** The simulation runs `test-a.sh` at the end
+of its parts with the Linux guest, with the emulated NVMe drive as the
+device, so that the script has run before it runs where a run costs
+somebody an evening. **Run 287** (2026-11-22, `sim`, the same branch,
+42 minutes, Intel Xeon 6975P-C; 177 checks pass, 2 fail) was its first
+run, and the two which failed are the script, with one function and
+with two: it ended at creating its VM, whose settings went to the home
+directory of root and not under the directory the script says it stays
+in. Corrected. **Run 288** (2026-11-22, `sim` with the parts `runner`
+and `simhost`, 29 minutes, Intel Xeon 6975P-C): all 109 checks pass,
+and the script goes through its 15 checks: the VM starts with the
+device, VirtualBox tells the device in the slot and in use, out and in
+twice, the reset, the power off, the device with `vfio-pci` afterwards,
+and no line of the device in the log about something which did not
+work.
+
+Tried and not tried: the inventory for Windows ran on one machine, a
+VM. The inventory for Linux ran in a shell on Windows, which tells
+little of it. `fetch.sh`, `prereq.sh`, `bind.sh`, the publishing and
+the command for an assistant have not run anywhere; `test-a.sh` has
+run in the simulation only, with a drive and not with a graphics card.
+No result has arrived on `hw-results` (2026-11-22, 19:45 UTC).
 
 ### Requests from the tracker of upstream, from 2026-11-22
 
@@ -2412,9 +2489,10 @@ harness since WP5, saved states since the fourth part of WP6.
    (runs 269 to 283). Left for the hardware: a real device with INTx.
    Not planned: seeing the new test fail on the device as it was.
 4g. Machines with real hardware, see the section of that name: waiting
-   for a first inventory on `hw-results`. Then, for that machine: the
-   VirtualBox of the workflow as something to fetch, and the scripts
-   for the steps of the plan in `hw/README.md`.
+   for a first inventory on `hw-results`. What can be prepared without
+   it is there: the build to fetch and the scripts up to a first test.
+   After a first result: a test with a guest which has a driver for the
+   card, and a build with emulated 3D for the tests of that.
 4f. Requests from the tracker of upstream, see the section of that
    name: 798 and the manual text for 674 and 904 are merge requests.
    What could follow, each small and to be tested without a graphics
@@ -2533,6 +2611,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-22 | The three changes of 7.2 to the execution engine in the kernel driver stay left out of the 7.1 branches | Looked at again: they can be tried here in principle, the runners have the hardware virtualization for a VM on the kernel driver of VirtualBox, but that takes a part of the simulation of its own, about a day of work and several runs. A host which runs VMs with KVM does not run that code. It is worth doing if the hosts this is meant for turn out not to use KVM |
 | 2026-11-22 | What is to run on a machine with real hardware is scripts which need nobody to think, and their results come back through a branch of the fork | The machine which is offered for it has an assistant with little to spend and is not to be given a free hand. Scripts cost nothing to run, can be read before they are run, and what they find is worked out where the work is done. Only fields which were chosen leave the machine, as the fork is public |
 | 2026-11-22 | A run which is about Windows two levels of virtualization deep is cancelled at its start when its runner has an AMD processor | Run 284 took 163 minutes to tell nothing: Windows does not get through its start there on such a runner, which is known since run 268 and is not about the device. A run which is cancelled in its first minute costs next to nothing |
+| 2026-11-22 | The VirtualBox built by the workflow is published as a file of a pre-release of the fork, for machines with real hardware to fetch | Building on such a machine takes a toolchain, an hour and somebody who knows what to do when it fails; fetching takes a command. A file of a release can be fetched without an account, an artifact of a run cannot. It is named by the commit it was built from and says of itself that it is no release of Oracle |
+| 2026-11-22 | A script which is to run on a machine with real hardware runs in the simulation first, with the drive in the place of the card | Its first run would otherwise be the one somebody has made time for. Run 287 found the first script ending at its first step |
 | 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -2763,5 +2843,9 @@ virtual machine.
 | 282 | `scratch/intx-7.2-kvm` @ `26e4045a` | winsim, exploring | passed | 46 minutes, Intel Xeon 6975P-C. All 155 checks pass. Windows runs the controllers of both drives with a line interrupt, which the host shows as `vfio-intx` for both functions on one line, reads what is on the drives and shuts down when told to. See "Run 282" |
 | 283 | `scratch/intx-7.1-kvm` @ `9f8f5cba` | winsim, exploring | passed | 42 minutes, Intel Xeon 6975P-C. All 155 checks pass: the same on the 7.1 line as run 282 on 7.2. Every branch of a merge request about the passthrough work has the INTx change after this run |
 | 284 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | winsim, exploring | passed | 163 minutes, AMD EPYC 9V74. 93 checks pass, 5 fail, 1 skipped. The first run with the part `hdawinhost`, and on a runner on which Windows does not get through its start at that depth: all three parts with Windows in the simulated host waited for it in vain. See "Run 284" |
+| 285 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | winsim with the parts runner, win and hdawinhost, exploring | passed | 60 minutes, Intel Xeon 6975P-C. 116 checks pass, 3 fail, 2 skipped. Windows goes through every step with the slot with a drive and an audio controller as the two functions of the device. The three which failed are about the driver of Windows for the audio controller, which the Windows of the simulation does not have. See "Run 285" |
+| 286 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | package, exploring | passed | 11 minutes, AMD EPYC 9V74. The first package of a build, 110 MB; the release workflow published it in the release `hw-builds`. See "Machines with real hardware" |
+| 287 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim, exploring | passed | 42 minutes, Intel Xeon 6975P-C. 177 checks pass, 2 fail: the first script for a machine with real hardware, run for the first time, ends at creating its VM. Everything else passes |
+| 288 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner and simhost, exploring | passed | 29 minutes, Intel Xeon 6975P-C. All 109 checks pass, the script for a machine with real hardware among them with its 15 checks |
 
 Run numbers are those GitHub shows for the `build` workflow.
