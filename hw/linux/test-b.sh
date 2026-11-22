@@ -196,6 +196,50 @@ for f in $FUNCS; do
     fi
 done
 
+# The memory of the device: the guest has each BAR of a megabyte or more with
+# the size it has on the host, and reaches its first and its last bytes,
+# unless a driver of the guest has the BAR.  A card with gigabytes of memory
+# which the firmware of the VM or the guest cannot place shows here.
+for f in $FUNCS; do
+    g="0000:01:00.${f##*.}"
+    n=0
+    while read -r start end flags; do
+        bar=$n
+        n=$((n + 1))
+        [ "$bar" -le 5 ] || break
+        [ "$((start))" != 0 ] || continue
+        [ "$(( flags & 0x200 ))" != 0 ] || continue
+        size=$(( end - start + 1 ))
+        [ "$size" -ge 1048576 ] || continue
+        line=$(said | grep -F "HW: BAR $g $bar " | sed -n '1p')
+        what="guest: has BAR $bar of function ${f##*.} with its $(( size / 1048576 )) MB, to its last byte"
+        case "$line" in
+            '')
+                check "$what" FAILED "the guest has not placed it"
+                ;;
+            *" size=$size first=busy "*)
+                check "$what" ok "a driver of the guest has it"
+                ;;
+            *" size=$size "*failed*|*" size=$size "*refused*)
+                check "$what" FAILED "$(echo "$line" | sed -e 's/^HW: BAR [^ ]* [0-9]* //')"
+                ;;
+            *" size=$size "*)
+                if echo " ${HW_CMDLINE:-} " | grep -q " hwbarwrite=$(ids_of "$f") "; then
+                    case "$line" in
+                        *"first=0x48574241 last=0x52454E44"*) check "$what" ok "what the guest wrote to both ends it reads back" ;;
+                        *) check "$what" FAILED "written and not read back: $(echo "$line" | sed -e 's/^.* first=/first=/')" ;;
+                    esac
+                else
+                    check "$what" ok "$(echo "$line" | sed -e 's/^.* first=/first=/')"
+                fi
+                ;;
+            *)
+                check "$what" FAILED "the guest has it as: $(echo "$line" | sed -e 's/^HW: BAR [^ ]* [0-9]* //')"
+                ;;
+        esac
+    done < "/sys/bus/pci/devices/$f/resource"
+done
+
 # A graphics card: the driver has made a card of it, and a monitor.
 display=no
 for f in $FUNCS; do

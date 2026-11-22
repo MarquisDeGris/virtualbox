@@ -75,8 +75,12 @@ for d in /sys/bus/pci/devices/*; do
             say "$line"
             continue
         fi
+        if [ -e "$d/driver" ]; then
+            say "$line first=busy last=busy"
+            continue
+        fi
         last=$(printf '0x%x' $(( end - 3 )))
-        if [ -n "$wr" ] && [ "$wr" = "$ids" ] && [ ! -e "$d/driver" ]; then
+        if [ -n "$wr" ] && [ "$wr" = "$ids" ]; then
             devmem "$start" 32 0x48574241 2> /dev/null || line="$line write-first=failed"
             devmem "$last" 32 0x52454e44 2> /dev/null || line="$line write-last=failed"
         fi

@@ -55,8 +55,17 @@
 #      interrupt unless it is told otherwise; the part tells which interrupt
 #      it has by what the host has for it, and has Windows play sound.
 #
+#   2c. A device with four gigabytes of memory (SIM_PARTS has "barhost"):
+#      what a graphics card has and the drive does not.  The device is one
+#      whose memory is nothing but memory, kept in a file on the runner.  The
+#      scripts for a machine with real hardware (hw/linux/) run with it: the
+#      VM, the slot, and a guest which tells where it has that memory and
+#      writes to its first and its last bytes, which are then looked for in
+#      the file.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, win, winhost, mfwinhost, hdawinhost.  Without it: runner,simhost.
+# mfhost, barhost, win, winhost, mfwinhost, hdawinhost.  Without it:
+# runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
 # its serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox
@@ -115,6 +124,9 @@ finish()
         missing=1
     fi
     if has_part mfhost && ! grep -q '^mfhost/mfpassthrough: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part barhost && ! grep -q '^barhost/setup: the first script' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -420,6 +432,17 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -drive "file=$WORK/nvme2.img,if=none,id=nvm1,format=raw"
              -device "nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1")
     fi
+    if [ "$funcs" = bar ]; then
+        # A device whose memory is four gigabytes of a file, and which has no
+        # reset of its own.  Its class is "memory controller"; the script in
+        # the machine is told to take that for the device, and to run the
+        # scripts for real hardware instead of the phases with the drive.
+        port="$port,x-speed=2_5,x-width=1"
+        cmdline="$cmdline SIM_DEVCLASS=0x050000 SIM_BARTEST=1"
+        rm -f "$WORK/bar.img"
+        dev=(-object "memory-backend-file,id=shm0,share=on,mem-path=$WORK/bar.img,size=4G"
+             -device "ivshmem-plain,memdev=shm0,bus=rp1")
+    fi
     if [ "$funcs" = hda ]; then
         # A drive and a High Definition Audio controller as the two functions
         # of one device.  The sound goes nowhere, in the time sound takes.
@@ -477,6 +500,27 @@ if has_part mfhost; then
         elif grep -q '^mfhost/mfpassthrough: guest: writes to both drives: ok' "$STAGES"; then
             stage "what the guest wrote to the second drive is on that drive of the simulated host" FAILED
         fi
+    fi
+fi
+
+if has_part barhost; then
+    note "Part 2c: a device with four gigabytes of memory"
+    if part_simhost_prepare; then
+        run_simhost barhost none 600 5 3000 "" bar
+        # What the guest wrote to the first and to the last four bytes of the
+        # memory of the device, in the file which is that memory.
+        if [ -s "$WORK/bar.img" ]; then
+            first=$(od -A n -t x4 -N 4 "$WORK/bar.img" | tr -d ' ')
+            last=$(tail -c 4 "$WORK/bar.img" | od -A n -t x4 | tr -d ' ')
+            if [ "$first" = 48574241 ] && [ "$last" = 52454e44 ]; then
+                stage "what the guest wrote to the first and to the last bytes of the memory of the device is there" ok "$(stat -c %s "$WORK/bar.img") bytes"
+            else
+                stage "what the guest wrote to the first and to the last bytes of the memory of the device is there" FAILED "first $first, last $last"
+            fi
+        else
+            stage "what the guest wrote to the first and to the last bytes of the memory of the device is there" FAILED "there is no file"
+        fi
+        sudo rm -f "$WORK/bar.img"
     fi
 fi
 
