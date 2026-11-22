@@ -164,6 +164,7 @@ SIM_WORK=/tmp/sim \
 SIM_OUT=$OUT/$WHERE \
 SIM_STAGES=$STAGES \
 GUEST_RAW=$SIM_WS/sim-work/guest-quiet.raw \
+GUEST_RAW_NOMSI=$SIM_WS/sim-work/guest-nomsi.raw \
 SIM_WHERE=$WHERE \
 SIM_HOSTADDR=$addr \
 SIM_HOSTFUNCS="$funcs" \

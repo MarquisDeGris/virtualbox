@@ -29,7 +29,7 @@ kmsg()
 {
     kall=$(dmesg | wc -l)
     if [ "$kall" -gt "$kseen" ]; then
-        dmesg | sed -n "$((kseen + 1)),${kall}p" | grep -E '_OSC|PNP0A0|pciehp|nvme|AER|DPC|Timeout' \
+        dmesg | sed -n "$((kseen + 1)),${kall}p" | grep -E '_OSC|PNP0A0|pciehp|nvme|AER|DPC|Timeout|nobody cared|Disabling IRQ' \
             | cut -c1-200 | while read -r l; do say "k: $l"; done
         kseen=$kall
     fi

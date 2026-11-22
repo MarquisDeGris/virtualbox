@@ -1015,6 +1015,94 @@ phase_startempty()
 }
 
 
+# The device with a guest which does not use MSI or MSI-X (pci=nomsi on its
+# kernel command line): its driver gets the INTx interrupt of the drive.  Every
+# command to the drive ends with an interrupt, so a guest which has found the
+# drive, read eight megabytes from it and written to it has had dozens.  The
+# device passes each on as a pulse and asks the drive for the next.  Before it
+# did, the first interrupt of a function was the last one and the interrupt
+# line of the guest was left high: the kernel of a guest takes that for an
+# interrupt nobody cares about and switches the line off, and its driver waits
+# half a minute for every command.  A build without the change is told by a
+# message the device has since, and the phase is left out there.
+phase_intx()
+{
+    PHASE=intx
+    reset_vm
+    if [ ! -s "${GUEST_RAW_NOMSI:-}" ]; then
+        stage "a guest which does not use MSI boots with the device passed through" skipped "there is no disk for such a guest"
+        return
+    fi
+    if ! grep -a -q 'Asking the device for its next interrupt' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
+        stage "a guest which does not use MSI boots with the device passed through" skipped "this build passes the first INTx interrupt of a function on and no more"
+        return
+    fi
+    bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
+    # The disk whose kernel is told not to use MSI, in the place of the usual one.
+    if    ! run convertfromraw "$GUEST_RAW_NOMSI" "$SIM_WORK/guest-nomsi.vdi" --format VDI \
+       || ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest-nomsi.vdi"; then
+        stage "a guest which does not use MSI boots with the device passed through" FAILED "no disk"
+        run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+        return
+    fi
+    run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    if boot "a guest which does not use MSI boots with the device passed through"; then
+        local irq bad
+        guest_reads 1 "guest: reads from the drive, whose interrupt is INTx"
+        wait_serial 'GUEST: (IRQ|NODRIVE) 1' 60
+        serial_show 'GUEST: (pci: 0000:01|PRESENT|READ|IRQ|WROTE|WRITE-FAILED|NODRIVE)' 10
+        irq=$(serial_new | grep -a 'GUEST: IRQ 1 ' | head -n 1 | sed -e 's/^.*lines: *//' | cut -c1-70)
+        if serial_has 'GUEST: IRQ 1 .*IO-APIC[^|]*nvme' && ! serial_has 'GUEST: IRQ 1 .*PCI-MSI'; then
+            stage "guest: the interrupt of the drive is at the I/O APIC, not MSI or MSI-X" ok "$irq"
+        else
+            stage "guest: the interrupt of the drive is at the I/O APIC, not MSI or MSI-X" FAILED "$irq"
+        fi
+        if serial_has 'GUEST: WROTE 1'; then
+            stage "guest: writes to the drive" ok
+        else
+            stage "guest: writes to the drive" FAILED
+        fi
+
+        run controlvm "$VM" pause
+        sleep 3
+        run controlvm "$VM" resume
+        serial_mark
+        if wait_serial "GUEST: REREAD [0-9]+ md5=$EXPECT_MD5" 150; then
+            stage "guest: reads from the drive after pause and resume" ok
+        else
+            stage "guest: reads from the drive after pause and resume" FAILED
+            serial_show 'GUEST: REREAD' 5
+            diag
+        fi
+
+        # A reset of the VM is a reset of the device, and INTx is set up anew.
+        serial_mark
+        run controlvm "$VM" reset
+        if wait_serial 'GUEST: READY' "$BOOT_WAIT" 1; then
+            stage "the guest boots again after the VM was reset" ok
+            guest_reads 1 "guest: reads from the drive after the VM was reset"
+        else
+            stage "the guest boots again after the VM was reset" FAILED
+            diag
+        fi
+
+        # What the kernel of the guest says of an interrupt line nobody answers
+        # for, and of a command it had to look after because no interrupt came.
+        bad=$(tr -d '\r' < "$SERIAL" 2> /dev/null | grep -a -c -E 'nobody cared|Disabling IRQ|completion polled|I/O [^ ]+ .*timeout')
+        if [ "${bad:-0}" = 0 ]; then
+            stage "guest: no interrupt of the drive went missing, and none came which nobody answered for" ok
+        else
+            stage "guest: no interrupt of the drive went missing, and none came which nobody answered for" FAILED "$bad line(s) of its kernel"
+            tr -d '\r' < "$SERIAL" | grep -a -E 'nobody cared|Disabling IRQ|completion polled|timeout' | head -n 6 | cut -c1-200 | sed 's/^/    | /'
+        fi
+        grep -a -E 'VFIO#.*(next interrupt|passing on the interrupt)' "$VMDIR/Logs/VBox.log" | cut -c1-200 | head -n 4 | sed 's/^/    | /'
+    fi
+    end_phase
+    settle
+    run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+}
+
+
 # The phases below are for a device of the host with more than one function:
 # two NVMe controllers at one address, each with a drive of its own, which the
 # host has in one IOMMU group (run.sh, l1.sh).  That is what a graphics card
@@ -1478,6 +1566,7 @@ if setup; then
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;
             startempty)  phase_startempty ;;
+            intx)        phase_intx ;;
             mfpassthrough) phase_mfpassthrough ;;
             mfhotplug)     phase_mfhotplug ;;
             mfstartempty)  phase_mfstartempty ;;

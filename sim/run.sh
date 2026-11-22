@@ -305,6 +305,9 @@ UKIFY=$(command -v ukify || ls /usr/lib/systemd/ukify 2> /dev/null)
 # keeps quiet and guest-init passes on what matters.
 make_guest_disk guest "console=ttyS0,115200 ignore_loglevel rdinit=/init panic=30 pciehp.dyndbg=+p"
 make_guest_disk guest-quiet "console=ttyS0,115200 quiet loglevel=3 mitigations=off rdinit=/init panic=30 pciehp.dyndbg=+p"
+# A guest which does not use MSI or MSI-X: its drivers get the INTx interrupts
+# of their devices (the phase "intx").
+make_guest_disk guest-nomsi "console=ttyS0,115200 quiet loglevel=3 mitigations=off rdinit=/init panic=30 pci=nomsi"
 
 # The drive: random data, so that the guest can only tell the checksum of
 # what it has read from it.
@@ -429,7 +432,7 @@ if has_part simhost; then
     note "Part 2: VirtualBox in a virtual machine with an IOMMU and a PCIe device"
     if part_simhost_prepare; then
         # 12 minutes in run 224, 26 in run 231 with two VMs out of six slow.
-        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove 600 5 5400
+        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove,intx 600 5 5400
 
         if grep -q 'written by the guest' "$WORK/nvme.img"; then
             stage "what the guest wrote is on the drive of the simulated host" ok \
