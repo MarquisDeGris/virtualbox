@@ -1439,6 +1439,14 @@ the controller of the drive and starts the controller anew, so that
 Windows gives it a line interrupt, and reads from the drive again. That
 step has not run yet.
 
+**Run 277** (2026-11-22, `sim`, for finding out, `scratch/intx` @
+`6fe456f0`, 45 minutes, AMD EPYC 7763): the simulation with the third
+commit: 177 checks, none failed, the phase `intx` among them. With that
+`pci-passthrough-hotplug-v1` has the commit (`4add131b`, pushed on
+2026-11-22). The branches for 7.2 and 7.1 and those with the KVM
+backend wait for runs 278 and 279, the whole simulation on
+`scratch/intx-7.2-kvm` and on `scratch/intx-7.1-kvm`.
+
 Until then the branches of the merge requests are as they were, with
 the limitation as it was; the descriptions of the merge requests and
 HWTEST.md say what it means for a guest, see "What is missing" there.
@@ -2520,5 +2528,6 @@ virtual machine.
 | 274 | `scratch/intx-7.2` @ `601e7710` | tests, exploring | passed | 10 minutes, Intel Xeon 6975P-C. The INTx change on the 7.2 line: it builds, all tests pass |
 | 275 | `scratch/intx-7.1` @ `97f447c7` | tests, exploring | passed | 8 minutes, AMD EPYC 9V45. The INTx change on the 7.1 line: it builds, all tests pass |
 | 276 | `scratch/intx` @ `6fe456f0` | sanitize, exploring | passed | 13 minutes, Intel Xeon Platinum 8573C. The third commit, written after the change was read by a second reader: it builds, 60 tests pass with the sanitizers, no report |
+| 277 | `scratch/intx` @ `6fe456f0` | sim, exploring | passed | 45 minutes, AMD EPYC 7763. 177 checks, none failed, the phase `intx` with the third commit among them. `pci-passthrough-hotplug-v1` has the INTx change as one commit after this run (`4add131b`) |
 
 Run numbers are those GitHub shows for the `build` workflow.
