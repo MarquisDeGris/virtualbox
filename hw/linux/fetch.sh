@@ -43,8 +43,10 @@ if ! tar --zstd -xf "$work/$file" -C "$work" || [ ! -x "$work/bin/VBoxManage" ];
 fi
 stage "the build is unpacked" ok
 
-# What the build says of itself, without the list of packages.
-sed -n '1,7p' "$work/bin/BUILD-INFO.txt" 2> /dev/null | sed -e 's/^/build: /' | short 200 >> "$RESULT"
+# What the build says of itself, without the list of packages, and without
+# the place its tools were at on the machine which built it: that is a path
+# of that machine and says nothing of this one.
+sed -n '1,7p' "$work/bin/BUILD-INFO.txt" 2> /dev/null | sed -e 's/ --with-kbuild=[^ ]*//' -e 's/^/build: /' | short 200 >> "$RESULT"
 
 pkgs=$(sed -n '/^packages of Ubuntu/{n;p;}' "$work/bin/BUILD-INFO.txt" 2> /dev/null)
 missing=

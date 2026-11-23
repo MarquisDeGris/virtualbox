@@ -1994,8 +1994,19 @@ the drive takes 24 minutes that way, 17 without.
   tell of something that did not work, after it had passed with no
   such line earlier in the same part. Which lines is not known: the
   result had the first sixty lines of the log and not those. A test
-  writes the lines it counted into its result since, and run 310
-  repeats the part.
+  writes the lines it counted into its result since. Run 310 repeated
+  the part the same way, and the test passed both times with no such
+  line: what the twelve lines were is not explained, and the kernel of
+  the machine standing in for the host has nothing about the device
+  from that time but resets which were done.
+
+Run 310 also had the build which is fetched run, and found the check
+which keeps names out of a result at work in the wrong place: the
+build with 3D acceleration says of itself with which options it was
+configured, one of them a path of the runner which built it, and on a
+runner that path has the name of the user in it. The script which
+fetches leaves that option out of its result now, and so does a
+package when it is made.
 
 **Windows with 3D acceleration, with the sanitizers** (run 308, the
 same day, `scratch/intx-7.2-kvm` @ `26e4045a`, the parts on the runner
@@ -3220,5 +3231,6 @@ virtual machine.
 | 307 | `fix/event-queue-delete-type` @ `8e1ab048` | sim with the part on the runner, the whole tree built with the sanitizers, exploring | passed | 22 minutes, AMD EPYC 9V74. All 20 pass. The development line of upstream with the one correction to the event queue of Main: it builds with the sanitizers, its VMs run, and the address sanitizer has nothing to say where it had six reports without the correction (run 305) |
 | 308 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner and win, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 99 minutes, Intel Xeon 6975P-C; 58 of them the runner took to fetch the packages of a kernel. All 88 pass. Windows with 3D acceleration and everything else the part with Windows on the runner does, with the sanitizers: they wrote nothing |
 | 309 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner, simhost and barhost, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 61 minutes, AMD EPYC 7763. 135 pass, 2 fail. The parts with a passed through device with the sanitizers for the first time: the sanitizers wrote nothing. The two checks which fail are not about a finding of theirs, see "The parts with a passed through device, with the sanitizers" |
+| 310 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the part barhost, built the same way, exploring | passed | 41 minutes, Intel Xeon 6975P-C. 57 pass, 1 fails. The part of run 309 once more: the test which counted twelve lines there passes, twice, and the sanitizers wrote nothing. The check which fails is the one which keeps names out of a result, set off by a path of the runner in what the fetched build says of itself |
 
 Run numbers are those GitHub shows for the `build` workflow.

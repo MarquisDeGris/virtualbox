@@ -704,7 +704,8 @@ jobs:
             # AutoConfig.kmk has the command line of configure in a comment, with
             # quotes around it and "./" in front on the lines before the
             # development line.
-            echo "configure: $(grep -m 1 -E "^#   '?(\./)?configure(\.py)? " AutoConfig.kmk | sed -e "s/^#   '\{0,1\}\(\.\/\)\{0,1\}configure\(\.py\)\{0,1\} *//" -e "s/'\$//")"
+            # Without the option which names a place on the runner.
+            echo "configure: $(grep -m 1 -E "^#   '?(\./)?configure(\.py)? " AutoConfig.kmk | sed -e "s/^#   '\{0,1\}\(\.\/\)\{0,1\}configure\(\.py\)\{0,1\} *//" -e "s/'\$//" -e 's/ --with-kbuild=[^ ]*//')"
             echo "kvm backend of the build: $(grep -E '^VBOX_WITH_KVM' AutoConfig.kmk | tr -s ' ' | tr '\n' ' ')"
             echo "3D acceleration for VMs: $(if grep -q '^VBOX_WITH_VMSVGA3D := 1' LocalConfig.kmk; then echo "yes, it takes a graphics card with a Vulkan driver on the host"; else echo no; fi)"
             echo "It runs from its directory, without installation and without kernel modules of VirtualBox."
