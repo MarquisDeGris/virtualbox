@@ -290,6 +290,28 @@ if [ -n "${SIM_HWTEST:-}" ]; then
         else
             stage "the script which binds the device gives it back to the host" FAILED "its driver now: $cur, told to be: $(cat "/sys/bus/pci/devices/$addr/driver_override")"
         fi
+        # And all of it once more the way somebody at such a machine starts
+        # it: the one script which binds the device, goes through the
+        # checklist as root and runs the tests.
+        echo "==== $WHERE: hw/linux/tests.sh"
+        i=0
+        while pgrep -x VBoxSVC > /dev/null 2>&1 && [ "$i" -lt 30 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        kimg=$(ls "$SIM_WS/sim-work/kroot/boot/vmlinuz-$(uname -r)" "$SIM_WS/sim-work/vmlinuz-$(uname -r)" 2> /dev/null | head -n 1)
+        env HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out-all" HW_DEV="$addr" HW_KERNEL="$kimg" HW_GUEST_MB=1536 HW_BOOT_WAIT=600 \
+            HW_CPUS=1 HW_WARP="${SIM_WARP:-5}" HW_VBOX_BIN="$SIM_WS/out/linux.amd64/release/bin" \
+            sh "$SIM_DIR/../hw/linux/tests.sh" > "$OUT/$WHERE/hw-tests.log" 2>&1
+        rc=$?
+        cut -c1-220 "$OUT/$WHERE/hw-tests.log" | sed 's/^/    /'
+        if [ "$rc" = 0 ]; then
+            stage "the one script for all which takes root binds the device and has both tests go through their checks" ok \
+                  "$(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-a.txt" 2> /dev/null) and $(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-b.txt" 2> /dev/null) checks"
+        else
+            stage "the one script for all which takes root binds the device and has both tests go through their checks" FAILED \
+                  "$(tail -n 1 "$OUT/$WHERE/hw-tests.log" | cut -c1-160)"
+        fi
     fi
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40

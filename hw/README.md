@@ -43,11 +43,17 @@ by whoever is at the machine; the scripts are short enough to be read first.
     sh hw/linux/fetch.sh            # the VirtualBox the workflow built, into hw-work/bin
     sh hw/linux/prereq.sh           # which device it is going to be, and the checklist for it
     sh hw/linux/bind.sh             # shows what giving the device to vfio-pci takes
-    sudo sh hw/linux/bind.sh --do   # does it; --undo gives the device back to the host
+    sudo sh hw/linux/tests.sh       # does that, and runs the tests
+    sh hw/publish.sh
+
+`tests.sh` is all which takes root, one script after the other, each of
+which can also be run by itself:
+
+    sudo sh hw/linux/bind.sh --do   # the device goes to vfio-pci; --undo gives it back to the host
     sudo sh hw/linux/prereq.sh      # the checklist once more, as the tests will run
     sudo sh hw/linux/test-a.sh      # the first test: a VM without an operating system
     sudo sh hw/linux/test-b.sh      # the second: a small Linux guest with the driver of the device
-    sh hw/publish.sh
+    sudo HW_VGA=yes sh hw/linux/test-b.sh   # for a graphics card, see below
 
 - The device is the first graphics card which is not the one the firmware
   shows its screen on, with all its functions. `HW_DEV=<address>` in front
