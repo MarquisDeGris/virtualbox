@@ -30,6 +30,25 @@ else
     stage "the checklist finds nothing missing" FAILED "see the lines which start with MISSING"
 fi
 
+# What the second test puts its guest together with: told here, so that it
+# can be installed before the tests are started.  Some of it is where only
+# root looks for programs.
+there() { have "$1" || [ -x "/usr/sbin/$1" ] || [ -x "/sbin/$1" ]; }
+missing=
+for t in busybox cpio gzip zstd mkfs.vfat mmd mcopy sgdisk modprobe modinfo; do
+    there "$t" || missing="$missing $t"
+done
+have ukify || [ -e /usr/lib/systemd/ukify ] || missing="$missing ukify"
+[ -e /usr/lib/systemd/boot/efi/linuxx64.efi.stub ] || missing="$missing the-EFI-stub-of-systemd"
+if have busybox && ldd "$(command -v busybox)" 2> /dev/null | grep -q '=>'; then
+    missing="$missing busybox-as-a-static-program"
+fi
+if [ -z "$missing" ]; then
+    stage "what the second test needs to put its guest together is there" ok
+else
+    stage "what the second test needs to put its guest together is there" FAILED "missing:$missing; as root: apt-get install busybox-static cpio zstd dosfstools mtools gdisk kmod systemd-ukify systemd-boot-efi"
+fi
+
 privacy_check "$RESULT"
 give_back
 cat "$RESULT"

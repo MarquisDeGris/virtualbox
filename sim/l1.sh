@@ -251,6 +251,12 @@ hw_inventory()
     else
         stage "$what" FAILED "$(grep -m 1 -E 'FAILED|MISSING' "$OUT/$WHERE/hw-out/prereq.txt" 2> /dev/null | cut -c1-160)"
     fi
+    what="the script with the checklist finds what the second test puts its guest together with"
+    if grep -q '^what the second test needs to put its guest together is there: ok' "$OUT/$WHERE/hw-out/prereq.txt" 2> /dev/null; then
+        stage "$what" ok
+    else
+        stage "$what" FAILED "$(grep -m 1 '^what the second test needs' "$OUT/$WHERE/hw-out/prereq.txt" 2> /dev/null | cut -c1-200)"
+    fi
 }
 
 if [ -n "${SIM_HWTEST:-}" ]; then
