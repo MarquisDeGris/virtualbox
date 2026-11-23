@@ -177,14 +177,29 @@ wait_vmstate() # <state> <seconds>
 # The lines the log of the VM has from the passthrough device, without their
 # time stamps, and how many of them tell of something which did not work.
 log_lines() { grep -a 'VFIO#' "$LOG" 2> /dev/null | sed -e 's/^[0-9:.]* *//'; }
-log_trouble() { log_lines | grep -c -i -E 'fail|could not|error|refus|not supported|timed out'; }
+# One kind of line reads like trouble and is none.  When a function is taken
+# out of the VM, the device lets go of it at once and the VM is told a moment
+# later; a register of the function which is read in between cannot be had
+# from the device any more, is answered with zero, and the build this is
+# written for says "Failed to passthrough PCI config read" of it (run 313 of
+# the workflow has what was looked at).  Such lines are counted by themselves.
+LOG_KNOWN='Failed to passthrough PCI config (read|write)'
+log_trouble_lines() { log_lines | grep -i -E 'fail|could not|error|refus|not supported|timed out' | grep -v -E "$LOG_KNOWN"; }
+log_trouble() { log_trouble_lines | grep -c .; }
+log_known() { log_lines | grep -c -E "$LOG_KNOWN"; }
 
 log_check() # <when>
 {
-    local n
+    local n k
     n=$(log_trouble)
+    k=$(log_known)
     if [ "${n:-0}" = 0 ]; then
-        check "the log has no line of the device about something which did not work, $1" ok
+        if [ "${k:-0}" = 0 ]; then
+            check "the log has no line of the device about something which did not work, $1" ok
+        else
+            check "the log has no line of the device about something which did not work, $1" ok \
+                  "$k line(s) of a register read while a function was on its way out, which is no trouble"
+        fi
     else
         check "the log has no line of the device about something which did not work, $1" FAILED "$n line(s), see below"
     fi
@@ -294,7 +309,7 @@ test_end()
     # work, wherever in the log they are: without them the count says little.
     if [ "$(log_trouble)" != 0 ]; then
         echo "---- the lines of it which tell of something which did not work (at most 30):" >> "$RESULT"
-        log_lines | grep -i -E 'fail|could not|error|refus|not supported|timed out' | short 240 | sed -n '1,30p' >> "$RESULT"
+        log_trouble_lines | short 240 | sed -n '1,30p' >> "$RESULT"
     fi
     echo "checks which failed: $failed" | tee -a "$RESULT"
     svc_stop

@@ -2031,16 +2031,45 @@ and the test after it, started at once by the script which runs them
 all, talked to the service which was ending and did not get the VM of
 the test before cleared away ("Machine settings file ... already
 exists"). The simulation waits between two tests, which is why only
-the script for all of them met it. The twelve lines of run 309 came
-from the same place, a test started by that script right after
-another; whether this was behind them is not shown. A test waits for the service to be
+the script for all of them met it. The twelve lines of run 309 were
+something else, which run 313 found out, see below. A test waits for the service to be
 gone now, at its end and at its start, starts with a VirtualBox which
 knows of no VM, and ends only the service which was started from its
 own build, not one of a VirtualBox installed on the machine.
 
-Not done this way yet: the parts with the device of two functions and
-with the VGA adapter (run 313 is to tell), and Windows with a device
-in the slot.
+**The device of two functions and the VGA adapter, with the
+sanitizers** (run 313, the same day, `pci-passthrough-hotplug-7.2-kvm`
+@ `26e4045a`, 52 minutes, AMD EPYC 7763). The sanitizers wrote nothing
+in either part: two functions passed through, taken out and put in as
+one, a start without them, the host asking for both back, the reset of
+their bus; the VGA adapter with its ROM and its legacy ranges. 127
+checks pass and 1 fails, and that one explains the twelve lines of
+run 309, as the lines are in the result now: the first test counted
+three lines of the device at its end,
+
+    Failed to passthrough PCI config read at offset 0xc with VERR_SEEK_ON_DEVICE, returning 0
+
+and the same for 0xd and 0xf, 70 milliseconds after the first function
+was taken out of service in a removal by force. What they are: the
+device lets go of a function at once, its file descriptor taken by one
+which refuses everything, and has an EMT do the rest a moment later,
+which is to switch the decoding of the function off through the PCI
+bus. The bus reads registers of the function for that, three of them
+ones the device passes on to the hardware, and the stand-in refuses
+those reads. Nothing which is not there is reached and the reader is
+given zero; the line says "Failed". It takes a function which has its
+decoding on at that moment, as the firmware of a VM without an
+operating system has it for a while after the start, longer where all
+is slower, which is why the sanitizers brought it out.
+
+Two things follow. The test counts lines of this kind by themselves
+and not as something which did not work. And the device should answer
+such a read from what it knows of the function instead of asking a
+device it has let go of, and say nothing of it: a change to the device
+on all its branches, with a test, which is not written yet (item 8
+under "Next").
+
+Not done this way yet: Windows with a device in the slot.
 
 ### The issue with upstream, 2026-11-23
 
@@ -2874,6 +2903,15 @@ harness since WP5, saved states since the fourth part of WP6.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
    device coming and going, a device pulled without notice and a device
    error in the simulation.
+8. A register of a function which went out of service a moment ago: the
+   device asks the stand-in for the device file for the registers it
+   passes on, is refused, answers zero and writes a line which says
+   "Failed" (run 313, see "VMs with the sanitizers"). It is to answer
+   from the configuration space it keeps for the function and to write
+   no line, for reads and for writes, with a test in the testcase which
+   takes a function out of service with its decoding on. Nothing is
+   reached that should not be; it is the answer and the line which are
+   wrong.
 
 ## Decisions
 
@@ -3255,6 +3293,7 @@ virtual machine.
 | 310 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the part barhost, built the same way, exploring | passed | 41 minutes, Intel Xeon 6975P-C. 57 pass, 1 fails. The part of run 309 once more: the test which counted twelve lines there passes, twice, and the sanitizers wrote nothing. The check which fails is the one which keeps names out of a result, set off by a path of the runner in what the fetched build says of itself |
 | 311 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 86 minutes, Intel Xeon 6975P-C; 53 of them the runner took to fetch the packages of a kernel, as in run 308. All 50 pass. The build which is fetched is the published one with 3D acceleration: it is fetched, is the one listed, and the first script for a machine with real hardware passes with it |
 | 312 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part vgahost, exploring | passed | 24 minutes, Intel Xeon 6975P-C. All 47 pass. The first run with the workflow keeping the packages of the kernel: none were kept yet, they were fetched in 5 seconds and are kept now |
+| 313 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner, mfhost and vgahost, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 52 minutes, AMD EPYC 7763. 127 pass, 1 fails. The device of two functions and the VGA adapter with the sanitizers: they wrote nothing. The check which fails counted three lines of the device which say "Failed" and are the answer to a register read while a function was on its way out; they explain the twelve of run 309, see "The device of two functions and the VGA adapter, with the sanitizers" |
 | 314 | `pci-passthrough-hotplug-v1` @ `4add131b` | sim with the parts runner, simhost and barhost, the whole tree built with the sanitizers, exploring | passed | 46 minutes, AMD EPYC 9V45. 130 pass, 1 fails. The development line with the sanitizers: they wrote nothing. The check which fails found a defect of the scripts for a machine with real hardware: a test started before the service of the test before it was gone, see "The development line, with the sanitizers" |
 
 Run numbers are those GitHub shows for the `build` workflow.
