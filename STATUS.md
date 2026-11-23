@@ -1790,6 +1790,11 @@ hardware. It is the paths of the passthrough device for a ROM, for
 video memory which a driver maps, and for the legacy ranges, each for
 the first time with a guest.
 
+Runs 292 to 295 are of the branch for 7.2 with the KVM backend of
+Cyberus Technology, which is the build that is published for machines
+with real hardware. Run 296 is the development line with the same two
+parts, and all its 58 checks pass as well.
+
 **Every script once** (run 295). What a machine with real hardware is
 to run had in part run nowhere. The simulation runs all of it now,
 with one of the two parts above:
@@ -2974,5 +2979,6 @@ virtual machine.
 | 293 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 40 pass. Both scripts for a machine with real hardware go through their checks with the device of four gigabytes, 15 and 12, and what the guest wrote to both ends of the memory is in the file |
 | 294 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts barhost and vgahost, exploring | passed | 24 minutes, Intel Xeon Platinum 8573C. All 49 pass. The device of four gigabytes has a ROM, which the script binding the device and the guest read as the file is (13 checks of the second script). The new part with the VGA adapter of QEMU as the device: the first script 15, the second 16, the second with the legacy VGA ranges given to the guest 20. See "The ROM of the device" and "A graphics card, as far as the simulation has one" |
 | 295 | `scratch/intx-7.2-kvm` @ `26e4045a` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass. The other scripts for a machine with real hardware run for the first time: the build as it is published is fetched and is the one listed, and the first script passes with it; the inventory, the checklist, and the publishing of a result to a repository made for the run. See "Every script once" |
+| 296 | `pci-passthrough-hotplug-v1` @ `4add131b` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass: the development line, with its own KVM backend, does with the device of four gigabytes, its ROM and the VGA adapter what the branch for 7.2 does. The build which is fetched there is the published one, of the branch for 7.2 |
 
 Run numbers are those GitHub shows for the `build` workflow.
