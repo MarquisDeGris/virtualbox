@@ -380,7 +380,8 @@ if [ "$n1" -gt "$n0" ] && [ "$(vmstate)" = running ]; then
 else
     check "the guest keeps running with the device" FAILED "the VM is in state '$(vmstate)', the guest said it was alive $n1 times"
 fi
-bad=$(said | grep -c -i -E '^HW: k: .*(nobody cared|Disabling IRQ|timed? ?out|fail|error)')
+# A line every start of this kernel has is none about the device.
+bad=$(said | grep -i -E '^HW: k: .*(nobody cared|Disabling IRQ|timed? ?out|fail|error)' | grep -v -c 'Correctable Errors collector initialized')
 if [ "${bad:-0}" = 0 ]; then
     check "guest: its kernel tells of no trouble about the device" ok
 else

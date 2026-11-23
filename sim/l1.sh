@@ -175,10 +175,10 @@ fi
 # The scripts for a machine with real hardware, one after the other, with the
 # device of this machine in the place of a graphics card.  HW_CMDLINE is for
 # the guest of the second one.
-hw_script() # <a|b> <what the stage calls it> <name of its result, without .txt> [<VARIABLE=value>...]
+hw_script() # <a|b> <what the stage calls it> <its result, under the directory of this machine in the results> <name of its log> [<VARIABLE=value>...]
 {
-    local t=$1 name=$2 res=$3 rc kimg i=0
-    shift 3
+    local t=$1 name=$2 res=$3 log=$4 rc kimg i=0
+    shift 4
     [ -f "$SIM_DIR/../hw/linux/test-$t.sh" ] || return 0
     kimg=$(ls "$SIM_WS/sim-work/kroot/boot/vmlinuz-$(uname -r)" "$SIM_WS/sim-work/vmlinuz-$(uname -r)" 2> /dev/null | head -n 1)
     mkdir -p "$OUT/$WHERE/hw-out"
@@ -190,28 +190,66 @@ hw_script() # <a|b> <what the stage calls it> <name of its result, without .txt>
     env HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV="$addr" HW_KERNEL="$kimg" HW_GUEST_MB=1536 HW_BOOT_WAIT=600 \
         HW_CPUS=1 HW_WARP="${SIM_WARP:-5}" \
         HW_VBOX_BIN="$SIM_WS/out/linux.amd64/release/bin" "$@" \
-        sh "$SIM_DIR/../hw/linux/test-$t.sh" > "$OUT/$WHERE/hw-$res.log" 2>&1
+        sh "$SIM_DIR/../hw/linux/test-$t.sh" > "$OUT/$WHERE/$log.log" 2>&1
     rc=$?
-    cut -c1-220 "$OUT/$WHERE/hw-$res.log" | sed 's/^/    /'
+    cut -c1-220 "$OUT/$WHERE/$log.log" | sed 's/^/    /'
     if [ "$rc" = 0 ]; then
         stage "$name goes through its checks with the device" ok \
-              "$(grep -c ': ok' "$OUT/$WHERE/hw-out/$res.txt" 2> /dev/null) checks"
+              "$(grep -c ': ok' "$OUT/$WHERE/$res" 2> /dev/null) checks"
     else
         stage "$name goes through its checks with the device" FAILED \
-              "$(grep -c ': FAILED' "$OUT/$WHERE/hw-out/$res.txt" 2> /dev/null) of its checks failed, or it did not get to them"
+              "$(grep -c ': FAILED' "$OUT/$WHERE/$res" 2> /dev/null) of its checks failed, or it did not get to them"
     fi
 }
 
 hw_scripts()
 {
-    hw_script a "the first script for a machine with real hardware" test-a
-    hw_script b "the second script for a machine with real hardware" test-b
+    hw_script a "the first script for a machine with real hardware" hw-out/test-a.txt hw-test-a
+    hw_script b "the second script for a machine with real hardware" hw-out/test-b.txt hw-test-b
     if [ "${SIM_HWTEST:-}" = vga ]; then
         # Once more with the legacy VGA ranges of the card given to the
         # guest, which writes to registers and memory there: nobody looks at
         # this card.
-        hw_script b "the second script, with a VM which is given the legacy VGA ranges of the card," test-b-vga \
+        hw_script b "the second script, with a VM which is given the legacy VGA ranges of the card," hw-out/test-b-vga.txt hw-test-b-vga \
                   HW_VGA=yes HW_CMDLINE=hwvgawrite=1
+    fi
+    if [ -n "${SIM_HWBIN:-}" ] && [ -x "$SIM_HWBIN/VBoxManage" ]; then
+        # The first script once more, with the build as it is published for
+        # machines with real hardware and as the runner fetched it.
+        hw_script a "the first script, with the build as it is published," hw-out-published/test-a.txt hw-test-a-published \
+                  HW_OUT="$OUT/$WHERE/hw-out-published" HW_VBOX_BIN="$SIM_HWBIN"
+    fi
+}
+
+# The inventory and the checklist for the device, as the scripts for a machine
+# with real hardware write them.
+hw_inventory()
+{
+    local what
+    mkdir -p "$OUT/$WHERE/hw-out"
+    echo "==== $WHERE: hw/run.sh"
+    HW_OUT="$OUT/$WHERE/hw-out" sh "$SIM_DIR/../hw/run.sh" 2>&1 | cut -c1-220 | sed 's/^/    /'
+    what="the inventory script tells of the IOMMU of this machine"
+    if grep -q '^iommu-groups: [1-9]' "$OUT/$WHERE/hw-out/inventory.txt" 2> /dev/null; then
+        stage "$what" ok "$(grep '^iommu-groups: ' "$OUT/$WHERE/hw-out/inventory.txt")"
+    else
+        stage "$what" FAILED "$(grep '^iommu-groups: ' "$OUT/$WHERE/hw-out/inventory.txt" 2> /dev/null)"
+    fi
+    if [ "${SIM_HWTEST:-}" = vga ]; then
+        what="the inventory script tells of the graphics card"
+        if grep -q "^pci-$addr: class 0x03" "$OUT/$WHERE/hw-out/inventory.txt" 2> /dev/null; then
+            stage "$what" ok "$(grep "^pci-$addr: " "$OUT/$WHERE/hw-out/inventory.txt" | cut -c1-160)"
+        else
+            stage "$what" FAILED
+        fi
+    fi
+    echo "==== $WHERE: hw/linux/prereq.sh"
+    what="the script with the checklist finds nothing missing for the device"
+    if HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV="$addr" sh "$SIM_DIR/../hw/linux/prereq.sh" > "$OUT/$WHERE/hw-prereq.log" 2>&1 \
+       && grep -q '^the checklist finds nothing missing: ok' "$OUT/$WHERE/hw-out/prereq.txt" 2> /dev/null; then
+        stage "$what" ok
+    else
+        stage "$what" FAILED "$(grep -m 1 -E 'FAILED|MISSING' "$OUT/$WHERE/hw-out/prereq.txt" 2> /dev/null | cut -c1-160)"
     fi
 }
 
@@ -238,6 +276,7 @@ if [ -n "${SIM_HWTEST:-}" ]; then
             stage "the script which binds the device read its ROM as the file of the ROM is" FAILED "the file: ${SIM_ROM%%:*} ${SIM_ROM##*:}; kept: ${seen:-nothing}"
         fi
     fi
+    hw_inventory
     hw_scripts
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40

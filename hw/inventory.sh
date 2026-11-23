@@ -11,7 +11,8 @@
 # See hw/README.md.
 VERSION=1
 here=$(cd "$(dirname "$0")" && pwd)
-out="$here/../hw-out"
+# A test of the scripts themselves puts the result elsewhere.
+out=${HW_OUT:-$here/../hw-out}
 mkdir -p "$out" || exit 1
 f="$out/inventory.txt"
 
@@ -108,6 +109,7 @@ first() { sed -n '1p' "$1" 2> /dev/null; }
 # Nothing which names this machine or its user may be in there.
 for word in "$(id -un 2> /dev/null)" "$(hostname 2> /dev/null)"; do
     [ ${#word} -ge 3 ] || continue
+    [ "$word" = root ] && continue
     if grep -q -i -w -F -- "$word" "$f"; then
         echo "The result has the name of this machine or of its user in it and was removed: $f" >&2
         rm -f "$f"

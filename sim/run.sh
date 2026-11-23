@@ -468,6 +468,9 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         # scripts for real hardware instead of the phases with the drive.
         port="$port,x-speed=2_5,x-width=1"
         cmdline="$cmdline SIM_DEVCLASS=0x050000 SIM_HWTEST=bar"
+        # The first script runs once more there, with the build as it was
+        # fetched, if it was.
+        [ -n "$HWBIN" ] && cmdline="$cmdline SIM_HWBIN=$HWBIN"
         rm -f "$WORK/bar.img"
         # It has a ROM as well, as a graphics card has one with its firmware
         # in it: the guest is to read the bytes which are in the file.
@@ -544,6 +547,69 @@ if has_part mfhost; then
             stage "what the guest wrote to the second drive is on that drive of the simulated host" FAILED
         fi
     fi
+fi
+
+# The scripts for a machine with real hardware which need no device, on the
+# runner itself: the one which fetches the build, the inventory, and the one
+# which publishes results.  That one pushes to a repository which is made
+# here for it and is gone with the runner.  HWBIN is where the fetched build
+# is, for the part which runs a test with it.
+HWBIN=
+hw_runner_scripts()
+{
+    local top="$WORK/hwtop" remote="$WORK/hwremote.git" seed="$WORK/hwseed" rc what
+    note "The scripts for a machine with real hardware which need no device"
+    mkdir -p "$OUT/hw-runner"
+
+    what="the script which fetches the build gets the one which is published, and its VBoxManage runs"
+    HW_WORK="$WORK/hw-fetch" HW_OUT="$OUT/hw-runner" sh "$SIM/../hw/linux/fetch.sh" 2>&1 | cut -c1-220 | sed 's/^/    /'
+    if grep -q '^VBoxManage of the build runs: ok' "$OUT/hw-runner/fetch.txt" 2> /dev/null; then
+        stage "$what" ok "$(sed -n 's/^the build is fetched and is the one listed: ok (\(.*\))$/\1/p' "$OUT/hw-runner/fetch.txt")"
+        HWBIN="$WORK/hw-fetch/bin"
+    else
+        stage "$what" FAILED "$(grep -m 1 'FAILED' "$OUT/hw-runner/fetch.txt" 2> /dev/null | cut -c1-160)"
+    fi
+
+    # A copy of the scripts as a clone of its own, as they are on such a
+    # machine, with a repository of this run as its origin, which has the
+    # branch the results go to.
+    rm -rf "$top" "$remote" "$seed"
+    mkdir -p "$top" "$seed"
+    cp -r "$SIM/../hw" "$SIM/../tools" "$top/"
+    git init -q --bare "$remote"
+    git init -q "$seed"
+    echo "results" > "$seed/README.md"
+    git -C "$seed" add README.md
+    git -C "$seed" -c user.name=popolupo -c user.email=4758069+MarquisDeGris@users.noreply.github.com \
+        commit -q -m "the branch for results"
+    git -C "$seed" push -q "$remote" HEAD:refs/heads/hw-results
+    git init -q "$top"
+    git -C "$top" remote add origin "file://$remote"
+
+    what="the inventory script writes its inventory"
+    sh "$top/hw/run.sh" > "$OUT/hw-runner/run.log" 2>&1
+    rc=$?
+    if [ "$rc" = 0 ] && [ -s "$top/hw-out/inventory.txt" ]; then
+        stage "$what" ok "$(wc -l < "$top/hw-out/inventory.txt") lines"
+        cp "$top/hw-out/inventory.txt" "$OUT/hw-runner/inventory.txt"
+    else
+        stage "$what" FAILED "$(tail -n 1 "$OUT/hw-runner/run.log" | cut -c1-160)"
+    fi
+
+    what="the script which publishes results puts them on the branch for them, as popolupo"
+    sh "$top/hw/publish.sh" > "$OUT/hw-runner/publish.log" 2>&1
+    rc=$?
+    cut -c1-220 "$OUT/hw-runner/publish.log" | sed 's/^/    /'
+    if    [ "$rc" = 0 ] \
+       && git --git-dir="$remote" ls-tree -r --name-only hw-results 2> /dev/null | grep -q '^results/[0-9-]*-pc1/inventory.txt$' \
+       && [ "$(git --git-dir="$remote" log -1 --format=%an hw-results 2> /dev/null)" = popolupo ]; then
+        stage "$what" ok "$(git --git-dir="$remote" ls-tree -r --name-only hw-results | grep '^results/' | tr '\n' ' ')"
+    else
+        stage "$what" FAILED "$(tail -n 1 "$OUT/hw-runner/publish.log" | cut -c1-160)"
+    fi
+}
+if has_part barhost || has_part vgahost; then
+    hw_runner_scripts
 fi
 
 if has_part barhost; then
