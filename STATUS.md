@@ -1837,6 +1837,36 @@ from another machine, which takes the right to push there; the command
 for an assistant. No result has arrived on `hw-results` (2026-11-23,
 05:45 UTC).
 
+### The issue with upstream, 2026-11-23
+
+The work is made known to upstream since 2026-11-23: issue 999 in the
+tracker of `VirtualBox/virtualbox`,
+https://github.com/VirtualBox/virtualbox/issues/999, a feature request
+in the form upstream asks for. It says what the passthrough device of
+`main` cannot do with a device which comes and goes, that there are
+patches for it in this fork and where, what they have, how they were
+tried and what was not tried, which is everything on hardware. It lists
+seven defects of `main` which were found on the way and do not depend
+on the rest, each with the commit which has its description. It says
+that this is no pull request because the work is done under a pseudonym
+and no contributor agreement can be signed that way, and that upstream
+is welcome to use any of it.
+
+It promises one thing: what the first test on hardware shows is added
+there.
+
+Before it was filed, all the fork has in public was searched for names
+which are not to be public: the history of every branch with all its
+changes, who the commits are by, the names of the branches, the texts
+of the merge requests and releases, and the profile of the account.
+Nothing was found. The search is a script which is kept with the tools
+of this work; it takes the names from the machine it runs on, hands
+them to the programs which search as a file, and prints counts.
+
+Whoever answers there is answered there. What may be a way for a guest
+to harm a host is not written there or anywhere else in public, see
+`SECURITY.md` of upstream.
+
 ### Requests from the tracker of upstream, from 2026-11-22
 
 Asked for on 2026-11-22: to take up what users ask for in the public
@@ -2756,6 +2786,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-23 | Every script which is to run on a machine with real hardware runs in the simulation, the fetching of the published build and the publishing of results too, the latter to a repository made for the run | The build which is fetched is the one such a machine gets, so it is the one the first test has to have passed with. Publishing is the one step which leaves the machine and has to be seen to send what it says it sends |
 | 2026-11-23 | The parts with the device of four gigabytes and with the VGA adapter belong to every simulation from now on (`sim` and `allsim`) | Together they take ten minutes, and they are the only checks of large memory, of the ROM and of the legacy VGA ranges with a guest |
 | 2026-11-23 | What takes root on a machine with real hardware is one command, `hw/linux/tests.sh` | Each command somebody has to type there can be mistyped or left out, and the person is not to have to know which comes next. The scripts it runs stay as they are and can be read and run one by one |
+| 2026-11-23 | The issue which makes the work known to upstream is filed now and not after the test on hardware | Whom this work is for said yes to it and wants the code to be used. The defects of `main` it lists are of use to upstream whatever becomes of the rest, and the test on hardware has no date. That nothing ran on hardware is said there in so many words, with the promise to add the result |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
