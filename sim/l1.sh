@@ -208,6 +208,8 @@ hw_script() # <a|b> <what the stage calls it> <its result, under the directory o
         sh "$SIM_DIR/../hw/linux/test-$t.sh" > "$OUT/$WHERE/$log.log" 2>&1
     rc=$?
     cut -c1-220 "$OUT/$WHERE/$log.log" | sed 's/^/    /'
+    # The log of the VM of the script, which the next script removes.
+    cp -f /tmp/hw-work/vms/hwtest/Logs/VBox.log "$OUT/$WHERE/$log-VBox.log" 2> /dev/null
     if [ "$rc" = 0 ]; then
         stage "$name goes through its checks with the device" ok \
               "$(grep -c ': ok' "$OUT/$WHERE/$res" 2> /dev/null) checks"
@@ -232,7 +234,7 @@ hw_scripts()
         # The first script once more, with the build as it is published for
         # machines with real hardware and as the runner fetched it.
         hw_script a "the first script, with the build as it is published," hw-out-published/test-a.txt hw-test-a-published \
-                  HW_OUT="$OUT/$WHERE/hw-out-published" HW_VBOX_BIN="$SIM_HWBIN"
+                  HW_OUT="$OUT/$WHERE/hw-out-published" HW_VBOX_BIN="$SIM_HWBIN" LD_LIBRARY_PATH=
     fi
 }
 
@@ -326,6 +328,9 @@ if [ -n "${SIM_HWTEST:-}" ]; then
             sh "$SIM_DIR/../hw/linux/tests.sh" > "$OUT/$WHERE/hw-tests.log" 2>&1
         rc=$?
         cut -c1-220 "$OUT/$WHERE/hw-tests.log" | sed 's/^/    /'
+        cp -f /tmp/hw-work/vms/hwtest/Logs/VBox.log "$OUT/$WHERE/hw-tests-VBox.log" 2> /dev/null
+        # What the first test of it found in the log of its VM, if it did.
+        sed -n '/^---- the lines of it which tell/,$p' "$OUT/$WHERE/hw-out-all/test-a.txt" 2> /dev/null | cut -c1-240 | sed 's/^/    | /'
         if [ "$rc" = 0 ]; then
             stage "the one script for all which takes root binds the device and has both tests go through their checks" ok \
                   "$(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-a.txt" 2> /dev/null) and $(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-b.txt" 2> /dev/null) checks"

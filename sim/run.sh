@@ -656,7 +656,10 @@ hw_runner_scripts()
     mkdir -p "$OUT/hw-runner"
 
     what="the script which fetches the build gets the one which is published, and its VBoxManage runs"
-    HW_WORK="$WORK/hw-fetch" HW_OUT="$OUT/hw-runner" sh "$SIM/../hw/linux/fetch.sh" 2>&1 | cut -c1-220 | sed 's/^/    /'
+    # The build which is fetched is not one with the sanitizers, whatever the
+    # build of this run is: it is not to find the libraries of this run.
+    env -u LD_LIBRARY_PATH -u ASAN_OPTIONS -u UBSAN_OPTIONS HW_WORK="$WORK/hw-fetch" HW_OUT="$OUT/hw-runner" \
+        sh "$SIM/../hw/linux/fetch.sh" 2>&1 | cut -c1-220 | sed 's/^/    /'
     if grep -q '^VBoxManage of the build runs: ok' "$OUT/hw-runner/fetch.txt" 2> /dev/null; then
         stage "$what" ok "$(sed -n 's/^the build is fetched and is the one listed: ok (\(.*\))$/\1/p' "$OUT/hw-runner/fetch.txt")"
         HWBIN="$WORK/hw-fetch/bin"

@@ -265,6 +265,12 @@ test_end()
     esac
     echo "---- what the log of the VM has from the device (the first 60 lines):" >> "$RESULT"
     log_lines | short 200 | sed -n '1,60p' >> "$RESULT"
+    # The lines a check above counted as telling of something which did not
+    # work, wherever in the log they are: without them the count says little.
+    if [ "$(log_trouble)" != 0 ]; then
+        echo "---- the lines of it which tell of something which did not work (at most 30):" >> "$RESULT"
+        log_lines | grep -i -E 'fail|could not|error|refus|not supported|timed out' | short 240 | sed -n '1,30p' >> "$RESULT"
+    fi
     echo "checks which failed: $failed" | tee -a "$RESULT"
     pkill -x VBoxSVC 2> /dev/null
     privacy_check "$RESULT"
