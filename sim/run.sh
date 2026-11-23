@@ -229,9 +229,24 @@ get_generic_kernel()
     dpkg --compare-versions "${KVER%%-*}" ge 6.12 || { echo "older than 6.12"; return 1; }
     pkgs="$img linux-modules-$KVER"
     apt-cache show "linux-modules-extra-$KVER" > /dev/null 2>&1 && pkgs="$pkgs linux-modules-extra-$KVER"
-    mkdir -p "$WORK/kdeb" "$WORK/kroot"
-    ( cd "$WORK/kdeb" && apt-get download $pkgs ) > "$WORK/kernel-download.log" 2>&1 \
-        || { tail -n 5 "$WORK/kernel-download.log"; return 1; }
+    mkdir -p "$WORK/kdeb" "$WORK/kroot" "$WS/kdeb-cache"
+    # The packages as an earlier run fetched them, where the workflow has
+    # kept them (it keeps them by the version of the kernel), or fetched now
+    # and left for the workflow to keep.  Fetching gets 25 minutes.
+    local have=yes t0
+    for p in $pkgs; do
+        ls "$WS/kdeb-cache/${p}_"*.deb > /dev/null 2>&1 || have=no
+    done
+    if [ "$have" = yes ]; then
+        cp "$WS"/kdeb-cache/*.deb "$WORK/kdeb/" || return 1
+        echo "the packages of the kernel are those an earlier run fetched"
+    else
+        t0=$(date +%s)
+        ( cd "$WORK/kdeb" && timeout 1500 apt-get download $pkgs ) > "$WORK/kernel-download.log" 2>&1 \
+            || { tail -n 5 "$WORK/kernel-download.log"; return 1; }
+        echo "the packages of the kernel were fetched in $(( $(date +%s) - t0 )) s"
+        cp "$WORK"/kdeb/*.deb "$WS/kdeb-cache/" 2> /dev/null
+    fi
     for p in "$WORK"/kdeb/*.deb; do
         dpkg-deb -x "$p" "$WORK/kroot" || return 1
     done

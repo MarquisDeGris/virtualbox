@@ -744,6 +744,30 @@ jobs:
             tools
             hw
 
+      # The simulation runs the generic kernel of the distribution, whose
+      # packages it fetches.  Fetching them took seconds in most runs and
+      # close to an hour in two (runs 308 and 311), so they are kept from one
+      # run to the next, by the version of the kernel.
+      - name: Which kernel the simulation runs
+        id: kpkg
+        if: inputs.flavor == 'sim' || inputs.flavor == 'winsim' || inputs.flavor == 'allsim'
+        run: |
+          img=
+          for meta in linux-image-generic-hwe-24.04 linux-image-generic; do
+            img=$(apt-cache depends "$meta" 2> /dev/null \
+                  | awk '$1 == "Depends:" && $2 ~ /^linux-image-[0-9].*-generic$/ { print $2; exit }')
+            [ -n "$img" ] && break
+          done
+          echo "the generic kernel of the distribution: ${img#linux-image-}"
+          echo "kver=${img#linux-image-}" >> "$GITHUB_OUTPUT"
+
+      - name: Packages of that kernel from an earlier run
+        if: (inputs.flavor == 'sim' || inputs.flavor == 'winsim' || inputs.flavor == 'allsim') && steps.kpkg.outputs.kver != ''
+        uses: actions/cache@v4
+        with:
+          path: kdeb-cache
+          key: kdeb-v1-${{ steps.kpkg.outputs.kver }}
+
       - name: Simulation
         if: inputs.flavor == 'sim' || inputs.flavor == 'winsim' || inputs.flavor == 'allsim'
         # Everything in the script has a time limit of its own.  With sim and
