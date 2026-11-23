@@ -3386,8 +3386,7 @@ static int pciVfioConfigReadFromDev(PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32
     {
         /* The function going out of service right now makes this fail too. */
         int rc = pciVfioConfigPassthroughRead(pFun, uAddress, cb, pu32Value);
-        if (RT_SUCCESS(rc) || !pFun->fGone)
-            return rc;
+        return rc;
     }
 
     *pu32Value = cb == sizeof(uint8_t) ? PDMPciDevGetByte(pPciDev, uAddress) : PDMPciDevGetWord(pPciDev, uAddress);
