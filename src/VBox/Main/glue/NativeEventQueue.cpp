@@ -112,10 +112,12 @@ void *PR_CALLBACK com::NativeEventQueue::plEventHandler(PLEvent *self)
 /* static */
 void PR_CALLBACK com::NativeEventQueue::plEventDestructor(PLEvent *self)
 {
-    NativeEvent *ev = ((MyPLEvent *)self)->event;
+    MyPLEvent *pMyEvent = (MyPLEvent *)self;
+    NativeEvent *ev = pMyEvent->event;
     if (ev)
         delete ev;
-    delete self;
+    /* The event is freed as the type postEvent() allocated it as. */
+    delete pMyEvent;
 }
 
 #endif // VBOX_WITH_XPCOM
