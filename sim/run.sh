@@ -508,6 +508,16 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     cmdline="$cmdline SIM_DIR=$SIM SIM_WS=$WS SIM_MD5=$MD5 SIM_WHERE=$where SIM_PHASES=$phases SIM_BOOT_WAIT=$bootwait"
     [ -n "$warp" ] && cmdline="$cmdline SIM_WARP=$warp"
     [ "${8:-}" = noreset ] && cmdline="$cmdline SIM_NORESET=1"
+    # A build with the sanitizers: the script in the machine is told to set
+    # them up, with the one kind of finding let pass or not as on the runner,
+    # and everything gets twice the time.
+    if [ -n "$san_asan" ]; then
+        case "$san_asan" in
+            *new_delete_type_mismatch=0*) cmdline="$cmdline SIM_SAN=mask" ;;
+            *)                            cmdline="$cmdline SIM_SAN=all" ;;
+        esac
+        limit=$(( limit * 2 ))
+    fi
     local mem=8G cpu=host
     local -a extra=()
     if [ -n "$windisk" ]; then
@@ -599,6 +609,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     if ! grep -q "^$where/setup: KVM is there" "$STAGES"; then
         stage "$where: the virtual machine standing in for the host ran its script" FAILED
     fi
+    sanitizers_say "in the machine standing in for a host ($where)"
 }
 
 if has_part simhost; then

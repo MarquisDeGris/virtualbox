@@ -21,6 +21,21 @@ WHERE=${SIM_WHERE:-simhost}
 PHASES=$(echo "${SIM_PHASES:-plain,passthrough}" | tr ',' ' ')
 OUT=/mnt
 STAGES=$OUT/stages.txt
+# A build with the sanitizers (SIM_SAN on the command line of the kernel):
+# where they write, which is a directory of the runner, where the programs
+# find the libraries they load while they run, and more patience with a
+# guest, as everything takes longer.  "mask" lets one kind of finding pass
+# which every program of a tree without a certain correction has, see run.sh.
+if [ -n "${SIM_SAN:-}" ]; then
+    mkdir -p "$OUT/sanitizers"
+    ASAN_OPTIONS="detect_leaks=0:log_path=$OUT/sanitizers/asan"
+    [ "$SIM_SAN" = mask ] && ASAN_OPTIONS="$ASAN_OPTIONS:new_delete_type_mismatch=0"
+    UBSAN_OPTIONS="print_stacktrace=1:log_path=$OUT/sanitizers/ubsan"
+    LD_LIBRARY_PATH="$SIM_WS/out/linux.amd64/release/bin"
+    export ASAN_OPTIONS UBSAN_OPTIONS LD_LIBRARY_PATH
+    SIM_PATIENCE=$(( ${SIM_PATIENCE:-3} * 2 ))
+    export SIM_PATIENCE
+fi
 
 stage() # <what> <ok|FAILED|skipped> [<note>]
 {

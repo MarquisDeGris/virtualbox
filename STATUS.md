@@ -1961,14 +1961,19 @@ Intel Xeon 6975P-C):
   address sanitizer has nothing to say.
 
 The finding is put right on a branch of its own,
-`fix/event-queue-delete-type`, one commit on `main` of upstream. For a
-tree which has the defect the simulation tells the sanitizer to let
-this one kind of finding pass, so that the programs get further.
+`fix/event-queue-delete-type`, one commit on `main` of upstream, which
+is merge request #7 of the fork. Run 307 (the same day, 22 minutes,
+AMD EPYC 9V74) is that branch with the sanitizers: the development
+line builds that way too, in 17 minutes, all 20 checks pass, and with
+this kind of finding left switched on the address sanitizer has
+nothing to say, of VBoxSVC or of a VM process. For a tree which has
+the defect the simulation tells the sanitizer to let this one kind of
+finding pass, so that the programs get further.
 
-Not done this way: the parts in the machine standing in for a host,
-which is where a device is passed through (the settings of the
-sanitizers have to get into that machine for it); Windows as the
-guest.
+Not done this way yet: the parts in the machine standing in for a
+host, which is where a device is passed through (the scripts pass the
+settings of the sanitizers into that machine since, untried); Windows
+as the guest (run 308 is to tell).
 
 ### The issue with upstream, 2026-11-23
 
@@ -3176,5 +3181,6 @@ virtual machine.
 | 304 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the part on the runner, the whole tree built with the sanitizers of GCC and with 3D acceleration, exploring | passed, the job having stopped | 25 minutes, AMD EPYC 9V74. The tree builds that way, in 22 minutes. The job stopped at the step after: the testcase of the passthrough device does not link with the sanitizers put in for the whole tree, as it puts functions of its own in the place of some of the C library, which the library of the address sanitizer wants too. The simulation did not run. A run of this kind leaves the steps with testcases out since |
 | 305 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | the same | passed | 37 minutes, Intel Xeon 6975P-C. 35 pass, 2 fail. The first VMs with the sanitizers in the whole build: they run, the phase with 3D acceleration passes, and the address sanitizer has one finding, in the event queue of Main and not about a guest, which also is why a VM with a saved state was gone too early. See "VMs with the sanitizers" |
 | 306 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner and win, built with 3D acceleration, exploring | passed | 47 minutes, Intel Xeon 6975P-C. All 86 pass. Windows with 3D acceleration for the first time: the Guest Additions installed in the guest, Windows started with 3D acceleration, the screen changed forty times, see "Windows with 3D acceleration" |
+| 307 | `fix/event-queue-delete-type` @ `8e1ab048` | sim with the part on the runner, the whole tree built with the sanitizers, exploring | passed | 22 minutes, AMD EPYC 9V74. All 20 pass. The development line of upstream with the one correction to the event queue of Main: it builds with the sanitizers, its VMs run, and the address sanitizer has nothing to say where it had six reports without the correction (run 305) |
 
 Run numbers are those GitHub shows for the `build` workflow.
