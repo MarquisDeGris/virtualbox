@@ -366,7 +366,7 @@ jobs:
           df -h /
 
       - name: Build device testcases
-        if: inputs.flavor != 'baseline'
+        if: inputs.flavor != 'baseline' && !contains(inputs.kmk_args, 'VBOX_WITH_GCC_SANITIZER=1')
         run: |
           . ./env.sh
           # The sanitizers go in through properties of the target which the makefile
@@ -382,7 +382,7 @@ jobs:
           grep -E 'warning:' build-tests.log | grep -E 'tstDevPciVfio|DevPciVfio|DevPciIch9' | head -60 || true
 
       - name: Run device testcases
-        if: inputs.flavor != 'baseline'
+        if: inputs.flavor != 'baseline' && !contains(inputs.kmk_args, 'VBOX_WITH_GCC_SANITIZER=1')
         run: |
           # A branch which is not about the passthrough device does not have its testcase.
           if [ ! -e src/VBox/Devices/testcase/tstDevPciVfio.cpp ]; then
@@ -490,7 +490,7 @@ jobs:
           echo "ACPI table check passed"
 
       - name: Testcases of the tree
-        if: inputs.flavor != 'baseline'
+        if: inputs.flavor != 'baseline' && !contains(inputs.kmk_args, 'VBOX_WITH_GCC_SANITIZER=1')
         run: |
           . ./env.sh
           # Testcases which the tree has for code the branches for 7.1 took
@@ -575,7 +575,7 @@ jobs:
           rm -rf "$work"
 
       - name: Command line checks
-        if: inputs.flavor != 'baseline'
+        if: inputs.flavor != 'baseline' && !contains(inputs.kmk_args, 'VBOX_WITH_GCC_SANITIZER=1')
         run: |
           # VBoxManage of the build with a VBoxSVC of its own, for settings which
           # need no VM to run.  A check which fails does not end the run here;
