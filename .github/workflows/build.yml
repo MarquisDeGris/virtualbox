@@ -301,7 +301,29 @@ jobs:
                 echo "VBOX_WITH_3D_ACCELERATION := 1"
                 ;;
             esac
+            # The whole build with the sanitizers of GCC for addresses and
+            # undefined behaviour, where the run asks for it with
+            # VBOX_WITH_GCC_SANITIZER=1 among the arguments for kmk: for a
+            # simulation whose VMs run with them.  Nearly every file is
+            # compiled anew then, whatever the build of the base has.
+            case "${{ inputs.kmk_args }}" in
+              *VBOX_WITH_GCC_SANITIZER=1*)
+                echo "VBOX_WITH_GCC_SANITIZER := 1"
+                ;;
+            esac
           } > LocalConfig.kmk
+          case "${{ inputs.kmk_args }}" in
+            *VBOX_WITH_GCC_SANITIZER=1*)
+              # Programs which are built and run while the tree is built are
+              # built with the sanitizers too.  Memory they have not freed
+              # when they end is no reason for the build to stop.
+              echo "ASAN_OPTIONS=detect_leaks=0" >> "$GITHUB_ENV"
+              # A program with the address sanitizer does not find a library
+              # it loads while it runs next to itself any more (Config.kmk
+              # tells of it), so it is told where the libraries are.
+              echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/out/linux.amd64/release/bin" >> "$GITHUB_ENV"
+              ;;
+          esac
           cat LocalConfig.kmk
           touch -d @1577836800 LocalConfig.kmk AutoConfig.kmk env.sh
 
@@ -731,6 +753,7 @@ jobs:
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}
           SIM_3D: ${{ contains(inputs.kmk_args, 'VBOX_WITH_VMSVGA3D=1') && 'yes' || 'no' }}
+          SIM_SANITIZED: ${{ contains(inputs.kmk_args, 'VBOX_WITH_GCC_SANITIZER=1') && 'yes' || 'no' }}
           SIM_PARTS: ${{ inputs.sim_parts != '' && inputs.sim_parts || inputs.flavor == 'winsim' && 'runner,win,winhost,mfwinhost,hdawinhost' || inputs.flavor == 'allsim' && 'runner,simhost,mfhost,barhost,vgahost,win,winhost,mfwinhost,hdawinhost' || 'runner,simhost,mfhost,barhost,vgahost' }}
         run: bash ci-meta/sim/run.sh
 

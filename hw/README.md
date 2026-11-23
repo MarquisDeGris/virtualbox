@@ -60,6 +60,10 @@ which can also be run by itself:
   of a command names another.
 - `fetch.sh` installs nothing. It tells which packages of the distribution
   the build needs and are missing, as an `apt-get install` line to run.
+  The build it fetches has 3D acceleration for VMs, which takes a graphics
+  card with a Vulkan driver on the host for a VM that has it switched on;
+  the tests here do not switch it on. There is a build without it as well:
+  `HW_BUILD=60-ubuntu sh hw/linux/fetch.sh`, see `hw/builds.txt`.
 - `bind.sh` refuses the card the firmware shows its screen on. A card the
   desktop of the host uses does not take being taken from its driver well;
   no monitor on the card and nothing of the host using it is the safe way.

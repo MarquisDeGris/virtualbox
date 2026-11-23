@@ -1,3 +1,7 @@
 # The builds hw/linux/fetch.sh can fetch from the release "hw-builds" of the
-# fork, the newest last: <file> <sha256> <the branch it was built from>.
+# fork: <file> <sha256> <the branch it was built from>.  The last line is the
+# build which is fetched when none is named; HW_BUILD=<part of a file name>
+# names another.  A build with "-3d-" in its name has 3D acceleration for
+# VMs and is the same otherwise.
 vbox-26e4045afd60-ubuntu2404.tar.zst 1fe305e148f6d4c5c198387ccd884638cf4be7a3dbd2def43cb416a55eaae885 pci-passthrough-hotplug-7.2-kvm
+vbox-26e4045afd60-3d-ubuntu2404.tar.zst 5fcc58c65e55c4be63ed278d933aa47cc46fc0bdc1b4605262e050cf315fd3bd pci-passthrough-hotplug-7.2-kvm

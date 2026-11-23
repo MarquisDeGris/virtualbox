@@ -395,10 +395,46 @@ HTTP_MD5=$(md5sum < "$WORK/http/sim.bin" | cut -d' ' -f1)
 HTTP_PID=$!
 runner_phases="plain emptyslot nat import"
 [ -n "$GUEST_RAW_3D" ] && runner_phases="$runner_phases gfx3d"
+# A build with the sanitizers (SIM_SANITIZED is yes): what they find in a
+# program of VirtualBox goes to files, one for each process, and the program
+# ends where the address sanitizer finds something.  Memory which is not
+# freed at the end of a program is not what this is after.
+san_asan=
+san_ubsan=
+boot_wait=240
+if [ "${SIM_SANITIZED:-no}" = yes ]; then
+    mkdir -p "$OUT/sanitizers"
+    chmod 777 "$OUT/sanitizers"
+    san_asan="detect_leaks=0:log_path=$OUT/sanitizers/asan"
+    san_ubsan="print_stacktrace=1:log_path=$OUT/sanitizers/ubsan"
+    # Everything takes two or three times as long with them.
+    boot_wait=600
+fi
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
-         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_BOOT_WAIT=240 SIM_HTTP_MD5="$HTTP_MD5" \
-    timeout -k 30 1800 bash "$SIM/vbox-phases.sh" $runner_phases
+         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
+         ${san_asan:+ASAN_OPTIONS="$san_asan"} ${san_ubsan:+UBSAN_OPTIONS="$san_ubsan"} ${san_asan:+SIM_PATIENCE=3} \
+         ${san_asan:+LD_LIBRARY_PATH="$BIN"} \
+    timeout -k 30 3000 bash "$SIM/vbox-phases.sh" $runner_phases
 echo "part 1 ended with $?"
+if [ "${SIM_SANITIZED:-no}" = yes ]; then
+    # What the sanitizers wrote down.  The address sanitizer writes when it
+    # has found an access to memory which is not the program's to access; the
+    # other one writes about arithmetic and conversions which the language
+    # leaves undefined, of which a tree of this size has some.
+    na=$(ls "$OUT/sanitizers" 2> /dev/null | grep -c '^asan')
+    nu=$(ls "$OUT/sanitizers" 2> /dev/null | grep -c '^ubsan')
+    if [ "$na" = 0 ]; then
+        stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" ok
+    else
+        stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" FAILED "$na file(s), the first lines of each follow"
+        for f in "$OUT"/sanitizers/asan*; do
+            echo "---- $f"
+            sudo head -n 30 "$f" | cut -c1-220
+        done
+    fi
+    echo "files of the sanitizer for undefined behaviour: $nu"
+    sudo cat "$OUT"/sanitizers/ubsan* 2> /dev/null | grep -a 'runtime error' | sed -e 's/^.*\/src\/VBox\//src\/VBox\//' | cut -c1-200 | sort | uniq -c | sort -rn | head -n 40
+fi
 kill "$HTTP_PID" 2> /dev/null
 echo "requests to the file server: $(grep -c 'GET /sim.bin' "$WORK/http.log" 2> /dev/null)"
 

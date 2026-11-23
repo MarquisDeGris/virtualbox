@@ -1160,7 +1160,7 @@ phase_gfx3d()
         fi
         echo "    what the adapter has counted (what is not zero, without the registers):"
         VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/Devices/vga/VMSVGA/*' 2>&1 \
-            | grep -a -v '/VMSVGA/Reg/' | sed -e 's/ unit="[^"]*"//' -e 's/ vis="[^"]*"//' | cut -c1-160 | head -n 40 | sed 's/^/    | /'
+            | grep -a -v -E '/VMSVGA/Reg/| c="0"| cPeriods="0"| val="0"' | sed -e 's/ unit="[^"]*"//' -e 's/ vis="[^"]*"//' | cut -c1-160 | head -n 40 | sed 's/^/    | /'
         # What the guest wrote is in guest memory, and the host has it from
         # there: a picture of the screen as the host has it.  A screen with
         # nothing on it makes a file of a few kilobytes, one full of text

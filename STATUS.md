@@ -1837,6 +1837,69 @@ from another machine, which takes the right to push there; the command
 for an assistant. No result has arrived on `hw-results` (2026-11-23,
 05:45 UTC).
 
+### 3D acceleration for VMs, from 2026-11-23
+
+What the tracker of upstream has about 3D, requests and reports, takes
+a VM with 3D acceleration to be worked on, and nothing here could run
+one: the builds of the workflow have no user interface, for which
+configure switches 3D off, and a runner has no graphics card.
+
+Both can be had. A run which has `VBOX_WITH_VMSVGA3D=1` among its
+arguments for kmk builds with 3D acceleration: configure is not told
+to leave out DXVK, which is what renders for the graphics adapter of a
+VM on a Linux host and is part of the tree from 7.2 on, and
+`LocalConfig.kmk` switches on again what configure switches off. On a
+runner the renderer is the one Mesa has in software for Vulkan, which
+DXVK takes where there is nothing else.
+
+The simulation has a phase for such a build, `gfx3d`, on the runner: a
+VM with 3D acceleration and a guest which has the kernel driver for
+the graphics adapter of the VM. With the adapter in this mode that
+driver keeps what is on the screen in objects of guest memory, which
+the host reads from and writes to at the guest's word; the guest
+writes 4000 lines of text to its screen. Nobody looks at the picture.
+
+Run 301 (2026-11-23, `sim` with the part on the runner,
+`scratch/intx-7.2-kvm` @ `26e4045a`, 20 minutes, AMD EPYC 7763), at
+the first try:
+
+- The tree builds with 3D acceleration, in 13 minutes on top of the
+  build of the base.
+- A VM with it starts and boots the guest. Its log has DXVK 2.6.2 and
+  Direct3D at feature level 11_1. The driver of the guest has the
+  adapter, is offered shader model 5, writes its screens, and the
+  guest runs on.
+- 37 checks pass and 2 fail, both for what the check looked at: three
+  lines the driver says of every adapter which is not of its maker,
+  and counters which count something else than was thought. A picture
+  of the screen as the host has it is taken in their place.
+
+Run 302 (the same day, the same commit, with the parts on the runner,
+with the device of four gigabytes and with the VGA adapter, 31
+minutes, Intel Xeon Platinum 8573C): all 69 checks pass. The phase
+with its checks put right: the picture of the screen of the VM, taken
+from the host, is the last 49 of the 4000 lines the guest wrote, each
+readable. And the build with 3D acceleration goes through the parts
+with a passed through device as the build without it does, the
+scripts for a machine with real hardware included.
+
+Run 303 made the package of that build, which is published next to
+the one without 3D acceleration and has "-3d-" in its name. It is the
+build `hw/linux/fetch.sh` fetches when it is not told which: one build
+for whatever is tried on a machine with a graphics card, the
+passthrough and VMs with 3D acceleration.
+
+What this is not: a program in a guest which draws in 3D, a Windows
+guest, the Guest Additions, or the driver of a graphics card. It is
+the way from the driver of a guest through the adapter to a renderer,
+with a guest which writes text.
+
+What is to come of it: the same phase with the whole build under the
+sanitizers, which the workflow is prepared for and which has not run
+yet (`VBOX_WITH_GCC_SANITIZER=1` among the arguments for kmk); and a
+Windows guest with the Guest Additions, which is what the reports in
+the tracker are about.
+
 ### The issue with upstream, 2026-11-23
 
 The work is made known to upstream since 2026-11-23: issue 999 in the
@@ -2787,6 +2850,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-23 | The parts with the device of four gigabytes and with the VGA adapter belong to every simulation from now on (`sim` and `allsim`) | Together they take ten minutes, and they are the only checks of large memory, of the ROM and of the legacy VGA ranges with a guest |
 | 2026-11-23 | What takes root on a machine with real hardware is one command, `hw/linux/tests.sh` | Each command somebody has to type there can be mistyped or left out, and the person is not to have to know which comes next. The scripts it runs stay as they are and can be read and run one by one |
 | 2026-11-23 | The issue which makes the work known to upstream is filed now and not after the test on hardware | Whom this work is for said yes to it and wants the code to be used. The defects of `main` it lists are of use to upstream whatever becomes of the rest, and the test on hardware has no date. That nothing ran on hardware is said there in so many words, with the promise to add the result |
+| 2026-11-23 | The workflow can build with 3D acceleration for VMs, and the simulation has a VM with it, rendered in software on the runner | Whom this work is for asked for the requests and reports about 3D to be taken up, and none of them can be without a VM which has 3D acceleration. A software renderer is no graphics card, but the code of the graphics adapter which a guest reaches is the same with both |
+| 2026-11-23 | The build which a machine with real hardware fetches is the one with 3D acceleration | Run 302 had it go through the parts with a passed through device as the build without goes through them. One build for the passthrough and for VMs with 3D acceleration spares the person at the machine fetching twice and knowing which is in place. The build without stays published and can be named |
+| 2026-11-23 | A build with 3D acceleration is asked for with a word among the arguments for kmk, not with an input of its own | The workflow has ten inputs, which was the most a workflow could have when it was written, and the word has to be there for kmk anyway |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3033,5 +3099,8 @@ virtual machine.
 | 298 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with its parts as they are by default now, exploring | cancelled | After 28 minutes, by the start of run 299: the workflow lets one run at a time be in flight for a branch and a flavor and cancels the older one. A mistake in starting the runs; it had got through the part on the runner. Run 300 is the same on another name of the same commit |
 | 299 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 24 minutes, Intel Xeon 6975P-C. All 50 pass. New: the one script for all which takes root (`hw/linux/tests.sh`) binds the device and has both tests pass, and the script with the checklist finds what the second test puts its guest together with |
 | 300 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with its parts as they are by default now (runner, simhost, mfhost, barhost, vgahost), exploring | passed | 62 minutes, Intel Xeon 6975P-C. All 211 pass: what the simulation had before, with the drive and with the device of two functions, and the two new parts after it, with the scripts as they are since run 299 |
+| 301 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part on the runner, built with 3D acceleration for VMs, exploring | passed | 20 minutes, AMD EPYC 7763. 37 pass, 2 fail. The first build with 3D acceleration and the first VM with it, see "3D acceleration for VMs". The two checks which fail were wrong themselves |
+| 302 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner, barhost and vgahost, built with 3D acceleration, exploring | passed | 31 minutes, Intel Xeon Platinum 8573C. All 69 pass: the phase with 3D acceleration with its checks put right, the picture of the screen being what the guest wrote, and the two parts with a passed through device with this build |
+| 303 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | package, built with 3D acceleration | passed | 15 minutes, AMD EPYC 9V74. The package `vbox-26e4045afd60-3d-ubuntu2404.tar.zst`, 155 MB, published in the pre-release next to the one without 3D acceleration |
 
 Run numbers are those GitHub shows for the `build` workflow.
