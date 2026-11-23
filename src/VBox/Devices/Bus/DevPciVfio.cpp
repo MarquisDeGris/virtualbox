@@ -3382,7 +3382,7 @@ static int pciVfioConfigReadFromDev(PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32
 {
     AssertReturn(cb == sizeof(uint8_t) || cb == sizeof(uint16_t), VERR_INVALID_PARAMETER);
 
-    if (!pFun->fGone)
+    if (true)
     {
         /* The function going out of service right now makes this fail too. */
         int rc = pciVfioConfigPassthroughRead(pFun, uAddress, cb, pu32Value);
