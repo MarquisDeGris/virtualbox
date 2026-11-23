@@ -2025,14 +2025,15 @@ with the drive and with the device of four gigabytes, 46 minutes, AMD
 EPYC 9V45). The branch of the first merge request has the KVM backend
 of upstream under the same passthrough device. The sanitizers wrote
 nothing there either, in any part. 130 checks pass and 1 fails, which
-was a defect of the scripts for a machine with real hardware and is
-what explains the twelve lines of run 309 as far as anything does: a
-test ended the service of VirtualBox and did not wait for it to be
-gone, and the test after it, started at once by the script which runs
-them all, talked to the service which was ending and did not get the
-VM of the test before cleared away ("Machine settings file ... already
+was a defect of the scripts for a machine with real hardware: a test
+ended the service of VirtualBox and did not wait for it to be gone,
+and the test after it, started at once by the script which runs them
+all, talked to the service which was ending and did not get the VM of
+the test before cleared away ("Machine settings file ... already
 exists"). The simulation waits between two tests, which is why only
-the script for all of them met it. A test waits for the service to be
+the script for all of them met it. The twelve lines of run 309 came
+from the same place, a test started by that script right after
+another; whether this was behind them is not shown. A test waits for the service to be
 gone now, at its end and at its start, starts with a VirtualBox which
 knows of no VM, and ends only the service which was started from its
 own build, not one of a VirtualBox installed on the machine.
