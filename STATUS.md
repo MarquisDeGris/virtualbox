@@ -1179,7 +1179,9 @@ failed, none skipped.**
 
 What the simulation has not got of such a device: more than two
 functions, a function which is not an NVMe controller, an option ROM,
-legacy VGA, and a host which is not a virtual machine.
+legacy VGA, and a host which is not a virtual machine. (Functions
+which are no drives, a ROM and legacy VGA have come since, see
+"Machines with real hardware".)
 
 **Run 267** (2026-11-21, `sim`, for finding out,
 `pci-passthrough-hotplug-v1` @ `f563e7f8`, 38 minutes, Intel Xeon
@@ -1692,12 +1694,111 @@ twice, the reset, the power off, the device with `vfio-pci` afterwards,
 and no line of the device in the log about something which did not
 work.
 
+**A second test** (`hw/linux/test-b.sh`, from the evening of
+2026-11-22). The first test has no operating system in the VM. The
+second puts a small Linux guest together on the machine it runs on: the
+kernel that machine runs, the modules the kernel has for the functions
+of the device with their firmware, and an init which tells on the
+serial port of the VM what the guest makes of the device: which driver
+has it, where its BARs are and how large, its interrupts, and for a
+graphics card its connectors and whether a monitor is on one. The
+script makes checks of that. It is what a run on hardware is to tell
+beyond "there was a picture".
+
+It took four runs to get it to run here (289 to 292, each `sim` with
+some parts; the first script passed in all of them):
+
+- Run 289: the guest did not start. It was to be started by a script
+  for the shell of the firmware, a way the simulation has as a fallback
+  and had never gone. The guest is a unified kernel image now, as the
+  guests of the simulation are.
+- Runs 290 and 291: the guest still said nothing, in ten minutes. The
+  VM of the scripts had two CPUs and time passing at its usual pace;
+  the guests of the simulation have one CPU and time at a twentieth of
+  its pace in the machine standing in for the host, as every exit from
+  a guest is slow there. The scripts can be told both, which the
+  simulation does and a machine with real hardware does not need.
+- Run 292: the guest starts. With the drive the script goes through
+  its 12 checks.
+
+**A device with four gigabytes of memory** (the part `barhost` of the
+simulation, since the same evening). What a graphics card has and the
+drive of the simulation does not is memory by the gigabyte, in a BAR
+which the firmware of the VM and the guest have to place above four
+gigabytes and which the VM has to map as a whole. Nothing had tried
+that. The part has a device whose memory is nothing but memory (ivshmem
+of QEMU), four gigabytes of it, kept in a file on the runner, and no
+reset of its own. The two scripts run with it, and the guest of the
+second writes to the first and to the last four bytes of the memory.
+
+What runs 291 and 292 showed with it: the VM starts with the device,
+the device is taken out of the slot and put in twice, the VM is reset
+and powered off (the first script, 15 checks). The guest has the memory
+at four gigabytes, above the memory of the VM, with its full size; it
+reads back what it wrote to both ends; and what it wrote is in the file
+at both ends (run 292). One check of the second script failed there
+and was the check's fault: a module of the kernel names the device,
+the one of the virtio devices, which names every device of their
+vendor and does not take this one. Run 293 has the check as it is meant, with a device no driver is expected for, and the connectors counted by whose they are: both scripts go through their checks with the device, 15 and 12, and what the guest wrote is in the file.
+
+That is four gigabytes with a device which has no driver. A graphics
+card has more, registers besides memory, and a driver which sets the
+card up; the size alone is what this tells of.
+
+**The ROM of the device** (run 294). A graphics card has its firmware
+in its ROM, and its driver reads it there. The passthrough device
+copies the ROM when the VM gets the device, and until this run that
+had run with the stand-in for the kernel of the unit tests only. The
+device of four gigabytes has a ROM now, 64 KiB which are a file of the
+runner, and the second script has the guest read the ROM and compares
+its size and checksum with what the host has: what `bind.sh` read
+before the device went to vfio-pci, or what the host reads when the
+test starts. Run 294: `bind.sh`, which ran for the first time, read
+the bytes of the file, and the guest reads the same.
+
+**A graphics card, as far as the simulation has one** (the part
+`vgahost`, run 294). The device is the standard VGA adapter of QEMU:
+16 MB of video memory, registers in memory, a ROM with a BIOS in it,
+legacy VGA ranges, no interrupt and no reset of its own. It is the
+adapter the machine standing in for the host starts with, so its ROM
+is the copy the firmware of that machine made. The kernel has a driver
+for it, which makes a card with one connector of it and takes a
+monitor to be on that: what the second script looks for with a
+graphics card and had had nothing to find it with. Run 294, at the
+first try:
+
+- The first script goes through its 15 checks with it.
+- The second, 16: the driver of the guest has the card and its video
+  memory, the guest reads the 39424 bytes of the BIOS as the host
+  does, the card has its connector with a monitor on it, and the
+  connector of the adapter the VM has anyway is not counted for it.
+- The second once more with `HW_VGA=yes`, 20: the VM has no graphics
+  adapter of its own and is given the legacy VGA ranges of the card
+  (`ExposeVga`), which is what it takes for a card to show a guest
+  from its start. Before a driver has the card the guest reads a
+  register through the legacy ports and the start of the text memory,
+  which has the first letter of what the firmware of the machine
+  standing in for the host wrote to its screen. It sets three
+  registers through the ports and reads them back, and reads back what
+  it writes to both ends of the memory at 0xa0000. Then the driver
+  takes the card as before.
+
+What this is not: a card with a display engine a driver has to set up,
+with firmware to load, with interrupts, with a driver for the firmware
+of the VM in its ROM, or with anything which takes its time on real
+hardware. It is the paths of the passthrough device for a ROM, for
+video memory which a driver maps, and for the legacy ranges, each for
+the first time with a guest.
+
 Tried and not tried: the inventory for Windows ran on one machine, a
-VM. The inventory for Linux ran in a shell on Windows, which tells
-little of it. `fetch.sh`, `prereq.sh`, `bind.sh`, the publishing and
-the command for an assistant have not run anywhere; `test-a.sh` has
-run in the simulation only, with a drive and not with a graphics card.
-No result has arrived on `hw-results` (2026-11-22, 19:45 UTC).
+VM, and publishing it from there worked with a repository made for the
+try (2026-11-22). The inventory for Linux ran in a shell on Windows,
+which tells little of it. `fetch.sh`, `prereq.sh`, the publishing
+under Linux and the command for an assistant have not run anywhere;
+`bind.sh` and the two tests have run in the simulation only, with a
+drive, the device of four gigabytes and the adapter of QEMU, not with
+the graphics card of a real machine. No result has arrived on
+`hw-results` (2026-11-23, 04:50 UTC).
 
 ### Requests from the tracker of upstream, from 2026-11-22
 
@@ -2847,5 +2948,11 @@ virtual machine.
 | 286 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | package, exploring | passed | 11 minutes, AMD EPYC 9V74. The first package of a build, 110 MB; the release workflow published it in the release `hw-builds`. See "Machines with real hardware" |
 | 287 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim, exploring | passed | 42 minutes, Intel Xeon 6975P-C. 177 checks pass, 2 fail: the first script for a machine with real hardware, run for the first time, ends at creating its VM. Everything else passes |
 | 288 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner and simhost, exploring | passed | 29 minutes, Intel Xeon 6975P-C. All 109 checks pass, the script for a machine with real hardware among them with its 15 checks |
+| 289 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner and simhost, exploring | passed | 33 minutes, Intel Xeon 6975P-C. 109 checks pass, 1 fails: the second script for a machine with real hardware, run for the first time, whose guest does not start. See "A second test" |
+| 290 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | the same | passed | 48 minutes, AMD EPYC 7763. 109 pass, 1 fails: the guest of the second script is a unified kernel image now and says nothing in ten minutes |
+| 291 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 26 minutes, Intel Xeon 6975P-C. 38 pass, 2 fail. The first run with the device of four gigabytes: the first script goes through its 15 checks with it; the guest of the second says nothing, as in run 290 |
+| 292 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts simhost and barhost, exploring | passed | 39 minutes, AMD EPYC 7763. 117 pass, 1 fails. With one CPU and slowed time the guest of the second script starts: 12 checks pass with the drive. With the device of four gigabytes the guest has the memory with its full size above four gigabytes, and what it wrote to both ends is in the file; the one check which failed expected a driver for a device which has none |
+| 293 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 40 pass. Both scripts for a machine with real hardware go through their checks with the device of four gigabytes, 15 and 12, and what the guest wrote to both ends of the memory is in the file |
+| 294 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts barhost and vgahost, exploring | passed | 24 minutes, Intel Xeon Platinum 8573C. All 49 pass. The device of four gigabytes has a ROM, which the script binding the device and the guest read as the file is (13 checks of the second script). The new part with the VGA adapter of QEMU as the device: the first script 15, the second 16, the second with the legacy VGA ranges given to the guest 20. See "The ROM of the device" and "A graphics card, as far as the simulation has one" |
 
 Run numbers are those GitHub shows for the `build` workflow.
