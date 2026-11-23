@@ -1793,7 +1793,8 @@ the first time with a guest.
 Runs 292 to 295 are of the branch for 7.2 with the KVM backend of
 Cyberus Technology, which is the build that is published for machines
 with real hardware. Run 296 is the development line with the same two
-parts, and all its 58 checks pass as well.
+parts and run 297 the branch for 7.1 with that backend, the latter on
+an AMD processor; all their checks pass as well, 58 and 59.
 
 **Every script once** (run 295). What a machine with real hardware is
 to run had in part run nowhere. The simulation runs all of it now,
@@ -1815,11 +1816,15 @@ All 58 checks of the run pass. The inventory for Windows ran on one
 machine, a VM, and publishing it from there worked the same way
 (2026-11-22).
 
+Since run 297 the part with the device of four gigabytes ends with
+`bind.sh --undo`, after which the host has the device back.
+
 Not tried: anything on a machine with real hardware and with the
-graphics card of one; `bind.sh --undo`; publishing to the fork from
-another machine, which takes the right to push there; the command for
-an assistant. No result has arrived on `hw-results` (2026-11-23,
-05:15 UTC).
+graphics card of one; a device which a driver of the host takes back,
+as the simulated host has none for its device; publishing to the fork
+from another machine, which takes the right to push there; the command
+for an assistant. No result has arrived on `hw-results` (2026-11-23,
+05:45 UTC).
 
 ### Requests from the tracker of upstream, from 2026-11-22
 
@@ -2980,5 +2985,6 @@ virtual machine.
 | 294 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts barhost and vgahost, exploring | passed | 24 minutes, Intel Xeon Platinum 8573C. All 49 pass. The device of four gigabytes has a ROM, which the script binding the device and the guest read as the file is (13 checks of the second script). The new part with the VGA adapter of QEMU as the device: the first script 15, the second 16, the second with the legacy VGA ranges given to the guest 20. See "The ROM of the device" and "A graphics card, as far as the simulation has one" |
 | 295 | `scratch/intx-7.2-kvm` @ `26e4045a` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass. The other scripts for a machine with real hardware run for the first time: the build as it is published is fetched and is the one listed, and the first script passes with it; the inventory, the checklist, and the publishing of a result to a repository made for the run. See "Every script once" |
 | 296 | `pci-passthrough-hotplug-v1` @ `4add131b` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass: the development line, with its own KVM backend, does with the device of four gigabytes, its ROM and the VGA adapter what the branch for 7.2 does. The build which is fetched there is the published one, of the branch for 7.2 |
+| 297 | `pci-passthrough-hotplug-7.1-kvm` @ `9f8f5cba` | the same | passed | 28 minutes, AMD EPYC 7763. All 59 pass: the branch for 7.1 with the KVM backend does the same with the device of four gigabytes, its ROM and the VGA adapter. New in the run: the script which binds the device gives it back to the host at the end (`bind.sh --undo`) |
 
 Run numbers are those GitHub shows for the `build` workflow.
