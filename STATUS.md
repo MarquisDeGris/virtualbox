@@ -1819,6 +1819,17 @@ machine, a VM, and publishing it from there worked the same way
 Since run 297 the part with the device of four gigabytes ends with
 `bind.sh --undo`, after which the host has the device back.
 
+**One command for what takes root** (`hw/linux/tests.sh`, run 299).
+Binding the device, the checklist as root and the tests were four or
+five commands with `sudo`. They are one now, which runs the scripts
+that were there one after the other, the second test twice for a
+graphics card, and tells at its end which results there are.
+`prereq.sh`, which is run before it and without root, tells what the
+second test needs to put its guest together, so that it can be
+installed first and no test stops for it. Run 299: after the device was
+given back to the host, the one script binds it again, goes through the
+checklist and has both tests pass, 15 and 14 checks.
+
 Not tried: anything on a machine with real hardware and with the
 graphics card of one; a device which a driver of the host takes back,
 as the simulated host has none for its device; publishing to the fork
@@ -2744,6 +2755,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-22 | The simulation gets what a graphics card has and its drive has not, piece by piece: a device with four gigabytes of memory, a ROM, and the VGA adapter of an emulator as the device, with its legacy ranges | The hardware which is offered for a test is one machine and somebody's evening, and a path of the passthrough device which first runs with a guest there fails there. These had run with the stand-in for the kernel of the unit tests only, or not at all |
 | 2026-11-23 | Every script which is to run on a machine with real hardware runs in the simulation, the fetching of the published build and the publishing of results too, the latter to a repository made for the run | The build which is fetched is the one such a machine gets, so it is the one the first test has to have passed with. Publishing is the one step which leaves the machine and has to be seen to send what it says it sends |
 | 2026-11-23 | The parts with the device of four gigabytes and with the VGA adapter belong to every simulation from now on (`sim` and `allsim`) | Together they take ten minutes, and they are the only checks of large memory, of the ROM and of the legacy VGA ranges with a guest |
+| 2026-11-23 | What takes root on a machine with real hardware is one command, `hw/linux/tests.sh` | Each command somebody has to type there can be mistyped or left out, and the person is not to have to know which comes next. The scripts it runs stay as they are and can be read and run one by one |
+| 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -2986,5 +2999,8 @@ virtual machine.
 | 295 | `scratch/intx-7.2-kvm` @ `26e4045a` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass. The other scripts for a machine with real hardware run for the first time: the build as it is published is fetched and is the one listed, and the first script passes with it; the inventory, the checklist, and the publishing of a result to a repository made for the run. See "Every script once" |
 | 296 | `pci-passthrough-hotplug-v1` @ `4add131b` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass: the development line, with its own KVM backend, does with the device of four gigabytes, its ROM and the VGA adapter what the branch for 7.2 does. The build which is fetched there is the published one, of the branch for 7.2 |
 | 297 | `pci-passthrough-hotplug-7.1-kvm` @ `9f8f5cba` | the same | passed | 28 minutes, AMD EPYC 7763. All 59 pass: the branch for 7.1 with the KVM backend does the same with the device of four gigabytes, its ROM and the VGA adapter. New in the run: the script which binds the device gives it back to the host at the end (`bind.sh --undo`) |
+| 298 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with its parts as they are by default now, exploring | cancelled | After 28 minutes, by the start of run 299: the workflow lets one run at a time be in flight for a branch and a flavor and cancels the older one. A mistake in starting the runs; it had got through the part on the runner. Run 300 is the same on another name of the same commit |
+| 299 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 24 minutes, Intel Xeon 6975P-C. All 50 pass. New: the one script for all which takes root (`hw/linux/tests.sh`) binds the device and has both tests pass, and the script with the checklist finds what the second test puts its guest together with |
+| 300 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with its parts as they are by default now (runner, simhost, mfhost, barhost, vgahost), exploring | passed | 62 minutes, Intel Xeon 6975P-C. All 211 pass: what the simulation had before, with the drive and with the device of two functions, and the two new parts after it, with the scripts as they are since run 299 |
 
 Run numbers are those GitHub shows for the `build` workflow.
