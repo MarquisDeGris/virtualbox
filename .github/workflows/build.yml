@@ -200,6 +200,7 @@ jobs:
             libx11-dev libxext-dev libxmu-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxcomposite-dev libxfixes-dev libxt-dev \
             libgl-dev libglu1-mesa-dev mesa-common-dev libvulkan-dev \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools \
             linux-headers-$(uname -r) || \
           sudo apt-get install -y -q --no-install-recommends linux-headers-generic
 
@@ -238,7 +239,12 @@ jobs:
             # Technology: with it VirtualBox runs its VMs on KVM and without its
             # kernel driver, which is what the simulation needs on a
             # maintenance branch.
+            # A build with 3D acceleration for VMs is asked for with
+            # VBOX_WITH_VMSVGA3D=1 among the arguments for kmk.  It keeps DXVK,
+            # which is what renders for the graphics adapter of a VM on a Linux
+            # host; "Local configuration" below does the rest.
             for o in --disable-java --disable-kmods --disable-dxvk --with-kvm; do
+              case "$o ${{ inputs.kmk_args }}" in "--disable-dxvk "*VBOX_WITH_VMSVGA3D=1*) continue ;; esac
               if grep -q -E "^ +${o}\)|\|${o}\)|^ +${o}\|" configure; then opts="$opts $o"; fi
             done
             # Where kBuild is: the configure of 7.1 looks one directory too high
@@ -285,6 +291,16 @@ jobs:
               echo "VBOX_WITH_PUEL_NLS :="
               echo "VBOX_WITH_VBOXMANAGE_NLS :="
             fi
+            # 3D acceleration for VMs, where the run asks for it.  A build
+            # without a user interface has it switched off by configure; here
+            # it is switched on again for every step which builds, not only
+            # for the one which gets the arguments for kmk.
+            case "${{ inputs.kmk_args }}" in
+              *VBOX_WITH_VMSVGA3D=1*)
+                echo "VBOX_WITH_VMSVGA3D := 1"
+                echo "VBOX_WITH_3D_ACCELERATION := 1"
+                ;;
+            esac
           } > LocalConfig.kmk
           cat LocalConfig.kmk
           touch -d @1577836800 LocalConfig.kmk AutoConfig.kmk env.sh
@@ -664,6 +680,7 @@ jobs:
             # development line.
             echo "configure: $(grep -m 1 -E "^#   '?(\./)?configure(\.py)? " AutoConfig.kmk | sed -e "s/^#   '\{0,1\}\(\.\/\)\{0,1\}configure\(\.py\)\{0,1\} *//" -e "s/'\$//")"
             echo "kvm backend of the build: $(grep -E '^VBOX_WITH_KVM' AutoConfig.kmk | tr -s ' ' | tr '\n' ' ')"
+            echo "3D acceleration for VMs: $(if grep -q '^VBOX_WITH_VMSVGA3D := 1' LocalConfig.kmk; then echo "yes, it takes a graphics card with a Vulkan driver on the host"; else echo no; fi)"
             echo "It runs from its directory, without installation and without kernel modules of VirtualBox."
             echo
             echo "packages of Ubuntu 24.04 with the libraries its programs need at run time:"
@@ -709,6 +726,7 @@ jobs:
         continue-on-error: ${{ inputs.sim_strict != 'yes' && inputs.sim_strict != 'linux' }}
         env:
           SIM_STRICT: ${{ inputs.sim_strict }}
+          SIM_3D: ${{ contains(inputs.kmk_args, 'VBOX_WITH_VMSVGA3D=1') && 'yes' || 'no' }}
           SIM_PARTS: ${{ inputs.sim_parts != '' && inputs.sim_parts || inputs.flavor == 'winsim' && 'runner,win,winhost,mfwinhost,hdawinhost' || inputs.flavor == 'allsim' && 'runner,simhost,mfhost,barhost,vgahost,win,winhost,mfwinhost,hdawinhost' || 'runner,simhost,mfhost,barhost,vgahost' }}
         run: bash ci-meta/sim/run.sh
 

@@ -1103,6 +1103,88 @@ phase_intx()
 }
 
 
+# A VM with 3D acceleration.  Nothing of the passthrough is in it: the
+# graphics adapter of the VM gets the backend which renders with the graphics
+# card of the host, or with what the host has in the place of one (a runner
+# has a renderer in software), and the guest has the driver for the adapter.
+# With the adapter in this mode that driver keeps what is on the screen in
+# objects of guest memory, which the host reads from and writes to at the
+# guest's word.  Nobody looks at the picture.  The phase is about a guest
+# getting through that, and about the host having done it.  A build without
+# 3D acceleration does not take the setting, and the phase is left out there.
+gbo_transfers()
+{
+    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '*Gbo*' 2> /dev/null \
+        | grep -a -o -E ' c(Periods)?="[0-9]+"' | tr -dc '0-9\n' | awk '{ n += $1 } END { print n + 0 }'
+}
+
+phase_gfx3d()
+{
+    PHASE=gfx3d
+    local what="a VM with 3D acceleration boots the guest" k n
+    reset_vm
+    if [ ! -s "${GUEST_RAW_3D:-}" ]; then
+        stage "$what" skipped "there is no disk for such a guest"
+        return
+    fi
+    if    ! run convertfromraw "$GUEST_RAW_3D" "$SIM_WORK/guest-3d.vdi" --format VDI \
+       || ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest-3d.vdi"; then
+        stage "$what" FAILED "no disk"
+        run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+        return
+    fi
+    if ! run modifyvm "$VM" --graphicscontroller vmsvga --vram 128 --accelerate-3d on; then
+        stage "$what" skipped "this build takes no 3D acceleration for a VM"
+        run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+        return
+    fi
+    if boot "$what"; then
+        wait_serial 'GUEST: GFX done' 180
+        serial_show 'GUEST: GFX' 60
+        if serial_has 'GUEST: GFX card0 driver vmwgfx'; then
+            stage "guest: its driver has the graphics adapter" ok
+        else
+            stage "guest: its driver has the graphics adapter" FAILED "$(serial_new | grep -a 'GUEST: GFX card0' | head -n 1 | cut -c1-120)"
+        fi
+        # What the driver says the adapter can do: with 3D acceleration it is
+        # more than what an adapter without it offers ("Legacy").
+        k=$(serial_new | grep -a -i 'GUEST: GFX k: .*Available shader model' | head -n 1 | sed -e 's/^.*Available shader model: *//' | cut -c1-60)
+        case "$k" in
+            '')        stage "guest: the adapter offers it 3D acceleration" FAILED "its driver does not tell" ;;
+            Legacy*)   stage "guest: the adapter offers it 3D acceleration" FAILED "$k" ;;
+            *)         stage "guest: the adapter offers it 3D acceleration" ok "$k" ;;
+        esac
+        if serial_has 'GUEST: GFX wrote [0-9]+ lines'; then
+            stage "guest: writes some hundred screens of text" ok
+        else
+            stage "guest: writes some hundred screens of text" FAILED "$(serial_new | grep -a 'GUEST: GFX no screen' | head -n 1 | cut -c1-80)"
+        fi
+        if serial_has 'GUEST: GFX trouble'; then
+            stage "guest: its driver tells of no trouble with the adapter" FAILED "$(serial_new | grep -a -c 'GUEST: GFX trouble') line(s)"
+        else
+            stage "guest: its driver tells of no trouble with the adapter" ok
+        fi
+        n=$(gbo_transfers)
+        if [ "${n:-0}" -gt 0 ]; then
+            stage "the host has read from and written to the memory objects of the guest" ok "$n times"
+        else
+            stage "the host has read from and written to the memory objects of the guest" FAILED "its counters tell of none"
+            VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '*Gbo*' 2>&1 | cut -c1-200 | head -n 12 | sed 's/^/    | /'
+        fi
+        guest_goes_on "the guest keeps running"
+        echo "    what the log of the VM says of 3D:"
+        grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" | cut -c1-200 | head -n 30 | sed 's/^/    | /'
+    else
+        echo "    what the log of the VM says of 3D:"
+        grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" 2> /dev/null | cut -c1-200 | head -n 30 | sed 's/^/    | /'
+    fi
+    end_phase
+    settle
+    run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+    run modifyvm "$VM" --accelerate-3d off --vram 16
+}
+
+
 # The phases below are for a device of the host with more than one function:
 # two NVMe controllers at one address, each with a drive of its own, which the
 # host has in one IOMMU group (run.sh, l1.sh).  That is what a graphics card
@@ -1569,6 +1651,7 @@ if setup; then
             emptyslot)   phase_emptyslot ;;
             nat)         phase_nat ;;
             import)      phase_import ;;
+            gfx3d)       phase_gfx3d ;;
             passthrough) phase_passthrough ;;
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;

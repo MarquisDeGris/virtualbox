@@ -305,22 +305,28 @@ make_initrd() # <name> <init script> <module>...
 
 note "The guest"
 make_initrd guest "$SIM/guest-init" nvme virtio_net
+# For the phase "gfx3d", in a run with a build which has 3D acceleration
+# (SIM_3D is yes): the same guest with the driver for the graphics adapter of
+# the VM.
+if [ "${SIM_3D:-no}" = yes ]; then
+    make_initrd guest3d "$SIM/guest-init" nvme virtio_net vmwgfx
+fi
 
 # A disk for the guest: a GPT with an EFI system partition which has the
 # kernel as a unified kernel image where the firmware looks for one, and, should
 # that not work, a script for the shell of the firmware.
-make_guest_disk() # <name> <kernel command line>
+make_guest_disk() # <name> <kernel command line> [<name of the initramfs, "guest" if not given>]
 {
-    local name=$1 cmdline=$2 esp=$WORK/$1-esp.img
+    local name=$1 cmdline=$2 esp=$WORK/$1-esp.img initrd=$WORK/${3:-guest}.cpio.gz
     rm -f "$esp" "$WORK/$name.raw" "$WORK/$name-BOOTX64.EFI"
     truncate -s 200M "$esp"
     mkfs.vfat -F 32 -n SIM "$esp" > /dev/null
     mmd -i "$esp" ::/EFI ::/EFI/BOOT
     mcopy -i "$esp" "$VMLINUZ" ::/vmlinuz.efi
-    mcopy -i "$esp" "$WORK/guest.cpio.gz" ::/initrd.img
+    mcopy -i "$esp" "$initrd" ::/initrd.img
     printf 'echo -off\r\nfs0:\r\n\\vmlinuz.efi %s initrd=\\initrd.img\r\n' "$cmdline" > "$WORK/$name-startup.nsh"
     mcopy -i "$esp" "$WORK/$name-startup.nsh" ::/startup.nsh
-    if [ -n "$UKIFY" ] && "$UKIFY" build --linux="$VMLINUZ" --initrd="$WORK/guest.cpio.gz" --cmdline="$cmdline" \
+    if [ -n "$UKIFY" ] && "$UKIFY" build --linux="$VMLINUZ" --initrd="$initrd" --cmdline="$cmdline" \
            --output="$WORK/$name-BOOTX64.EFI" > "$WORK/$name-ukify.log" 2>&1; then
         mcopy -i "$esp" "$WORK/$name-BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
     else
@@ -342,6 +348,16 @@ make_guest_disk guest-quiet "console=ttyS0,115200 quiet loglevel=3 mitigations=o
 # A guest which does not use MSI or MSI-X: its drivers get the INTx interrupts
 # of their devices (the phase "intx").
 make_guest_disk guest-nomsi "console=ttyS0,115200 quiet loglevel=3 mitigations=off rdinit=/init panic=30 pci=nomsi"
+# A guest which looks at the graphics adapter of its VM and writes to its
+# screen (the phase "gfx3d").  The serial port stays the console the script
+# of the guest talks on.
+GUEST_RAW_3D=
+if [ "${SIM_3D:-no}" = yes ]; then
+    make_guest_disk guest-3d "console=tty0 console=ttyS0,115200 quiet loglevel=3 mitigations=off rdinit=/init panic=30 sim3d=1" guest3d
+    GUEST_RAW_3D=$WORK/guest-3d.raw
+    echo "what this machine has to render with:"
+    vulkaninfo --summary 2> /dev/null | grep -E 'deviceName|deviceType|driverName|apiVersion' | sed 's/^/    /' | head -n 12
+fi
 
 # The drive: random data, so that the guest can only tell the checksum of
 # what it has read from it.
@@ -377,9 +393,11 @@ head -c 2M /dev/urandom > "$WORK/http/sim.bin"
 HTTP_MD5=$(md5sum < "$WORK/http/sim.bin" | cut -d' ' -f1)
 ( cd "$WORK/http" && exec python3 -m http.server 8099 --bind 127.0.0.1 > "$WORK/http.log" 2>&1 ) &
 HTTP_PID=$!
+runner_phases="plain emptyslot nat import"
+[ -n "$GUEST_RAW_3D" ] && runner_phases="$runner_phases gfx3d"
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
-         GUEST_RAW="$WORK/guest.raw" SIM_WHERE=runner SIM_BOOT_WAIT=240 SIM_HTTP_MD5="$HTTP_MD5" \
-    timeout -k 30 1800 bash "$SIM/vbox-phases.sh" plain emptyslot nat import
+         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_BOOT_WAIT=240 SIM_HTTP_MD5="$HTTP_MD5" \
+    timeout -k 30 1800 bash "$SIM/vbox-phases.sh" $runner_phases
 echo "part 1 ended with $?"
 kill "$HTTP_PID" 2> /dev/null
 echo "requests to the file server: $(grep -c 'GET /sim.bin' "$WORK/http.log" 2> /dev/null)"

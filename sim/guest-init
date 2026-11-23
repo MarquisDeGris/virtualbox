@@ -49,6 +49,40 @@ done
 kmsg
 say "READY"
 
+# The graphics adapter of the VM, where the kernel was told to look at it
+# ("sim3d=1", the phase "gfx3d" of the simulation): which driver has it, what
+# that driver said of it, and text on the screen, a few hundred screens of it.
+# With an adapter which offers 3D acceleration the driver keeps the screen in
+# objects of guest memory, which the host reads when it is told to.
+gfx_try()
+{
+    grep -q -w 'sim3d=1' /proc/cmdline || return 0
+    i=0
+    while [ "$i" -lt 20 ] && [ ! -e /sys/class/drm/card0 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    gdrv=none
+    [ -e /sys/class/drm/card0/device/driver ] && gdrv=$(basename "$(readlink /sys/class/drm/card0/device/driver)")
+    say "GFX card0 driver $gdrv fb $(tr '\n' ' ' < /proc/fb 2> /dev/null)"
+    dmesg | grep -i -E 'vmwgfx|\[drm\]' | sed -e 's/^\[ *[0-9.]*\] //' | cut -c1-200 | tail -n 40 \
+        | while read -r l; do say "GFX k: $l"; done
+    if [ -c /dev/tty0 ]; then
+        j=0
+        while [ "$j" -lt 4000 ]; do
+            echo "line $j of the guest on its screen 0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ" > /dev/tty0
+            j=$((j + 1))
+        done
+        say "GFX wrote $j lines to the screen"
+    else
+        say "GFX no screen to write to"
+    fi
+    dmesg | grep -i -E 'vmwgfx.*(error|fail|invalid|timed out)' | sed -e 's/^\[ *[0-9.]*\] //' | cut -c1-200 | tail -n 10 \
+        | while read -r l; do say "GFX trouble: $l"; done
+    say "GFX done"
+}
+gfx_try
+
 # A network adapter, where the VM has one (the phase "nat" of the simulation):
 # an address from the DHCP server on the other side, a ping to the gateway it
 # names, and a file fetched from there, whose checksum is told.  With NAT of
