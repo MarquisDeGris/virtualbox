@@ -2339,6 +2339,43 @@ static void tstCheckFunctionIsGone(PTSTVFIODEV pDev, uint8_t uDevFn, RTGCPHYS GC
 
 
 /**
+ * What tstRemovalWhileReadingHook() goes by and reports.
+ */
+typedef struct TSTREMOVALWHILEREADING
+{
+    /** The thread which plays the guest. */
+    RTNATIVETHREAD  hNativeThread;
+    /** What tstPdmGetRequestCount() returned before the read. */
+    uint32_t        cReqsBefore;
+    /** Whether the plug was pulled. */
+    bool            fPulled;
+    /** Whether the device has let go of the function in time. */
+    bool            fReleased;
+} TSTREMOVALWHILEREADING;
+
+
+/**
+ * @callback_method_impl{FNTSTVFIOCFGREAD, Pulls the plug of the function when
+ *      the guest is about to get its status register read from the device\, and
+ *      waits until the device has let go of the function: the read which is
+ *      under way finds the stand-in of the device then.}
+ */
+static DECLCALLBACK(void) tstRemovalWhileReadingHook(PTSTVFIODEV pDev, uint32_t offReg, size_t cb, void *pvUser)
+{
+    TSTREMOVALWHILEREADING *pState = (TSTREMOVALWHILEREADING *)pvUser;
+    RT_NOREF(cb);
+    if (   offReg == VBOX_PCI_STATUS
+        && !pState->fPulled
+        && RTThreadNativeSelf() == pState->hNativeThread)
+    {
+        pState->fPulled = true;
+        tstVfioKrnlDevRemove(pDev);
+        pState->fReleased = tstWaitForRelease(pDev, pState->cReqsBefore, RT_MS_5SEC);
+    }
+}
+
+
+/**
  * The host takes the device back while the VM runs, like when its plug is
  * pulled: the device is let go of, what the guest had mapped of it stays
  * harmless until the guest mappings are gone, and from then on the guest finds
@@ -2392,6 +2429,23 @@ static void tstRemoval(void)
             RTTESTI_CHECK_RC(tstPdmIoPortRead(TST_IOBAR_PORT + 0x10, &u32, 2), VINF_SUCCESS);
             RTTESTI_CHECK_MSG((u32 & 0xffff) == 0xffff, ("read %#RX32 from a port of the removed function\n", u32));
             RTTESTI_CHECK_RC(tstPdmIoPortWrite(TST_IOBAR_PORT + 0x10, 0, 2), VINF_SUCCESS);
+
+            /*
+             * The function is still there for the guest, and what the guest reads of its
+             * config space is answered from what is kept of it: there is only the stand-in
+             * of the device to ask, which has no answer, and nobody asks it.
+             */
+            uint32_t const cStrayBefore = tstVfioKrnlGetStrayAccessCount();
+            u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 4);
+            RTTESTI_CHECK_MSG(u32 == RT_MAKE_U32(TST_VENDOR_ID, TST_DEVICE_ID), ("the IDs of the removed function read %#RX32\n", u32));
+            for (uint32_t offReg = 0; offReg < 256; offReg += 4)
+                tstPdmPciCfgRead(0, TST_PCI_DEVFN, offReg, 4);
+            u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_STATUS, 2);
+            RTTESTI_CHECK_MSG(u32 & VBOX_PCI_STATUS_CAP_LIST, ("the status register of the removed function reads %#RX32\n", u32));
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_CACHE_LINE_SIZE, 0x10, 1);
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetStrayAccessCount() == cStrayBefore,
+                              ("%u access(es) to what stands in for the removed function\n",
+                               tstVfioKrnlGetStrayAccessCount() - cStrayBefore));
 
             /* An EMT gets around to it: the guest mappings go away. */
             tstPdmProcessRequests();
@@ -2456,6 +2510,61 @@ static void tstRemoval(void)
             tstVfioKrnlDevRemove(apDevs[0]);
             RTTESTI_CHECK_MSG(tstWaitForRelease(apDevs[0], cReqsBefore, RT_MS_5SEC), ("the device has not let go of function 0\n"));
             tstCheckFunctionIsGone(apDevs[0], TST_PCI_DEVFN, TST_BAR0_ADDR, "function 0");
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * The plug gets pulled while the guest reads from the config space.  The read
+     * which is under way finds the stand-in where the device was, and is answered
+     * from what is kept of the function like the ones which follow it.
+     */
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+            uint32_t const u32Before = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 4);
+            RTTESTI_CHECK_MSG((u32Before >> 16) & VBOX_PCI_STATUS_CAP_LIST, ("command and status read %#RX32\n", u32Before));
+
+            /* Command and status are read in one go; the device is asked for the status only. */
+            TSTREMOVALWHILEREADING State;
+            State.hNativeThread = RTThreadNativeSelf();
+            State.cReqsBefore   = tstPdmGetRequestCount();
+            State.fPulled       = false;
+            State.fReleased     = false;
+            uint32_t const cStrayBefore = tstVfioKrnlGetStrayAccessCount();
+            tstPdmSetRequestProcessing(false /*fAutomatic*/);
+            tstVfioKrnlSetCfgReadHook(tstRemovalWhileReadingHook, &State);
+            uint32_t const u32 = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 4);
+            tstVfioKrnlSetCfgReadHook(NULL, NULL);
+            RTTESTI_CHECK_MSG(State.fPulled, ("the device was not asked for the status register\n"));
+            RTTESTI_CHECK_MSG(State.fReleased, ("the device has not let go of the function\n"));
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetStrayAccessCount() == cStrayBefore + 1,
+                              ("%u access(es) to what stands in for the function, expected the one which was under way\n",
+                               tstVfioKrnlGetStrayAccessCount() - cStrayBefore));
+            RTTESTI_CHECK_MSG(   (u32 & 0xffff) == (u32Before & 0xffff)
+                              && ((u32 >> 16) & VBOX_PCI_STATUS_CAP_LIST),
+                              ("command and status read %#RX32 while the plug got pulled, %#RX32 before\n", u32, u32Before));
+
+            /* The same read again gets the same, and this time nobody is asked. */
+            uint32_t const u32Again = tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, 4);
+            RTTESTI_CHECK_MSG(u32Again == u32, ("command and status read %#RX32, then %#RX32\n", u32, u32Again));
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetStrayAccessCount() == cStrayBefore + 1,
+                              ("%u access(es) to what stands in for the function\n",
+                               tstVfioKrnlGetStrayAccessCount() - cStrayBefore));
+
+            /* An EMT gets around to it. */
+            tstPdmProcessRequests();
+            tstPdmSetRequestProcessing(true /*fAutomatic*/);
+            tstCheckFunctionIsGone(pDev, TST_PCI_DEVFN, TST_BAR0_ADDR, "function removed while it was read");
         }
         tstFixtureTeardown();
     }
