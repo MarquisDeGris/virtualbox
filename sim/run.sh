@@ -752,6 +752,36 @@ make_unattend_image()
     echo audio > "$WORK/cmda/simcmd/audio"
     head -c 700000 /dev/zero > "$WORK/cmda/simcmd/padding"
     genisoimage -quiet -J -r -V SIMAUDIO -o "$WORK/cmd-audio.iso" "$WORK/cmda" || return 1
+    # And one which has it install the Guest Additions from the other DVD
+    # drive, see phase_gfx3d there.
+    rm -rf "$WORK/cmdg" "$WORK/cmd-additions.iso"
+    mkdir -p "$WORK/cmdg/simcmd"
+    echo additions > "$WORK/cmdg/simcmd/additions"
+    head -c 1100000 /dev/zero > "$WORK/cmdg/simcmd/padding"
+    genisoimage -quiet -J -r -V SIMGA -o "$WORK/cmd-additions.iso" "$WORK/cmdg" || return 1
+}
+
+# The Guest Additions as Oracle publishes them, for a run with a build which
+# has 3D acceleration: the graphics driver for Windows which goes with it is
+# part of them.  Those of the version the build says it is, or, where there
+# are none of that version, the newest of the stable line.
+get_guest_additions()
+{
+    local v url
+    rm -f "$WORK/ga.iso"
+    v=$("$BIN/VBoxManage" --version 2> /dev/null | tail -n 1 | sed -e 's/[^0-9.].*$//')
+    for v in "$v" "$(curl -f -s --max-time 30 https://download.virtualbox.org/virtualbox/LATEST-STABLE.TXT | tr -dc '0-9.')"; do
+        [ -n "$v" ] || continue
+        url="https://download.virtualbox.org/virtualbox/$v/VBoxGuestAdditions_$v.iso"
+        if curl -f -L -sS --retry 3 --retry-delay 10 --connect-timeout 30 --max-time 600 -o "$WORK/ga.iso" "$url" \
+           && [ "$(stat -c %s "$WORK/ga.iso")" -gt 20000000 ]; then
+            echo "the Guest Additions $v: $(stat -c %s "$WORK/ga.iso") bytes, sha256 $(sha256sum "$WORK/ga.iso" | cut -d' ' -f1)"
+            return 0
+        fi
+        rm -f "$WORK/ga.iso"
+    done
+    echo "no Guest Additions could be fetched"
+    return 1
 }
 
 LINUX_STAGES=$(wc -l < "$STAGES")
@@ -773,9 +803,20 @@ if has_part win; then
             sleep 1
             i=$((i + 1))
         done
+        # With a build which has 3D acceleration Windows gets the Guest
+        # Additions and is started with it, see phase_gfx3d in win-phases.sh.
+        win_ga=
+        if [ "${SIM_3D:-no}" = yes ]; then
+            if get_guest_additions; then
+                win_ga=$WORK/ga.iso
+            else
+                stage "the Guest Additions for Windows are fetched" FAILED
+            fi
+        fi
         sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-win SIM_OUT="$OUT/win" SIM_STAGES="$STAGES" SIM_WHERE=runner \
                  WIN_ISO="$WORK/win.iso" WIN_UNATTEND_ISO="$WORK/unattend.iso" WIN_CMD_ISO="$WORK/cmd-shutdown.iso" \
-            timeout -k 30 4500 bash "$SIM/win-phases.sh" runner
+                 WIN_GA_ISO="$win_ga" WIN_CMD_ADDITIONS_ISO="$WORK/cmd-additions.iso" \
+            timeout -k 30 6600 bash "$SIM/win-phases.sh" runner
         echo "part 3 ended with $?"
     fi
 fi

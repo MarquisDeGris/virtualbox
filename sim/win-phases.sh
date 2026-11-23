@@ -818,6 +818,117 @@ phase_tpm()
     run snapshot "$VM" delete before-tpm
 }
 
+# Windows with 3D acceleration, for a build which has it (the DVDs for it are
+# only made then).  A graphics adapter with 3D acceleration is of use to
+# Windows with the driver for it only, which is part of the Guest Additions:
+# those Oracle publishes for the release line are installed, without a
+# question asked, and Windows is started again in the VM with 3D acceleration
+# switched on.  What puts the windows on the screen then draws with that
+# driver.  The simulation has the screen change: the keys which bring up the
+# screen for signing in and the one which leaves it, forty times.  Nobody
+# looks at the pictures but the checks; some are kept.
+#
+# All of it is done on top of a snapshot which is given up at the end: the
+# disk stays as it was for the parts which follow.
+gfx_keys() # <rounds>
+{
+    local i=0
+    while [ "$i" -lt "$1" ] && [ "$(vmstate)" = running ]; do
+        # Ctrl, Alt and Delete down, and up again.
+        vbm controlvm "$VM" keyboardputscancode 1d 38 e0 53 e0 d3 b8 9d > /dev/null 2>&1
+        sleep 2
+        # A few letters, and the key which leaves the screen.
+        # shellcheck disable=SC2046
+        vbm controlvm "$VM" keyboardputscancode $(scancodes "abc") > /dev/null 2>&1
+        sleep 1
+        vbm controlvm "$VM" keyboardputscancode 01 81 > /dev/null 2>&1
+        sleep 2
+        i=$((i + 1))
+    done
+    echo "    the keys were pressed $i times"
+}
+
+phase_gfx3d()
+{
+    PHASE=win-gfx3d
+    local what
+    [ -s "${WIN_GA_ISO:-}" ] && [ -s "${WIN_CMD_ADDITIONS_ISO:-}" ] || return 0
+    settle
+    if ! run snapshot "$VM" take before-3d; then
+        stage "Windows gets the Guest Additions installed" skipped "no snapshot"
+        return
+    fi
+
+    what="Windows gets the Guest Additions installed"
+    run storageattach "$VM" --storagectl sata --port 1 --device 0 --type dvddrive --medium "$WIN_GA_ISO" --forceunmount
+    dvd "$WIN_CMD_ADDITIONS_ISO"
+    stalls_reset
+    if start_and_report "Windows starts for the Guest Additions to be installed" "$START_WAIT"; then
+        serial_show '^WIN: VIDEO' 4
+        if wait_serial '^WIN: ADDITIONS (exit=|failed)' 1200; then
+            wait_serial '^WIN: VIDEO after-additions dwm' 60
+            serial_show '^WIN: (ADDITIONS|VIDEO after)' 12
+            if serial_has '^WIN: ADDITIONS exit=0 '; then
+                stage "$what" ok "$(serial_value 'WIN: ADDITIONS (exit=.*)')"
+            else
+                stage "$what" FAILED "$(serial_value 'WIN: (ADDITIONS .*)')"
+            fi
+        else
+            stage "$what" FAILED "the guest has not told of it in 20 minutes"
+            shot
+        fi
+        guest_shutdown
+    fi
+    stalls_stage
+    case "$(vmstate)" in
+        poweroff) ;;
+        *)        end_phase ;;
+    esac
+    settle
+    run storageattach "$VM" --storagectl sata --port 1 --device 0 --type dvddrive --medium emptydrive --forceunmount
+    dvd emptydrive
+
+    what="Windows starts in the VM with 3D acceleration"
+    if ! run modifyvm "$VM" --graphicscontroller vboxsvga --vram 128 --accelerate-3d on; then
+        stage "$what" skipped "this build takes no 3D acceleration for a VM"
+    else
+        PHASE=win-gfx3d-on
+        stalls_reset
+        if start_and_report "$what" "$START_WAIT"; then
+            serial_show '^WIN: VIDEO' 4
+            if serial_has '^WIN: VIDEO start name=VirtualBox_Graphics_Adapter[^ ]* driver=[^ ]+ status=OK'; then
+                stage "guest: the graphics driver of the Guest Additions has the adapter" ok "$(serial_value 'WIN: VIDEO start (name=[^ ]* driver=[^ ]*)')"
+            else
+                stage "guest: the graphics driver of the Guest Additions has the adapter" FAILED "$(serial_value 'WIN: VIDEO start (name=.*)')"
+            fi
+            shot
+            gfx_keys 40
+            shot
+            if [ "$(vmstate)" = running ]; then
+                stage "the VM with 3D acceleration runs on while the screen of Windows changes" ok
+            else
+                stage "the VM with 3D acceleration runs on while the screen of Windows changes" FAILED "it is in state '$(vmstate)'"
+                diag
+            fi
+            guest_goes_on "the guest keeps running" 120
+            echo "    what the adapter has counted (what is not zero, without the registers):"
+            VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/Devices/vga/VMSVGA/*' 2>&1 \
+                | grep -a -v -E '/VMSVGA/Reg/| c="0"| cPeriods="0"| val="0"' | sed -e 's/ unit="[^"]*"//' -e 's/ vis="[^"]*"//' | cut -c1-160 | head -n 40 | sed 's/^/    | /'
+            echo "    what the log of the VM says of 3D:"
+            grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" | grep -a -v -E 'stub|^[0-9:. ]*Vulkan 1\.[0-9]$' | cut -c1-200 | head -n 40 | sed 's/^/    | /'
+        fi
+        stalls_stage
+        case "$(vmstate)" in
+            running)  guest_shutdown ;;
+            poweroff) keep_logs ;;
+            *)        end_phase ;;
+        esac
+    fi
+    settle
+    run snapshot "$VM" restore before-3d
+    run snapshot "$VM" delete before-3d
+}
+
 mode_runner()
 {
     : "${WIN_ISO:?}" "${WIN_UNATTEND_ISO:?}"
@@ -852,6 +963,10 @@ mode_runner()
     if [ "$(vmstate)" = poweroff ]; then
         echo "==== phase win-tpm on $WHERE"
         phase_tpm
+    fi
+    if [ "$(vmstate)" = poweroff ] && [ -s "${WIN_GA_ISO:-}" ]; then
+        echo "==== phase win-gfx3d on $WHERE"
+        phase_gfx3d
     fi
     end_phase
     ls -l "$SIM_WORK/win.vdi" 2>&1 | sed 's/^/    /'

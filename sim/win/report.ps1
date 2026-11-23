@@ -201,6 +201,21 @@ if ($tpm.Count -gt 0) {
 foreach ($t in @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match $tpmRe })) {
     Say ("TPMDEV id={0} status={1} problem={2} service={3}" -f $t.InstanceId, $t.Status, (Problem-Code $t), (Prop $t.InstanceId 'DEVPKEY_Device_Service'))
 }
+
+# The graphics adapter as Windows has it: its name, the version of its driver
+# and whether it works, and whether the program which puts the windows on the
+# screen is running.
+function Report-Video([string]$When) {
+    try {
+        foreach ($v in @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)) {
+            Say ("VIDEO {0} name={1} driver={2} status={3} mode={4}x{5}" -f $When, ($v.Name -replace '\s+', '_'), $v.DriverVersion, $v.Status, $v.CurrentHorizontalResolution, $v.CurrentVerticalResolution)
+        }
+        Say ("VIDEO {0} dwm={1}" -f $When, @(Get-Process -Name dwm -ErrorAction SilentlyContinue).Count)
+    } catch {
+        Say ("VIDEO {0} failed: {1}" -f $When, $_.Exception.Message)
+    }
+}
+Report-Video 'start'
 Say 'REPORT-END'
 
 # Keeps running: says that it is alive, tells when a device behind a bridge
@@ -289,10 +304,45 @@ function Host-Command {
                 if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\shutdown')) { return 'shutdown' }
                 if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\intx')) { return 'intx' }
                 if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\audio')) { return 'audio' }
+                if (Test-Path -LiteralPath (Join-Path $dr.RootDirectory.FullName 'simcmd\additions')) { return 'additions' }
             }
         }
     } catch { }
     return ''
+}
+
+# Installs the Guest Additions from the DVD which has them, without a
+# question asked.  Their drivers are signed by their maker, whom Windows is
+# told to trust first, as their own tool for it does.
+function Install-Additions {
+    $exe = $null
+    foreach ($dr in [System.IO.DriveInfo]::GetDrives()) {
+        if ($dr.DriveType -eq [System.IO.DriveType]::CDRom -and $dr.IsReady) {
+            $p = Join-Path $dr.RootDirectory.FullName 'VBoxWindowsAdditions.exe'
+            if (Test-Path -LiteralPath $p) { $exe = $p }
+        }
+    }
+    if (-not $exe) {
+        Say 'ADDITIONS failed: no DVD which has them'
+        return
+    }
+    try {
+        $dir = Split-Path -Parent $exe
+        $util = Join-Path $dir 'cert\VBoxCertUtil.exe'
+        if (Test-Path -LiteralPath $util) {
+            foreach ($c in @(Get-ChildItem -Path (Join-Path $dir 'cert') -Filter 'vbox*.cer' -ErrorAction SilentlyContinue)) {
+                $o = (& $util add-trusted-publisher $c.FullName --root $c.FullName 2>&1 | Out-String) -replace '\s+', ' '
+                Say ("ADDITIONS-CERT {0} {1}" -f $c.Name, $o.Trim())
+            }
+        }
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $proc = Start-Process -FilePath $exe -ArgumentList '/S' -Wait -PassThru -ErrorAction Stop
+        $sw.Stop()
+        Say ("ADDITIONS exit={0} seconds={1}" -f $proc.ExitCode, [int]$sw.Elapsed.TotalSeconds)
+    } catch {
+        Say ("ADDITIONS failed: {0}" -f $_.Exception.Message)
+    }
+    Report-Video 'after-additions'
 }
 
 # The interrupts Windows has given a device, as numbers with commas between: a
@@ -419,6 +469,7 @@ function Play-Sound([int]$Round) {
 }
 
 $intxDone = $false
+$additionsDone = $false
 $audioBusy = $false
 $seen = Behind-Bridges
 foreach ($k in $seen.Keys) {
@@ -444,6 +495,13 @@ for ($i = 1; $i -le $rounds; $i++) {
         $intxDone = $true
         Use-LineInterrupt $i
         $seen = Behind-Bridges
+        continue
+    }
+    if ($cmd -eq 'additions') {
+        if (-not $additionsDone) {
+            $additionsDone = $true
+            Install-Additions
+        }
         continue
     }
     if ($cmd -eq 'shutdown') {
