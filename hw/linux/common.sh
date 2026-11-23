@@ -129,6 +129,25 @@ check() # <what> <ok|FAILED|skipped|look> [<note>]
     stage "$@"
 }
 
+# Ends the service of the VirtualBox of these scripts, the one which was
+# started from $BIN, and waits until it is gone: a test which starts while
+# the service of the test before it is still ending talks to that one and
+# does not get its VM cleared away (run 314 of the workflow).  A VirtualBox
+# which is installed on the machine has a service of its own, which is left
+# alone.
+svc_stop()
+{
+    local i=0
+    pkill -f "$BIN/VBoxSVC" 2> /dev/null
+    while pgrep -f "$BIN/VBoxSVC" > /dev/null 2>&1 && [ "$i" -lt 30 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    pkill -KILL -f "$BIN/VBoxSVC" 2> /dev/null
+    pkill -f "$BIN/VBoxXPCOMIPCD" 2> /dev/null
+    return 0
+}
+
 vmstate() { vbm showvminfo "$VM" --machinereadable 2> /dev/null | sed -n 's/^VMState="\(.*\)"$/\1/p'; }
 # What VirtualBox tells of the device in the slot: "<hotplug|fixed>,<present|absent>,<inuse|unused>".
 pcistate() { vbm showvminfo "$VM" --machinereadable 2> /dev/null | sed -n 's/^AttachedHostPCIState=[^,]*,\(.*\)$/\1/p' | sed -n '1p'; }
@@ -207,8 +226,14 @@ test_begin() # <name of the script>
     mkdir -p "$HOME" "$VBOX_USER_HOME"
     ulimit -l unlimited 2> /dev/null
     # A VM of its own, made anew, with all it has under the work directory.
+    # What a test before this one left is cleared away first: its VM, if it
+    # still runs, the service, and what the service knew, so that this test
+    # starts with a VirtualBox which knows of no VM and no disk.
     vbm controlvm "$VM" poweroff > /dev/null 2>&1
-    vbm unregistervm "$VM" --delete > /dev/null 2>&1
+    pkill -KILL -f "$BIN/VBoxHeadless.*--comment $VM " 2> /dev/null
+    svc_stop
+    rm -rf "$work/vbox" "$work/vms"
+    mkdir -p "$VBOX_USER_HOME"
     run setproperty machinefolder "$work/vms"
 }
 
@@ -272,7 +297,7 @@ test_end()
         log_lines | grep -i -E 'fail|could not|error|refus|not supported|timed out' | short 240 | sed -n '1,30p' >> "$RESULT"
     fi
     echo "checks which failed: $failed" | tee -a "$RESULT"
-    pkill -x VBoxSVC 2> /dev/null
+    svc_stop
     privacy_check "$RESULT"
     give_back
     echo

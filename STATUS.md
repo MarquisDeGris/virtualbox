@@ -2019,8 +2019,27 @@ all of it with the sanitizers in VBoxSVC and in the VM process, the
 graphics adapter and the renderer under it included. The sanitizers
 wrote nothing.
 
+**The development line, with the sanitizers** (run 314, the same day,
+`pci-passthrough-hotplug-v1` @ `4add131b`, the parts on the runner,
+with the drive and with the device of four gigabytes, 46 minutes, AMD
+EPYC 9V45). The branch of the first merge request has the KVM backend
+of upstream under the same passthrough device. The sanitizers wrote
+nothing there either, in any part. 130 checks pass and 1 fails, which
+was a defect of the scripts for a machine with real hardware and is
+what explains the twelve lines of run 309 as far as anything does: a
+test ended the service of VirtualBox and did not wait for it to be
+gone, and the test after it, started at once by the script which runs
+them all, talked to the service which was ending and did not get the
+VM of the test before cleared away ("Machine settings file ... already
+exists"). The simulation waits between two tests, which is why only
+the script for all of them met it. A test waits for the service to be
+gone now, at its end and at its start, starts with a VirtualBox which
+knows of no VM, and ends only the service which was started from its
+own build, not one of a VirtualBox installed on the machine.
+
 Not done this way yet: the parts with the device of two functions and
-with the VGA adapter, and Windows with a device in the slot.
+with the VGA adapter (run 313 is to tell), and Windows with a device
+in the slot.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3235,5 +3254,6 @@ virtual machine.
 | 310 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the part barhost, built the same way, exploring | passed | 41 minutes, Intel Xeon 6975P-C. 57 pass, 1 fails. The part of run 309 once more: the test which counted twelve lines there passes, twice, and the sanitizers wrote nothing. The check which fails is the one which keeps names out of a result, set off by a path of the runner in what the fetched build says of itself |
 | 311 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 86 minutes, Intel Xeon 6975P-C; 53 of them the runner took to fetch the packages of a kernel, as in run 308. All 50 pass. The build which is fetched is the published one with 3D acceleration: it is fetched, is the one listed, and the first script for a machine with real hardware passes with it |
 | 312 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part vgahost, exploring | passed | 24 minutes, Intel Xeon 6975P-C. All 47 pass. The first run with the workflow keeping the packages of the kernel: none were kept yet, they were fetched in 5 seconds and are kept now |
+| 314 | `pci-passthrough-hotplug-v1` @ `4add131b` | sim with the parts runner, simhost and barhost, the whole tree built with the sanitizers, exploring | passed | 46 minutes, AMD EPYC 9V45. 130 pass, 1 fails. The development line with the sanitizers: they wrote nothing. The check which fails found a defect of the scripts for a machine with real hardware: a test started before the service of the test before it was gone, see "The development line, with the sanitizers" |
 
 Run numbers are those GitHub shows for the `build` workflow.
