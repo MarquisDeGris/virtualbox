@@ -431,7 +431,12 @@ sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAG
          ${san_asan:+LD_LIBRARY_PATH="$BIN"} \
     timeout -k 30 3000 bash "$SIM/vbox-phases.sh" $runner_phases
 echo "part 1 ended with $?"
-if [ "${SIM_SANITIZED:-no}" = yes ]; then
+# What the sanitizers wrote down so far, after a part of the simulation.
+sanitizers_say() # <which programs: text for the name of the check>
+{
+    local na nu f what
+    [ "${SIM_SANITIZED:-no}" = yes ] || return 0
+    what="the address sanitizer has nothing to say of the programs of VirtualBox which ran $1"
     # What the sanitizers wrote down.  The address sanitizer writes when it
     # has found an access to memory which is not the program's to access; the
     # other one writes about arithmetic and conversions which the language
@@ -443,9 +448,9 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     nu=$(cat "$OUT"/sanitizers/* 2> /dev/null | grep -a -c 'runtime error')
     echo "files of the sanitizers: $(ls "$OUT/sanitizers" 2> /dev/null | wc -l)"
     if [ "$na" = 0 ]; then
-        stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" ok
+        stage "$what" ok
     else
-        stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" FAILED "$na report(s), by kind and place below, and the first of them"
+        stage "$what" FAILED "$na report(s), by kind and place below, and the first of them"
         cat "$OUT"/sanitizers/* | grep -a '^SUMMARY: AddressSanitizer' | cut -c1-200 | sort | uniq -c | sort -rn | head -n 20
         f=$(grep -a -l 'ERROR: AddressSanitizer' "$OUT"/sanitizers/* | head -n 1)
         echo "---- $f"
@@ -453,7 +458,12 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     fi
     echo "reports of undefined behaviour: $nu"
     cat "$OUT"/sanitizers/* 2> /dev/null | grep -a 'runtime error' | sed -e 's/^.*\/src\/VBox\//src\/VBox\//' | cut -c1-200 | sort | uniq -c | sort -rn | head -n 40
-fi
+    # What was found is kept apart from what the next part finds.
+    mkdir -p "$OUT/sanitizers-seen"
+    sudo sh -c "mv '$OUT'/sanitizers/* '$OUT/sanitizers-seen/'" 2> /dev/null
+    return 0
+}
+sanitizers_say "on the runner, with the Linux guest"
 kill "$HTTP_PID" 2> /dev/null
 echo "requests to the file server: $(grep -c 'GET /sim.bin' "$WORK/http.log" 2> /dev/null)"
 
@@ -835,8 +845,11 @@ if has_part win; then
         sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-win SIM_OUT="$OUT/win" SIM_STAGES="$STAGES" SIM_WHERE=runner \
                  WIN_ISO="$WORK/win.iso" WIN_UNATTEND_ISO="$WORK/unattend.iso" WIN_CMD_ISO="$WORK/cmd-shutdown.iso" \
                  WIN_GA_ISO="$win_ga" WIN_CMD_ADDITIONS_ISO="$WORK/cmd-additions.iso" \
-            timeout -k 30 6600 bash "$SIM/win-phases.sh" runner
+                 ${san_asan:+ASAN_OPTIONS="$san_asan"} ${san_ubsan:+UBSAN_OPTIONS="$san_ubsan"} ${san_asan:+LD_LIBRARY_PATH="$BIN"} \
+                 ${san_asan:+WIN_INSTALL_WAIT=9000} ${san_asan:+WIN_START_WAIT=2700} \
+            timeout -k 30 15000 bash "$SIM/win-phases.sh" runner
         echo "part 3 ended with $?"
+        sanitizers_say "on the runner, with Windows"
     fi
 fi
 

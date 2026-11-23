@@ -1889,16 +1889,42 @@ build `hw/linux/fetch.sh` fetches when it is not told which: one build
 for whatever is tried on a machine with a graphics card, the
 passthrough and VMs with 3D acceleration.
 
-What this is not: a program in a guest which draws in 3D, a Windows
-guest, the Guest Additions, or the driver of a graphics card. It is
-the way from the driver of a guest through the adapter to a renderer,
-with a guest which writes text.
+**Windows with 3D acceleration** (run 306, 2026-11-23, the parts on
+the runner with the Linux guest and with Windows, 47 minutes, Intel
+Xeon 6975P-C, all 86 checks pass at the first try). A graphics adapter
+with 3D acceleration is of use to Windows with the driver for it only,
+which is part of the Guest Additions. The part with Windows has a
+phase for a build with 3D acceleration: the Guest Additions which
+Oracle publishes for the release line (7.2.22) are fetched and
+installed in the guest without a question asked, Windows is started
+again in the VM with 3D acceleration switched on, and the simulation
+has the screen change forty times with keys. It is done on top of a
+snapshot which is given up afterwards.
 
-What is to come of it: the same phase with the whole build under the
-sanitizers, which the workflow is prepared for and which has not run
-yet (`VBOX_WITH_GCC_SANITIZER=1` among the arguments for kmk); and a
-Windows guest with the Guest Additions, which is what the reports in
-the tracker are about.
+- The Guest Additions install in 16 seconds, and the graphics adapter
+  goes from the basic driver of Windows to the one of the Guest
+  Additions.
+- Started with 3D acceleration, that driver tells the host that it
+  runs with it (in the log of the VM: 3D, VGPU10), the host puts the
+  screen out by the accelerated way and counts 266 pictures brought to
+  the screen that way in four minutes. The picture kept at the end is
+  the sign-in screen of Windows, drawn as it should be.
+- The VM and the guest run on through it, and Windows shuts down when
+  told to.
+
+It is Windows Server 2025 without the desktop, whose sign-in screen is
+most of what there is to draw; a desktop with programs which draw
+themselves is more than this.
+
+What this is not: a program in a guest which draws in 3D, or the
+driver of a graphics card. It is the way from the driver of a guest
+through the adapter to a renderer, with a Linux guest which writes
+text and with Windows which shows its sign-in screen.
+
+What is to come of it: Windows with 3D acceleration with the whole
+build under the sanitizers (see "VMs with the sanitizers"), and a
+Windows with a desktop and a program which draws, which is what the
+reports in the tracker are about.
 
 ### VMs with the sanitizers, from 2026-11-23
 
@@ -3149,5 +3175,6 @@ virtual machine.
 | 303 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | package, built with 3D acceleration | passed | 15 minutes, AMD EPYC 9V74. The package `vbox-26e4045afd60-3d-ubuntu2404.tar.zst`, 155 MB, published in the pre-release next to the one without 3D acceleration |
 | 304 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the part on the runner, the whole tree built with the sanitizers of GCC and with 3D acceleration, exploring | passed, the job having stopped | 25 minutes, AMD EPYC 9V74. The tree builds that way, in 22 minutes. The job stopped at the step after: the testcase of the passthrough device does not link with the sanitizers put in for the whole tree, as it puts functions of its own in the place of some of the C library, which the library of the address sanitizer wants too. The simulation did not run. A run of this kind leaves the steps with testcases out since |
 | 305 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | the same | passed | 37 minutes, Intel Xeon 6975P-C. 35 pass, 2 fail. The first VMs with the sanitizers in the whole build: they run, the phase with 3D acceleration passes, and the address sanitizer has one finding, in the event queue of Main and not about a guest, which also is why a VM with a saved state was gone too early. See "VMs with the sanitizers" |
+| 306 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner and win, built with 3D acceleration, exploring | passed | 47 minutes, Intel Xeon 6975P-C. All 86 pass. Windows with 3D acceleration for the first time: the Guest Additions installed in the guest, Windows started with 3D acceleration, the screen changed forty times, see "Windows with 3D acceleration" |
 
 Run numbers are those GitHub shows for the `build` workflow.
