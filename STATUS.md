@@ -1970,10 +1970,35 @@ nothing to say, of VBoxSVC or of a VM process. For a tree which has
 the defect the simulation tells the sanitizer to let this one kind of
 finding pass, so that the programs get further.
 
-Not done this way yet: the parts in the machine standing in for a
-host, which is where a device is passed through (the scripts pass the
-settings of the sanitizers into that machine since, untried); Windows
-as the guest (run 308 is to tell).
+**The parts with a passed through device, with the sanitizers** (run
+309, the same day, `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a`, the
+parts on the runner, with the drive and with the device of four
+gigabytes, 61 minutes, AMD EPYC 7763). The settings of the sanitizers
+go into the machine which stands in for a host, where VirtualBox has a
+kernel with an IOMMU under it and a device to pass on. With the drive:
+passed through, read and written, with its interrupts, after pause and
+resume; taken out of the slot with the guest asked and by force and
+put in again; a start without it; the host asking for it back; a
+guest which uses INTx. With the device of four gigabytes: its memory,
+its ROM, the scripts for a machine with real hardware. The part with
+the drive takes 24 minutes that way, 17 without.
+
+- The sanitizers wrote nothing, in any part: no report about the
+  passthrough device, the bus, Main or the VMM, with the one kind of
+  finding of run 305 let pass, and none of undefined behaviour.
+- 135 checks pass and 2 fail, neither for something a sanitizer found.
+  The build which is fetched was started with the libraries of the
+  build of the run and did not run, which is put right in the scripts.
+  And the first test, run once more by the script for all which takes
+  root, counted twelve lines of the device in the log of its VM which
+  tell of something that did not work, after it had passed with no
+  such line earlier in the same part. Which lines is not known: the
+  result had the first sixty lines of the log and not those. A test
+  writes the lines it counted into its result since, and run 310
+  repeats the part.
+
+Not done this way yet: Windows as the guest (run 308 is to tell), and
+the parts with the device of two functions and with the VGA adapter.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3182,5 +3207,6 @@ virtual machine.
 | 305 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | the same | passed | 37 minutes, Intel Xeon 6975P-C. 35 pass, 2 fail. The first VMs with the sanitizers in the whole build: they run, the phase with 3D acceleration passes, and the address sanitizer has one finding, in the event queue of Main and not about a guest, which also is why a VM with a saved state was gone too early. See "VMs with the sanitizers" |
 | 306 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner and win, built with 3D acceleration, exploring | passed | 47 minutes, Intel Xeon 6975P-C. All 86 pass. Windows with 3D acceleration for the first time: the Guest Additions installed in the guest, Windows started with 3D acceleration, the screen changed forty times, see "Windows with 3D acceleration" |
 | 307 | `fix/event-queue-delete-type` @ `8e1ab048` | sim with the part on the runner, the whole tree built with the sanitizers, exploring | passed | 22 minutes, AMD EPYC 9V74. All 20 pass. The development line of upstream with the one correction to the event queue of Main: it builds with the sanitizers, its VMs run, and the address sanitizer has nothing to say where it had six reports without the correction (run 305) |
+| 309 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner, simhost and barhost, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 61 minutes, AMD EPYC 7763. 135 pass, 2 fail. The parts with a passed through device with the sanitizers for the first time: the sanitizers wrote nothing. The two checks which fail are not about a finding of theirs, see "The parts with a passed through device, with the sanitizers" |
 
 Run numbers are those GitHub shows for the `build` workflow.
