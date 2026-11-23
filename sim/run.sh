@@ -394,6 +394,9 @@ HTTP_MD5=$(md5sum < "$WORK/http/sim.bin" | cut -d' ' -f1)
 ( cd "$WORK/http" && exec python3 -m http.server 8099 --bind 127.0.0.1 > "$WORK/http.log" 2>&1 ) &
 HTTP_PID=$!
 runner_phases="plain emptyslot nat import"
+# A tree which is not about the passthrough device, told by its not having
+# the testcase of it, has no hot-plug capable slot to look at.
+[ -e "$WS/src/VBox/Devices/testcase/tstDevPciVfio.cpp" ] || runner_phases="plain nat import"
 [ -n "$GUEST_RAW_3D" ] && runner_phases="$runner_phases gfx3d"
 # A build with the sanitizers (SIM_SANITIZED is yes): what they find in a
 # program of VirtualBox goes to files, one for each process, and the program
@@ -407,6 +410,18 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     chmod 777 "$OUT/sanitizers"
     san_asan="detect_leaks=0:log_path=$OUT/sanitizers/asan"
     san_ubsan="print_stacktrace=1:log_path=$OUT/sanitizers/ubsan"
+    # One thing the address sanitizer finds in every program of VirtualBox
+    # which has an event queue (run 305): an event of the queue is freed as
+    # another type than it was allocated as, which ends the program there.
+    # A tree which has that put right is told by its source; for one which
+    # has not, this kind of finding is switched off, so that the programs get
+    # as far as there is something else to find.
+    if grep -q 'delete pMyEvent;' "$WS/src/VBox/Main/glue/NativeEventQueue.cpp" 2> /dev/null; then
+        echo "the tree frees the events of its queue as what they are"
+    else
+        echo "the tree frees the events of its queue as another type: the address sanitizer is told to let that pass"
+        san_asan="$san_asan:new_delete_type_mismatch=0"
+    fi
     # Everything takes two or three times as long with them.
     boot_wait=600
 fi
@@ -421,19 +436,23 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     # has found an access to memory which is not the program's to access; the
     # other one writes about arithmetic and conversions which the language
     # leaves undefined, of which a tree of this size has some.
-    na=$(ls "$OUT/sanitizers" 2> /dev/null | grep -c '^asan')
-    nu=$(ls "$OUT/sanitizers" 2> /dev/null | grep -c '^ubsan')
+    # Both sanitizers write to the files of either name (run 305), so the
+    # files are told apart by what is in them.
+    sudo chmod -R a+rX "$OUT/sanitizers" 2> /dev/null
+    na=$(cat "$OUT"/sanitizers/* 2> /dev/null | grep -a -c 'ERROR: AddressSanitizer')
+    nu=$(cat "$OUT"/sanitizers/* 2> /dev/null | grep -a -c 'runtime error')
+    echo "files of the sanitizers: $(ls "$OUT/sanitizers" 2> /dev/null | wc -l)"
     if [ "$na" = 0 ]; then
         stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" ok
     else
-        stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" FAILED "$na file(s), the first lines of each follow"
-        for f in "$OUT"/sanitizers/asan*; do
-            echo "---- $f"
-            sudo head -n 30 "$f" | cut -c1-220
-        done
+        stage "the address sanitizer has nothing to say of the programs of VirtualBox which ran" FAILED "$na report(s), by kind and place below, and the first of them"
+        cat "$OUT"/sanitizers/* | grep -a '^SUMMARY: AddressSanitizer' | cut -c1-200 | sort | uniq -c | sort -rn | head -n 20
+        f=$(grep -a -l 'ERROR: AddressSanitizer' "$OUT"/sanitizers/* | head -n 1)
+        echo "---- $f"
+        head -n 40 "$f" | cut -c1-220
     fi
-    echo "files of the sanitizer for undefined behaviour: $nu"
-    sudo cat "$OUT"/sanitizers/ubsan* 2> /dev/null | grep -a 'runtime error' | sed -e 's/^.*\/src\/VBox\//src\/VBox\//' | cut -c1-200 | sort | uniq -c | sort -rn | head -n 40
+    echo "reports of undefined behaviour: $nu"
+    cat "$OUT"/sanitizers/* 2> /dev/null | grep -a 'runtime error' | sed -e 's/^.*\/src\/VBox\//src\/VBox\//' | cut -c1-200 | sort | uniq -c | sort -rn | head -n 40
 fi
 kill "$HTTP_PID" 2> /dev/null
 echo "requests to the file server: $(grep -c 'GET /sim.bin' "$WORK/http.log" 2> /dev/null)"

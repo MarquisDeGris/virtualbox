@@ -1900,6 +1900,50 @@ yet (`VBOX_WITH_GCC_SANITIZER=1` among the arguments for kmk); and a
 Windows guest with the Guest Additions, which is what the reports in
 the tracker are about.
 
+### VMs with the sanitizers, from 2026-11-23
+
+The testcase of the passthrough device has run with the sanitizers of
+GCC from the start, against a stand-in for the kernel. Since run 305
+the workflow can build the whole tree with them
+(`VBOX_WITH_GCC_SANITIZER=1` among the arguments for kmk, the switch
+the tree has for it) and run the simulation with that build: VBoxSVC,
+VBoxManage and the VM process with every device in it, with a real
+kernel under them and a guest which runs. What the address sanitizer
+finds ends the program at that place and is written to a file.
+
+Run 305 (2026-11-23, `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a`,
+the part on the runner, built with 3D acceleration too, 37 minutes,
+Intel Xeon 6975P-C):
+
+- The tree builds that way, in 22 minutes, and its programs run: the
+  VMs boot with KVM, and a phase takes about twice its time.
+- One finding, six times, the same in VBoxSVC and in each of the five
+  VM processes: the event queue Main has for XPCOM frees an event as
+  another type than it was allocated as (`NativeEventQueue.cpp`,
+  `plEventDestructor`), with the size of the smaller type, 120 bytes
+  for an object of 128. It is code of upstream which has nothing to do
+  with a guest, and the allocator of the C library takes no notice of
+  the size. The sanitizer ends the program at it, which made one check
+  fail: the VM which had saved its state was gone before that was
+  told.
+- Nothing else. No report about a device, about the VMM, about the
+  passthrough code as far as the part on the runner runs it (the empty
+  slot), or about the graphics adapter with 3D acceleration and the
+  renderer under it, whose phase passed. No report of undefined
+  behaviour at all.
+- 35 checks pass, 2 fail: the saved state, and the check that the
+  address sanitizer has nothing to say.
+
+The finding is put right on a branch of its own,
+`fix/event-queue-delete-type`, one commit on `main` of upstream. For a
+tree which has the defect the simulation tells the sanitizer to let
+this one kind of finding pass, so that the programs get further.
+
+Not done this way: the parts in the machine standing in for a host,
+which is where a device is passed through (the settings of the
+sanitizers have to get into that machine for it); Windows as the
+guest.
+
 ### The issue with upstream, 2026-11-23
 
 The work is made known to upstream since 2026-11-23: issue 999 in the
@@ -2851,6 +2895,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-23 | What takes root on a machine with real hardware is one command, `hw/linux/tests.sh` | Each command somebody has to type there can be mistyped or left out, and the person is not to have to know which comes next. The scripts it runs stay as they are and can be read and run one by one |
 | 2026-11-23 | The issue which makes the work known to upstream is filed now and not after the test on hardware | Whom this work is for said yes to it and wants the code to be used. The defects of `main` it lists are of use to upstream whatever becomes of the rest, and the test on hardware has no date. That nothing ran on hardware is said there in so many words, with the promise to add the result |
 | 2026-11-23 | The workflow can build with 3D acceleration for VMs, and the simulation has a VM with it, rendered in software on the runner | Whom this work is for asked for the requests and reports about 3D to be taken up, and none of them can be without a VM which has 3D acceleration. A software renderer is no graphics card, but the code of the graphics adapter which a guest reaches is the same with both |
+| 2026-11-23 | The simulation can be run with a build which has the sanitizers in all of it, and what the address sanitizer finds in upstream's code is put right on a branch of its own | The testcase with the sanitizers covers the passthrough device against a stand-in for the kernel; this covers whatever a guest of the simulation reaches, with the kernel as it is. The first run found a defect of upstream within minutes, which is what such a run is for. A finding which is not about this work does not go into the branches of this work |
 | 2026-11-23 | The build which a machine with real hardware fetches is the one with 3D acceleration | Run 302 had it go through the parts with a passed through device as the build without goes through them. One build for the passthrough and for VMs with 3D acceleration spares the person at the machine fetching twice and knowing which is in place. The build without stays published and can be named |
 | 2026-11-23 | A build with 3D acceleration is asked for with a word among the arguments for kmk, not with an input of its own | The workflow has ten inputs, which was the most a workflow could have when it was written, and the word has to be there for kmk anyway |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
@@ -3102,5 +3147,7 @@ virtual machine.
 | 301 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part on the runner, built with 3D acceleration for VMs, exploring | passed | 20 minutes, AMD EPYC 7763. 37 pass, 2 fail. The first build with 3D acceleration and the first VM with it, see "3D acceleration for VMs". The two checks which fail were wrong themselves |
 | 302 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner, barhost and vgahost, built with 3D acceleration, exploring | passed | 31 minutes, Intel Xeon Platinum 8573C. All 69 pass: the phase with 3D acceleration with its checks put right, the picture of the screen being what the guest wrote, and the two parts with a passed through device with this build |
 | 303 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | package, built with 3D acceleration | passed | 15 minutes, AMD EPYC 9V74. The package `vbox-26e4045afd60-3d-ubuntu2404.tar.zst`, 155 MB, published in the pre-release next to the one without 3D acceleration |
+| 304 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the part on the runner, the whole tree built with the sanitizers of GCC and with 3D acceleration, exploring | passed, the job having stopped | 25 minutes, AMD EPYC 9V74. The tree builds that way, in 22 minutes. The job stopped at the step after: the testcase of the passthrough device does not link with the sanitizers put in for the whole tree, as it puts functions of its own in the place of some of the C library, which the library of the address sanitizer wants too. The simulation did not run. A run of this kind leaves the steps with testcases out since |
+| 305 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | the same | passed | 37 minutes, Intel Xeon 6975P-C. 35 pass, 2 fail. The first VMs with the sanitizers in the whole build: they run, the phase with 3D acceleration passes, and the address sanitizer has one finding, in the event queue of Main and not about a guest, which also is why a VM with a saved state was gone too early. See "VMs with the sanitizers" |
 
 Run numbers are those GitHub shows for the `build` workflow.
