@@ -6,13 +6,16 @@
 # them is for whoever is at the machine.
 #
 #   sh hw/linux/fetch.sh          writes hw-out/fetch.txt
+#   HW_BUILD=-3d- sh hw/linux/fetch.sh
+#                                 the newest build whose name has "-3d-" in
+#                                 it, which is one with 3D acceleration for VMs
 . "$(dirname "$0")/common.sh"
 RESULT="$out/fetch.txt"
 : > "$RESULT"
 
-line=$(grep -v -e '^#' -e '^$' "$top/hw/builds.txt" 2> /dev/null | tail -n 1)
+line=$(grep -v -e '^#' -e '^$' "$top/hw/builds.txt" 2> /dev/null | grep -F -e "${HW_BUILD:-}" | tail -n 1)
 if [ -z "$line" ]; then
-    stage "a build to fetch is listed" FAILED "hw/builds.txt has none, bring the clone up to date"
+    stage "a build to fetch is listed" FAILED "hw/builds.txt has none${HW_BUILD:+ with $HW_BUILD in its name}, bring the clone up to date"
     exit 1
 fi
 set -- $line

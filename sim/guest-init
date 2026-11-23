@@ -77,7 +77,11 @@ gfx_try()
     else
         say "GFX no screen to write to"
     fi
-    dmesg | grep -i -E 'vmwgfx.*(error|fail|invalid|timed out)' | sed -e 's/^\[ *[0-9.]*\] //' | cut -c1-200 | tail -n 10 \
+    # What the driver has to say of trouble.  Three lines it says of every
+    # adapter which is not one of the maker of the driver are none.
+    dmesg | grep -i -E 'vmwgfx.*(error|fail|invalid|timed out)' \
+        | grep -v -E 'unsupported hypervisor|configuration is likely broken|switch to a supported graphics device' \
+        | sed -e 's/^\[ *[0-9.]*\] //' | cut -c1-200 | tail -n 10 \
         | while read -r l; do say "GFX trouble: $l"; done
     say "GFX done"
 }

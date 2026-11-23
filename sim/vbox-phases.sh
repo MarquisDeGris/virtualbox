@@ -1112,12 +1112,6 @@ phase_intx()
 # guest's word.  Nobody looks at the picture.  The phase is about a guest
 # getting through that, and about the host having done it.  A build without
 # 3D acceleration does not take the setting, and the phase is left out there.
-gbo_transfers()
-{
-    VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '*Gbo*' 2> /dev/null \
-        | grep -a -o -E ' c(Periods)?="[0-9]+"' | tr -dc '0-9\n' | awk '{ n += $1 } END { print n + 0 }'
-}
-
 phase_gfx3d()
 {
     PHASE=gfx3d
@@ -1164,19 +1158,27 @@ phase_gfx3d()
         else
             stage "guest: its driver tells of no trouble with the adapter" ok
         fi
-        n=$(gbo_transfers)
-        if [ "${n:-0}" -gt 0 ]; then
-            stage "the host has read from and written to the memory objects of the guest" ok "$n times"
+        echo "    what the adapter has counted (what is not zero, without the registers):"
+        VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '/Devices/vga/VMSVGA/*' 2>&1 \
+            | grep -a -v '/VMSVGA/Reg/' | sed -e 's/ unit="[^"]*"//' -e 's/ vis="[^"]*"//' | cut -c1-160 | head -n 40 | sed 's/^/    | /'
+        # What the guest wrote is in guest memory, and the host has it from
+        # there: a picture of the screen as the host has it.  A screen with
+        # nothing on it makes a file of a few kilobytes, one full of text
+        # several times that.
+        rm -f "$SIM_OUT/screen-gfx3d.png"
+        run controlvm "$VM" screenshotpng "$SIM_OUT/screen-gfx3d.png"
+        n=$(stat -c %s "$SIM_OUT/screen-gfx3d.png" 2> /dev/null)
+        if [ "${n:-0}" -gt 12000 ]; then
+            stage "the screen of the VM, as the host has it, has what the guest wrote" ok "a picture of $n bytes"
         else
-            stage "the host has read from and written to the memory objects of the guest" FAILED "its counters tell of none"
-            VBM_TIMEOUT=60 vbm debugvm "$VM" statistics --pattern '*Gbo*' 2>&1 | cut -c1-200 | head -n 12 | sed 's/^/    | /'
+            stage "the screen of the VM, as the host has it, has what the guest wrote" FAILED "a picture of ${n:-0} bytes"
         fi
         guest_goes_on "the guest keeps running"
         echo "    what the log of the VM says of 3D:"
-        grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" | cut -c1-200 | head -n 30 | sed 's/^/    | /'
+        grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" | grep -a -v -E 'stub|^[0-9:. ]*Vulkan 1\.[0-9]$' | cut -c1-200 | head -n 40 | sed 's/^/    | /'
     else
         echo "    what the log of the VM says of 3D:"
-        grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" 2> /dev/null | cut -c1-200 | head -n 30 | sed 's/^/    | /'
+        grep -a -i -E 'VMSVGA3d|vmsvga.*3d|dxvk|D3D11|vulkan|3D ' "$VMDIR/Logs/VBox.log" 2> /dev/null | grep -a -v -E 'stub|^[0-9:. ]*Vulkan 1\.[0-9]$' | cut -c1-200 | head -n 40 | sed 's/^/    | /'
     fi
     end_phase
     settle

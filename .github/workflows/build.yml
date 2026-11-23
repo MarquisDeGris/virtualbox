@@ -668,7 +668,11 @@ jobs:
           # from, without the testcases, and a text in it which says what it is
           # and what it needs.
           sha=$(git rev-parse HEAD)
-          name="vbox-${sha:0:12}-ubuntu2404"
+          # A build with 3D acceleration for VMs has a name of its own: there
+          # can be one with and one without of the same commit.
+          kind=
+          if grep -q '^VBOX_WITH_VMSVGA3D := 1' LocalConfig.kmk; then kind=-3d; fi
+          name="vbox-${sha:0:12}${kind}-ubuntu2404"
           rel=out/linux.amd64/release
           {
             echo "An unofficial test build of VirtualBox from a fork, not a release of Oracle."
