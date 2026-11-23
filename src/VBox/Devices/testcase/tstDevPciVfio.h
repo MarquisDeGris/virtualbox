@@ -124,6 +124,20 @@ typedef DECLCALLBACKTYPE(void, FNTSTVFIOCFGWRITE,(PTSTVFIODEV pDev, uint32_t off
 typedef FNTSTVFIOCFGWRITE *PFNTSTVFIOCFGWRITE;
 
 /**
+ * Callback for reads from the config space of a PCI function, called before
+ * the read is done and without the fake kernel holding anything: the callback
+ * can do to the function what the host can do to it at any time.
+ *
+ * @param   pDev                The PCI function.
+ * @param   offReg              The config space offset which is going to be read.
+ * @param   cb                  Number of bytes which are going to be read.
+ * @param   pvUser              The user argument.
+ */
+typedef DECLCALLBACKTYPE(void, FNTSTVFIOCFGREAD,(PTSTVFIODEV pDev, uint32_t offReg, size_t cb, void *pvUser));
+/** Pointer to a config space read callback. */
+typedef FNTSTVFIOCFGREAD *PFNTSTVFIOCFGREAD;
+
+/**
  * Callback before ordinary memory gets mapped at a given address.
  *
  * @param   pvUser              The user argument.
@@ -149,6 +163,7 @@ uint32_t    tstVfioKrnlDevGetRefusedResetCount(PTSTVFIODEV pDev);
 uint32_t    tstVfioKrnlDevGetRefusedBusResetCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevProtectMappings(PTSTVFIODEV pDev, bool fProtect);
 void        tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser);
+void        tstVfioKrnlSetCfgReadHook(PFNTSTVFIOCFGREAD pfnHook, void *pvUser);
 uint32_t    tstVfioKrnlDevGetOpenCount(PTSTVFIODEV pDev);
 void        tstVfioKrnlDevSetGone(PTSTVFIODEV pDev, bool fGone);
 void        tstVfioKrnlDevRequest(PTSTVFIODEV pDev);
@@ -158,6 +173,7 @@ uint32_t    tstVfioKrnlGetOpenFdCount(void);
 uint32_t    tstVfioKrnlGetInheritableFdCount(void);
 uint32_t    tstVfioKrnlGetViolationCount(void);
 uint32_t    tstVfioKrnlGetStrayIoctlCount(void);
+uint32_t    tstVfioKrnlGetStrayAccessCount(void);
 uint64_t    tstVfioKrnlGetDmaMappedBytes(void);
 bool        tstVfioKrnlIsIovaRangeMapped(uint64_t uIova, uint64_t cb);
 void        tstVfioKrnlFailIoctl(unsigned long uReq, uint32_t cSkip, int iErrno);

@@ -231,6 +231,10 @@ typedef struct TSTVFIOKRNL
     PFNTSTVFIOCFGWRITE  pfnCfgWriteHook;
     /** The user argument for pfnCfgWriteHook. */
     void               *pvCfgWriteHookUser;
+    /** Called before config space reads, optional. */
+    PFNTSTVFIOCFGREAD   pfnCfgReadHook;
+    /** The user argument for pfnCfgReadHook. */
+    void               *pvCfgReadHookUser;
     /** The I/O address spaces, 0 if the entry is unused. */
     uint32_t            aidIoas[TSTVFIO_MAX_IOAS];
     /** The next I/O address space ID. */
@@ -248,6 +252,10 @@ typedef struct TSTVFIOKRNL
     /** Number of VFIO requests on file descriptors which are none of the fake kernel:
      * what is sent to the stand-in of a device which was let go of ends up there. */
     uint32_t            cStrayIoctls;
+    /** Number of reads and writes at an offset on file descriptors which are none of
+     * the fake kernel and stand for something which has no offsets: what is asked
+     * of the stand-in of a device which was let go of ends like that. */
+    uint32_t            cStrayAccesses;
     /** Fault injection: whether a failure is armed. */
     bool                fFailArmed;
     /** Fault injection: the ioctl request to fail. */
@@ -1620,6 +1628,21 @@ void tstVfioKrnlSetCfgWriteHook(PFNTSTVFIOCFGWRITE pfnHook, void *pvUser)
 
 
 /**
+ * Sets the callback for reads from the config space of the PCI functions.
+ *
+ * @param   pfnHook             The callback, NULL for none.
+ * @param   pvUser              The user argument for the callback.
+ */
+void tstVfioKrnlSetCfgReadHook(PFNTSTVFIOCFGREAD pfnHook, void *pvUser)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    g_Krnl.pfnCfgReadHook    = pfnHook;
+    g_Krnl.pvCfgReadHookUser = pvUser;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
  * Returns the number of file descriptors open for the PCI function.
  *
  * @returns Number of open file descriptors.
@@ -1796,6 +1819,23 @@ uint32_t tstVfioKrnlGetStrayIoctlCount(void)
 {
     RTCritSectEnter(&g_Krnl.CritSect);
     uint32_t const cStray = g_Krnl.cStrayIoctls;
+    RTCritSectLeave(&g_Krnl.CritSect);
+    return cStray;
+}
+
+
+/**
+ * Returns the number of reads and writes at an offset which were made on file
+ * descriptors the fake kernel knows nothing of and which stand for something
+ * without offsets, since the fake kernel was initialized.  What is read from or
+ * written to a device after it was let go of ends up there.
+ *
+ * @returns Number of such reads and writes.
+ */
+uint32_t tstVfioKrnlGetStrayAccessCount(void)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    uint32_t const cStray = g_Krnl.cStrayAccesses;
     RTCritSectLeave(&g_Krnl.CritSect);
     return cStray;
 }
@@ -2120,14 +2160,15 @@ int __wrap_ioctl(int iFd, unsigned long uReq, ...)
 
 
 /**
- * Tells the test about a write to the config space of a PCI function if it
- * asked for that.
+ * Tells the test about an access to the config space of a PCI function if it
+ * asked for that: about a write after it was done, about a read before it is.
  *
- * @param   iFd                 The file descriptor written to.
- * @param   off                 Offset of the write.
- * @param   cb                  Number of bytes written.
+ * @param   iFd                 The file descriptor which is accessed.
+ * @param   off                 Offset of the access.
+ * @param   cb                  Number of bytes.
+ * @param   fWrite              Whether this is a write (true) or a read (false).
  */
-static void tstVfioKrnlCfgWriteNotify(int iFd, off_t off, size_t cb)
+static void tstVfioKrnlCfgAccessNotify(int iFd, off_t off, size_t cb, bool fWrite)
 {
     if (!g_Krnl.fInitialized)
         return;
@@ -2141,8 +2182,8 @@ static void tstVfioKrnlCfgWriteNotify(int iFd, off_t off, size_t cb)
         && pFd->enmType == TSTVFIOFDTYPE_DEVICE
         && ((uint64_t)off >> TSTVFIO_REGION_SHIFT) == VFIO_PCI_CONFIG_REGION_INDEX)
     {
-        pfnHook = g_Krnl.pfnCfgWriteHook;
-        pvUser  = g_Krnl.pvCfgWriteHookUser;
+        pfnHook = fWrite ? g_Krnl.pfnCfgWriteHook    : g_Krnl.pfnCfgReadHook;
+        pvUser  = fWrite ? g_Krnl.pvCfgWriteHookUser : g_Krnl.pvCfgReadHookUser;
         pDev    = pFd->pDev;
     }
     RTCritSectLeave(&g_Krnl.CritSect);
@@ -2153,21 +2194,45 @@ static void tstVfioKrnlCfgWriteNotify(int iFd, off_t off, size_t cb)
 }
 
 
+/**
+ * Takes note of a read or write at an offset the real kernel has refused
+ * because what the file descriptor stands for has no offsets.  That is none of
+ * the fake kernel then, and it is what the stand-in of a device which was let
+ * go of makes of such an access.
+ *
+ * @returns cbDone, errno is left as it is.
+ * @param   cbDone              What the real kernel returned.
+ */
+static ssize_t tstVfioKrnlNoteStrayAccess(ssize_t cbDone)
+{
+    if (cbDone == -1 && errno == ESPIPE && g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        g_Krnl.cStrayAccesses++;
+        RTCritSectLeave(&g_Krnl.CritSect);
+        errno = ESPIPE;
+    }
+    return cbDone;
+}
+
+
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off)
 {
+    tstVfioKrnlCfgAccessNotify(iFd, off, cbBuf, false /*fWrite*/);
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
-    return __real_pread(iFd, pvBuf, cbBuf, off);
+    return tstVfioKrnlNoteStrayAccess(__real_pread(iFd, pvBuf, cbBuf, off));
 }
 
 
 ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off)
 {
+    tstVfioKrnlCfgAccessNotify(iFd, off, cbBuf, false /*fWrite*/);
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
-    return __real_pread64(iFd, pvBuf, cbBuf, off);
+    return tstVfioKrnlNoteStrayAccess(__real_pread64(iFd, pvBuf, cbBuf, off));
 }
 
 
@@ -2195,9 +2260,9 @@ ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
-    ssize_t const cbWritten = __real_pwrite(iFd, pvBuf, cbBuf, off);
+    ssize_t const cbWritten = tstVfioKrnlNoteStrayAccess(__real_pwrite(iFd, pvBuf, cbBuf, off));
     if (cbWritten > 0)
-        tstVfioKrnlCfgWriteNotify(iFd, off, (size_t)cbWritten);
+        tstVfioKrnlCfgAccessNotify(iFd, off, (size_t)cbWritten, true /*fWrite*/);
     return cbWritten;
 }
 
@@ -2207,9 +2272,9 @@ ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
-    ssize_t const cbWritten = __real_pwrite64(iFd, pvBuf, cbBuf, off);
+    ssize_t const cbWritten = tstVfioKrnlNoteStrayAccess(__real_pwrite64(iFd, pvBuf, cbBuf, off));
     if (cbWritten > 0)
-        tstVfioKrnlCfgWriteNotify(iFd, off, (size_t)cbWritten);
+        tstVfioKrnlCfgAccessNotify(iFd, off, (size_t)cbWritten, true /*fWrite*/);
     return cbWritten;
 }
 

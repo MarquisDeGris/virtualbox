@@ -3363,6 +3363,39 @@ static int pciVfioConfigPassthroughWrite(PVFIOPCIFUN pFun, uint32_t uAddress, un
 
 
 /**
+ * Reads a register of the config space of the device for the guest.
+ *
+ * A function can go out of service at any time, see pciVfioFunSetGone(), and it
+ * takes a moment until an EMT has made it go away for the guest as well.  There
+ * is no device to ask in between, which is no failure of anything: the guest
+ * gets what is kept of the register then, like the PCI bus does.
+ *
+ * @returns VBox status code, a failure only if the device was asked and has
+ *          not answered while the function is in service.
+ * @param   pFun        The function.
+ * @param   pPciDev     The PCI device of the function.
+ * @param   uAddress    Offset of the register in the config space.
+ * @param   cb          Size of the register, one or two bytes.
+ * @param   pu32Value   Where to return the register, untouched on failure.
+ */
+static int pciVfioConfigReadFromDev(PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev, uint32_t uAddress, unsigned cb, uint32_t *pu32Value)
+{
+    AssertReturn(cb == sizeof(uint8_t) || cb == sizeof(uint16_t), VERR_INVALID_PARAMETER);
+
+    if (!pFun->fGone)
+    {
+        /* The function going out of service right now makes this fail too. */
+        int rc = pciVfioConfigPassthroughRead(pFun, uAddress, cb, pu32Value);
+        if (RT_SUCCESS(rc) || !pFun->fGone)
+            return rc;
+    }
+
+    *pu32Value = cb == sizeof(uint8_t) ? PDMPciDevGetByte(pPciDev, uAddress) : PDMPciDevGetWord(pPciDev, uAddress);
+    return VINF_SUCCESS;
+}
+
+
+/**
  * @callback_method_impl{FNPCICONFIGREAD}
  */
 static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCIDEV pPciDev,
@@ -3396,7 +3429,7 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
             }
             case VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH:
             {
-                int rc = pciVfioConfigPassthroughRead(pFun, uAddress + i, 1, &bRead);
+                int rc = pciVfioConfigReadFromDev(pFun, pPciDev, uAddress + i, 1, &bRead);
                 if (RT_FAILURE(rc))
                     LogRelMax(32, ("VFIO#%d.%u: Failed to passthrough PCI config read at offset %#x with %Rrc, returning 0\n",
                                    pThis->iInstance, pFun->uPciFun, uAddress + i, rc));
@@ -3414,10 +3447,12 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigRead(PPDMDEVINS pDevIns, PPDMPCID
                     case VBOX_PCI_STATUS:
                     case VBOX_PCI_STATUS + 1:
                     {
-                        uint16_t u16;
-                        int rc = pciVfioCfgSpaceReadU16(pFun, VBOX_PCI_STATUS, &u16);
+                        uint32_t u32Status = 0;
+                        int rc = pciVfioConfigReadFromDev(pFun, pPciDev, VBOX_PCI_STATUS, sizeof(uint16_t), &u32Status);
                         if (RT_SUCCESS(rc))
                         {
+                            uint16_t u16 = (uint16_t)u32Status;
+
                             /* Reflect proper capabilities bit. */
                             uint8_t offCap = PDMPciDevGetCapabilityList(pPciDev);
                             if (offCap)
@@ -3719,8 +3754,9 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioConfigWrite(PPDMDEVINS pDevIns, PPDMPCI
                     uint32_t const uPiece   = (uRun >> (offRun * 8)) & (cbPiece < sizeof(uint32_t) ? RT_BIT_32(cbPiece * 8) - 1 : UINT32_MAX);
                     if (fWr == VFIO_PCI_CFG_SPACE_ACCESS_PASSTHROUGH)
                     {
+                        /* A function which goes out of service right now takes nothing, which is no failure. */
                         int rc = pciVfioConfigPassthroughWrite(pFun, offPiece, cbPiece, uPiece);
-                        if (RT_FAILURE(rc))
+                        if (RT_FAILURE(rc) && !pFun->fGone)
                             LogRelMax(32, ("VFIO#%d.%u: Failed to passthrough PCI config write at offset %#x LB %u (%Rrc)\n",
                                            pThis->iInstance, pFun->uPciFun, offPiece, cbPiece, rc));
                     }
