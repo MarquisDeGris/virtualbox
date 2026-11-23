@@ -1790,15 +1790,31 @@ hardware. It is the paths of the passthrough device for a ROM, for
 video memory which a driver maps, and for the legacy ranges, each for
 the first time with a guest.
 
-Tried and not tried: the inventory for Windows ran on one machine, a
-VM, and publishing it from there worked with a repository made for the
-try (2026-11-22). The inventory for Linux ran in a shell on Windows,
-which tells little of it. `fetch.sh`, `prereq.sh`, the publishing
-under Linux and the command for an assistant have not run anywhere;
-`bind.sh` and the two tests have run in the simulation only, with a
-drive, the device of four gigabytes and the adapter of QEMU, not with
-the graphics card of a real machine. No result has arrived on
-`hw-results` (2026-11-23, 04:50 UTC).
+**Every script once** (run 295). What a machine with real hardware is
+to run had in part run nowhere. The simulation runs all of it now,
+with one of the two parts above:
+
+- On the runner: `fetch.sh` gets the build as it is published, finds
+  it to be the one `builds.txt` lists, and its VBoxManage runs. The
+  inventory is written, and `publish.sh` puts it on the branch for
+  results as `popolupo`, in a repository which is made for that on the
+  runner and gone with it.
+- In the machine standing in for the host: the inventory tells of the
+  IOMMU and, in the part with the VGA adapter, of the graphics card
+  with its driver, its IOMMU group and that the firmware shows its
+  screen on it; `prereq.sh` finds nothing missing; and the first test
+  passes once more with the build which was fetched, which is the one
+  somebody at such a machine gets.
+
+All 58 checks of the run pass. The inventory for Windows ran on one
+machine, a VM, and publishing it from there worked the same way
+(2026-11-22).
+
+Not tried: anything on a machine with real hardware and with the
+graphics card of one; `bind.sh --undo`; publishing to the fork from
+another machine, which takes the right to push there; the command for
+an assistant. No result has arrived on `hw-results` (2026-11-23,
+05:15 UTC).
 
 ### Requests from the tracker of upstream, from 2026-11-22
 
@@ -2715,6 +2731,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-22 | The VirtualBox built by the workflow is published as a file of a pre-release of the fork, for machines with real hardware to fetch | Building on such a machine takes a toolchain, an hour and somebody who knows what to do when it fails; fetching takes a command. A file of a release can be fetched without an account, an artifact of a run cannot. It is named by the commit it was built from and says of itself that it is no release of Oracle |
 | 2026-11-22 | A script which is to run on a machine with real hardware runs in the simulation first, with the drive in the place of the card | Its first run would otherwise be the one somebody has made time for. Run 287 found the first script ending at its first step |
 | 2026-11-22 | The INTx change is not put on the branches of the merge requests before the simulation has run it with a guest | The branches are marked ready for the hardware test with what was verified on them. A change to how interrupts reach the guest which only the testcase has seen is not that, and the runs for it could not be started that day |
+| 2026-11-22 | The simulation gets what a graphics card has and its drive has not, piece by piece: a device with four gigabytes of memory, a ROM, and the VGA adapter of an emulator as the device, with its legacy ranges | The hardware which is offered for a test is one machine and somebody's evening, and a path of the passthrough device which first runs with a guest there fails there. These had run with the stand-in for the kernel of the unit tests only, or not at all |
+| 2026-11-23 | Every script which is to run on a machine with real hardware runs in the simulation, the fetching of the published build and the publishing of results too, the latter to a repository made for the run | The build which is fetched is the one such a machine gets, so it is the one the first test has to have passed with. Publishing is the one step which leaves the machine and has to be seen to send what it says it sends |
+| 2026-11-23 | The parts with the device of four gigabytes and with the VGA adapter belong to every simulation from now on (`sim` and `allsim`) | Together they take ten minutes, and they are the only checks of large memory, of the ROM and of the legacy VGA ranges with a guest |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
 
@@ -2954,5 +2973,6 @@ virtual machine.
 | 292 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts simhost and barhost, exploring | passed | 39 minutes, AMD EPYC 7763. 117 pass, 1 fails. With one CPU and slowed time the guest of the second script starts: 12 checks pass with the drive. With the device of four gigabytes the guest has the memory with its full size above four gigabytes, and what it wrote to both ends is in the file; the one check which failed expected a driver for a device which has none |
 | 293 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 40 pass. Both scripts for a machine with real hardware go through their checks with the device of four gigabytes, 15 and 12, and what the guest wrote to both ends of the memory is in the file |
 | 294 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts barhost and vgahost, exploring | passed | 24 minutes, Intel Xeon Platinum 8573C. All 49 pass. The device of four gigabytes has a ROM, which the script binding the device and the guest read as the file is (13 checks of the second script). The new part with the VGA adapter of QEMU as the device: the first script 15, the second 16, the second with the legacy VGA ranges given to the guest 20. See "The ROM of the device" and "A graphics card, as far as the simulation has one" |
+| 295 | `scratch/intx-7.2-kvm` @ `26e4045a` | the same | passed | 24 minutes, Intel Xeon 6975P-C. All 58 pass. The other scripts for a machine with real hardware run for the first time: the build as it is published is fetched and is the one listed, and the first script passes with it; the inventory, the checklist, and the publishing of a result to a repository made for the run. See "Every script once" |
 
 Run numbers are those GitHub shows for the `build` workflow.

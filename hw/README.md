@@ -83,8 +83,10 @@ by whoever is at the machine; the scripts are short enough to be read first.
 
 The workflow runs both tests in its simulation, with an emulated NVMe drive
 as the device, with a device which has four gigabytes of memory and a ROM,
-and with the graphics adapter an emulator has. On hardware nothing here has
-run yet.
+and with the graphics adapter an emulator has. The other scripts run there
+as well: the build is fetched as it is published and the first test passes
+with it, and a result is published to a repository made for the run. On
+hardware nothing here has run yet.
 
 ## Where the machine runs Windows
 
