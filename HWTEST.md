@@ -45,8 +45,21 @@ is expected on a host which is not a virtual machine; should a Windows
 guest stay at its start screen with its disk nearly idle all the same,
 note down the processor of the host and keep the log.
 
-Nothing was tried anywhere with a graphics card, with Thunderbolt or
-with an IOMMU of AMD.
+What a graphics card has and a drive has not has been in the simulation
+as far as an emulator has it (runs 292 to 296): a device with four
+gigabytes of memory, which the guest reached to its last byte; a ROM,
+which the guest read as the host has it; and the VGA adapter of QEMU as
+the device, which the driver of the guest took, also in a VM without a
+graphics adapter of its own which was given the legacy VGA ranges of
+the adapter. That is not the graphics card of a real machine. Nothing
+was tried anywhere with one, with Thunderbolt or with an IOMMU of AMD.
+
+For the first steps on a machine there are scripts which need nobody
+to decide anything, see [hw/README.md](hw/README.md): they tell what
+the machine has, fetch a build, bind the card, and run two tests which
+write down what they find. The steps below are for a person, after the
+scripts and with what the scripts have not got: Thunderbolt, a monitor
+to look at, Windows as the guest.
 
 ## 1. What is needed
 

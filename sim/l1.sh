@@ -278,6 +278,19 @@ if [ -n "${SIM_HWTEST:-}" ]; then
     fi
     hw_inventory
     hw_scripts
+    if [ "$SIM_HWTEST" = bar ]; then
+        # The script which bound the device gives it back to the host, which
+        # has no driver for this one.
+        echo "==== $WHERE: hw/linux/bind.sh --undo"
+        HW_WORK=/tmp/hw-work HW_OUT="$OUT/$WHERE/hw-out" HW_DEV=$addr sh "$SIM_DIR/../hw/linux/bind.sh" --undo
+        cur=none
+        [ -e "/sys/bus/pci/devices/$addr/driver" ] && cur=$(basename "$(readlink "/sys/bus/pci/devices/$addr/driver")")
+        if [ "$cur" != vfio-pci ] && [ -z "$(tr -d '\n' < "/sys/bus/pci/devices/$addr/driver_override" | sed 's/(null)//')" ]; then
+            stage "the script which binds the device gives it back to the host" ok "its driver now: $cur"
+        else
+            stage "the script which binds the device gives it back to the host" FAILED "its driver now: $cur, told to be: $(cat "/sys/bus/pci/devices/$addr/driver_override")"
+        fi
+    fi
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
     dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pcieport' | cut -c1-220 | tail -n 40
     dmesg > "$OUT/$WHERE/dmesg.log" 2> /dev/null
