@@ -1997,8 +1997,19 @@ the drive takes 24 minutes that way, 17 without.
   writes the lines it counted into its result since, and run 310
   repeats the part.
 
-Not done this way yet: Windows as the guest (run 308 is to tell), and
-the parts with the device of two functions and with the VGA adapter.
+**Windows with 3D acceleration, with the sanitizers** (run 308, the
+same day, `scratch/intx-7.2-kvm` @ `26e4045a`, the parts on the runner
+with the Linux guest and with Windows, 99 minutes of which 58 were the
+runner fetching the packages of a kernel, Intel Xeon 6975P-C). All 88
+checks pass. Windows Server 2025 is installed in 351 seconds, started
+again, given a TPM, saved and loaded, gets the Guest Additions, is
+started with 3D acceleration and has its screen change forty times,
+all of it with the sanitizers in VBoxSVC and in the VM process, the
+graphics adapter and the renderer under it included. The sanitizers
+wrote nothing.
+
+Not done this way yet: the parts with the device of two functions and
+with the VGA adapter, and Windows with a device in the slot.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3207,6 +3218,7 @@ virtual machine.
 | 305 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | the same | passed | 37 minutes, Intel Xeon 6975P-C. 35 pass, 2 fail. The first VMs with the sanitizers in the whole build: they run, the phase with 3D acceleration passes, and the address sanitizer has one finding, in the event queue of Main and not about a guest, which also is why a VM with a saved state was gone too early. See "VMs with the sanitizers" |
 | 306 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner and win, built with 3D acceleration, exploring | passed | 47 minutes, Intel Xeon 6975P-C. All 86 pass. Windows with 3D acceleration for the first time: the Guest Additions installed in the guest, Windows started with 3D acceleration, the screen changed forty times, see "Windows with 3D acceleration" |
 | 307 | `fix/event-queue-delete-type` @ `8e1ab048` | sim with the part on the runner, the whole tree built with the sanitizers, exploring | passed | 22 minutes, AMD EPYC 9V74. All 20 pass. The development line of upstream with the one correction to the event queue of Main: it builds with the sanitizers, its VMs run, and the address sanitizer has nothing to say where it had six reports without the correction (run 305) |
+| 308 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the parts runner and win, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 99 minutes, Intel Xeon 6975P-C; 58 of them the runner took to fetch the packages of a kernel. All 88 pass. Windows with 3D acceleration and everything else the part with Windows on the runner does, with the sanitizers: they wrote nothing |
 | 309 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner, simhost and barhost, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 61 minutes, AMD EPYC 7763. 135 pass, 2 fail. The parts with a passed through device with the sanitizers for the first time: the sanitizers wrote nothing. The two checks which fail are not about a finding of theirs, see "The parts with a passed through device, with the sanitizers" |
 
 Run numbers are those GitHub shows for the `build` workflow.
