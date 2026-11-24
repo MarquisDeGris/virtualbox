@@ -578,6 +578,13 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     # "Data Link Layer Link Active not set"); a port of a real host tells.
     # The reset of the bus is what the phase mfbusreset is about.
     local port="pcie-root-port,id=rp1,chassis=1,slot=1"
+    # The part about an error of the device: after an error it takes for
+    # fatal the kernel resets the bus behind the port and then waits for the
+    # link.  With the port as it is by default that wait is in vain, as with
+    # the device of two functions below, and the kernel calls its recovery
+    # failed (run 327, where all else went as it should).  This port lets it
+    # get through.
+    [ "$where" = errhost ] && port="$port,x-speed=2_5,x-width=1"
     if [ "$funcs" = 2 ]; then
         port="$port,x-speed=2_5,x-width=1"
         cmdline="$cmdline SIM_MD5B=$MD5B"
