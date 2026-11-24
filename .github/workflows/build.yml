@@ -676,8 +676,8 @@ jobs:
           if ! grep -q 'firmwaresetup' src/VBox/Frontends/VBoxManage/VBoxManageModifyNvram.cpp 2> /dev/null; then
             echo "CLI: this tree has no modifynvram firmwaresetup, which is not checked"
           else
-            # Here for the first time: tried.
-            kind=tried
+            # All eight passed in run 325.
+            kind=counts
             # OsIndications as hexadecimal bytes, "none" if the VM has no such variable.
             osind() {
               rm -f cli-osind.bin

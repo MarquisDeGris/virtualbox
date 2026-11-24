@@ -14,7 +14,7 @@ Updated: 2026-11-22
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
-| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. Nothing of the passthrough work in either. See "Requests from the tracker of upstream" |
+| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -2162,7 +2162,23 @@ They came in two runs on one kind of runner and in none on another
 testcase is what shows it, with the device asked for nothing where
 it wrote those lines.
 
-Not done this way yet: Windows with a device in the slot.
+**Windows with a device in the slot, with the sanitizers** (run 323,
+2026-11-24, `scratch/cfg-gone-7.2-kvm` @ `585a8166`, which is the head
+of the merge request for 7.2 with the KVM backend; the parts on the
+runner, Windows on the runner and Windows in the machine standing in
+for a host; 62 minutes, Intel Xeon 6975P-C). What was missing here:
+Windows Server 2025 in a VM whose VBoxSVC and VM process are built
+with both sanitizers, with the drive in the hot-plug capable slot. All
+110 checks pass, the 32 with Windows and the drive among them: Windows
+starts with the drive and reads from it, lets go of it when asked,
+takes it when it is put in, loses it by force and takes it again, runs
+its controller with a line interrupt, and shuts down. The sanitizers
+wrote nothing in any part, no file at all. Windows took 432 seconds
+to its first report there, which is what it takes without the
+sanitizers as well (409 to 521 seconds in five earlier runs).
+
+Not done this way: Windows with the device of two functions and with
+the one whose second function is an audio controller.
 
 ### The issue with upstream, 2026-11-23
 
@@ -2216,6 +2232,10 @@ is for VMs without a card of their own.
 | 668 | Vulkan for Linux guests by paravirtualization | months of work, not taken up |
 | 518 | WDDM 2.0 and DirectX 12 for Windows guests | months of work, not taken up |
 | 678 | hot-plugged devices to be seen in the settings | the graphical user interface, which is not built here |
+| 944 | a way into the setup of the UEFI firmware which does not take a key hit in time | done, merge request [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `VBoxManage modifynvram <vm> firmwaresetup`, see below |
+| 810 | strings of one's own in the DMI table of type 11, for handing a guest its name or a key | looked at on 2026-11-24, not taken up. Two such strings can be set today, by reading the code and not tried: the values `DmiOEMVBoxVer` and `DmiOEMVBoxRev` of the firmware device. More of them, or longer ones than 255 characters, take a DMI table larger than the 768 bytes it has, which reaches into the BIOS |
+| 881, 936 (reported as bugs) | the size of a screen does not follow the window with the Guest Additions in a guest with Wayland | looked at on 2026-11-24, not taken up: it takes a guest with a desktop and the Guest Additions, which the simulation does not have |
+| 580 | the KVM interface for a guest without its clock | not looked into |
 
 The tracker also has 20 open bugs about 3D. Nearly all need a graphics
 card and a certain host to be seen, which the runners do not have.
@@ -2259,6 +2279,57 @@ The numbers and the name of the configuration value are read from the
 source of the graphics device. The file is well-formed XML; the
 workflow does not build the manual, and no VM was run with the value
 set.
+
+**Request 944** (`feat/nvram-firmware-setup` @ `acd8fb87`, two commits
+on `main`). The firmware of a VM gets to the operating system so
+quickly that the key which leads into its setup is hard to hit, in a
+window which has to be clicked into first. The UEFI specification has
+a way which needs no key: the variable `OsIndications`, in which the
+firmware is asked to enter its setup at the next start. The firmware
+VirtualBox comes with goes by it and takes the request back when it
+does, as its source says and as run 324 then showed. What was missing
+is a way to ask from the host. `VBoxManage modifynvram <vm>
+firmwaresetup --enable` makes the request in the variable store of
+the VM and creates the variable if the store does not have it;
+`--disable` takes back a request the firmware has not acted on; the
+other bits of the variable are left as they are. It uses what the API
+has. Manual and changelog say so.
+
+The checks for it. The step `Command line checks` of the workflow has
+eight, about what the command writes: a VM without a variable store,
+nothing to take back, asked for, asked for twice, taken back, no
+option, and both ways with another bit of the variable set. The
+simulation has a phase `fwsetup` on the runner, about the firmware
+going by it: the VM is asked and started, brings up no guest for 90
+seconds and runs; its screen is kept; when it is powered off the
+firmware has cleared the request; the next start boots the guest; and
+a request which was taken back before the start changes nothing.
+Neither does anything for a tree without the sub-command.
+
+**Run 324** (2026-11-24, `sim` with the part on the runner, for
+finding out, the first commit `83aa0765`, 25 minutes, Intel Xeon
+6975P-C). It builds. The simulation: all 24 checks pass, the five of
+the new phase among them; the guest boots in 12 seconds where it was
+not there after 90 with the request. The picture which was kept shows
+the first page of the setup of the firmware, with its device manager,
+boot manager and boot maintenance manager; it was looked at, nothing
+checks it. The command line checks: one of the eight passes. The
+others fail where the variable store was just made and has no variable
+yet. That version of the sub-command went through the list of all
+variables to see whether the one it wants is there, which did not work
+for such a store.
+
+**Run 325** (the same day, the second commit `acd8fb87`, 9 minutes,
+AMD EPYC 7763). The sub-command asks for its one variable by name and
+takes not getting it as its not being there. All eight command line
+checks pass, and all 24 of the simulation again, the guest booting in
+5 seconds. The command line checks count since.
+
+Not tried: a guest whose boot manager is in the variable store,
+Windows for one. The firmware acts on the request before it looks at
+a boot entry, so it should not matter. Not done: the same in the
+graphical user interface, which the report asks for too and which is
+not built here.
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -3396,5 +3467,8 @@ virtual machine.
 | 320 | `scratch/mutant-cg2` @ `deaac27b` | tests | failed as intended | 12 minutes, Intel Xeon Platinum 8573C. A second deliberate defect: the device asks whether the function is in service or not. The read of the whole configuration space of a function which is out of service counts 65 reads which reach what stands in for the device, and the part with the plug pulled from inside a read counts two where one was under way. Nothing else fails |
 | 321 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | package, built with 3D acceleration | passed | 37 minutes, Intel Xeon 6975P-C. The package `vbox-585a816662b0-3d-ubuntu2404.tar.zst`, 155 MB, with the change of 2026-11-24 to the device: the testcase passes on the head of the branch, and the release workflow published the package next to the two before it. `hw/builds.txt` has it as the build which is fetched |
 | 322 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part barhost, not strict | passed | 24 minutes, Intel Xeon Platinum 8573C. All 50 pass. The first run which fetches the package of run 321: the script gets the file which is listed, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
+| 323 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | sim with the parts runner, win and winhost, the whole tree built with the sanitizers, exploring | passed | 62 minutes, Intel Xeon 6975P-C. All 110 pass. Windows Server 2025 with the drive in the hot-plug capable slot, VBoxSVC and the VM process built with both sanitizers: 32 checks with Windows and the drive, and the sanitizers wrote nothing in any part. See "Windows with a device in the slot, with the sanitizers" |
+| 324 | `feat/nvram-firmware-setup` @ `83aa0765` | sim with the part runner, exploring | passed | 25 minutes, Intel Xeon 6975P-C. A branch from `main` for request 944 of the tracker of upstream. It builds; all 24 checks of the simulation pass, the new phase `fwsetup` among them: the firmware enters its setup when asked and takes the request back. One of the eight new command line checks passes, the others fail with a variable store which was just made. See "Requests from the tracker of upstream" |
+| 325 | `feat/nvram-firmware-setup` @ `acd8fb87` | sim with the part runner, not strict | passed | 9 minutes, AMD EPYC 7763. The second commit of that branch: all eight command line checks pass, and all 24 of the simulation again |
 
 Run numbers are those GitHub shows for the `build` workflow.
