@@ -947,8 +947,9 @@ host_request() # <request>
 # slot and the guest using it.
 host_error_round() # <round> <what the error is called> <status>
 {
-    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 i=0
+    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 n1 want i=0
     n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
+    want=$(echo $HOSTFUNCS | wc -w)
     serial_mark
     dmesg -C 2> /dev/null
     echo "+ the port in front of the device reports an error: $what (status $status)"
@@ -975,15 +976,31 @@ host_error_round() # <round> <what the error is called> <status>
         diag
         return 1
     fi
-    grep -a -E 'taken out of service|reported an error' "$log" | tail -n 3 | sed -e 's/^\(.\{200\}\).*/\1/' -e 's/^/    | /'
+    if [ "$want" -gt 1 ]; then
+        # The kernel tells the driver of each function, and the device goes as
+        # the one device its functions are, whichever is told of first.
+        i=0
+        while [ "$i" -lt 10 ]; do
+            n1=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
+            [ $(( ${n1:-0} - ${n0:-0} )) -ge "$want" ] && break
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ $(( ${n1:-0} - ${n0:-0} )) = "$want" ]; then
+            stage "every function of the device is taken out of service, once ($what)" ok
+        else
+            stage "every function of the device is taken out of service, once ($what)" FAILED "$(( ${n1:-0} - ${n0:-0} )) lines for $want functions"
+        fi
+    fi
+    grep -a -E 'taken out of service|reported an error' "$log" | tail -n 4 | sed -e 's/^\(.\{200\}\).*/\1/' -e 's/^/    | /'
     if wait_serial "GUEST: GONE $round" 150; then
-        stage "guest: notices that the drive is gone ($what)" ok
+        stage "guest: notices that $HE_DRIVES gone ($what)" ok
     else
-        stage "guest: notices that the drive is gone ($what)" FAILED
+        stage "guest: notices that $HE_DRIVES gone ($what)" FAILED
     fi
     serial_show 'pciehp|GUEST: GONE' 10
     guest_goes_on "the VM runs on after the error ($what)" 150
-    check_pcistate hotplug,absent,unused
+    $HE_STATE hotplug,absent,unused
     # The device is what it was to the host, or is made that again.
     [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
     if ! bind_dev; then
@@ -999,7 +1016,7 @@ host_error_round() # <round> <what the error is called> <status>
         diag
         return 1
     fi
-    guest_reads $((round + 1)) "guest: takes the device again and reads from the drive ($what)"
+    $HE_READS $((round + 1)) "guest: takes the device again and reads from $HE_FROM ($what)"
 }
 
 # The host reports an error of the device while the guest uses it.  The port
@@ -1015,6 +1032,18 @@ phase_hosterror()
     local port
     PHASE=hosterror
     reset_vm
+    # The device of one function, or the one of two, which a graphics card
+    # with its audio function is: the kernel tells the drivers of both then.
+    HE_READS=guest_reads
+    HE_STATE=check_pcistate
+    HE_DRIVES="the drive is"
+    HE_FROM="the drive"
+    if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
+        HE_READS=guest_reads_both
+        HE_STATE=check_pcistate_all
+        HE_DRIVES="both drives are"
+        HE_FROM="both drives"
+    fi
     if [ -z "${SIM_HOSTAGENT:-}" ]; then
         stage "the port in front of the device can be made to report an error" skipped "nobody outside this machine to do that"
         return
@@ -1023,10 +1052,14 @@ phase_hosterror()
     port=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/..")")
     echo "    the device is $HOSTADDR, the port in front of it $port"
     lspci -s "$port" -vv 2> /dev/null | grep -A 6 'Advanced Error Reporting' | sed -e 's/^\(.\{160\}\).*/\1/' -e 's/^/    | /'
-    run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
+        attach_funcs
+    else
+        run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    fi
     run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
     if boot "a VM with the device in the hot-plug capable slot boots the guest"; then
-        guest_reads 1 "guest: reads from the drive in the slot"
+        $HE_READS 1 "guest: reads from $HE_FROM in the slot"
         # Completer Abort, then Malformed TLP: by the specification the first
         # is not fatal unless a device says so, and the second is.
         if host_error_round 1 "not fatal" 0x8000; then

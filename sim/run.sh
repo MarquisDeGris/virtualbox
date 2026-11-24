@@ -81,8 +81,13 @@
 #      put in again.  Once with an error the kernel does not take for fatal
 #      and once with one it does, after which it resets the bus.
 #
+#   2f. The same with the device of two functions of part 2b (SIM_PARTS has
+#      "mferrhost"): the kernel tells the drivers of both functions of the
+#      error, and the device goes out of the VM as the one device it is.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, barhost, vgahost, errhost, win, winhost, mfwinhost, hdawinhost.
+# mfhost, barhost, vgahost, errhost, mferrhost, win, winhost, mfwinhost,
+# hdawinhost.
 # Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
@@ -151,6 +156,9 @@ finish()
         missing=1
     fi
     if has_part errhost && ! grep -q '^errhost/hosterror: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part mferrhost && ! grep -q '^mferrhost/hosterror: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -798,6 +806,13 @@ if has_part errhost; then
     note "Part 2e: an error of the device, as the kernel of the host tells of it"
     if part_simhost_prepare; then
         run_simhost errhost hosterror 600 5 2400
+    fi
+fi
+
+if has_part mferrhost; then
+    note "Part 2f: the same with a device of two functions"
+    if part_simhost_prepare; then
+        run_simhost mferrhost hosterror 600 5 2400 "" 2
     fi
 fi
 
