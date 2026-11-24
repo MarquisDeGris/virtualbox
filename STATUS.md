@@ -2300,6 +2300,18 @@ Whoever answers there is answered there. What may be a way for a guest
 to harm a host is not written there or anywhere else in public, see
 `SECURITY.md` of upstream.
 
+Since 2026-11-24 the issue has a first comment, from this side: the
+defect in the event queue of Main which the sanitizers found (see "VMs
+with the sanitizers"), as an eighth defect of `main` which does not
+depend on the rest, with its commit and with merge request #7 of the
+fork for what was run. Whether to tell upstream of it had been left to
+who this work is for, and the answer was yes. Before it was posted,
+all the fork has in public was searched for names again, as before
+the issue was filed: nothing was found (183 commits on this branch,
+368 on the code branches, the names of the branches, the texts of the
+merge requests and releases, the profile). Nobody else has written
+there so far.
+
 ### Requests from the tracker of upstream, from 2026-11-22
 
 Asked for on 2026-11-22: to take up what users ask for in the public
@@ -3296,6 +3308,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-24 | The simulation is not run again on the 7.1 line for that change | It is the same lines on every line. The testcase passes with it on 7.1 (run 318) and the whole simulation does on 7.2 (run 317); 50 minutes more would tell nothing new |
 | 2026-11-24 | The simulation has the host report an error of the device, with the error made from the runner through the monitor of the emulated machine | What VirtualBox does about such an error was only tried against a kernel the testcase makes up. The kernel of the runners cannot make one up itself (run 326), the emulator can, and what it does is nearer to hardware. The script on the runner takes that one request and no other, so that the machine gets no way to its own emulator |
 | 2026-11-24 | That part is one a run of the simulation has by default | 17 minutes of which most is the build; a change to how the device goes out of service is what it is there to catch |
+| 2026-11-24 | Upstream is told of the defect in the event queue of Main, as a comment on the issue which is there already and not as an issue of its own | Who this work is for said yes to telling. The issue lists the defects of `main` which were found on the way, and this is one more of them; a second issue would be one more thing for upstream to sort |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
