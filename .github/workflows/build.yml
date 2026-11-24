@@ -669,6 +669,63 @@ jobs:
             fi
           fi
 
+          # modifynvram: the firmware of a VM is asked to enter its setup at the
+          # next start, through the variable OsIndications of the UEFI
+          # specification.  That the firmware goes by it is for the simulation
+          # to show (the phase "fwsetup"); here it is what the command writes.
+          if ! grep -q 'firmwaresetup' src/VBox/Frontends/VBoxManage/VBoxManageModifyNvram.cpp 2> /dev/null; then
+            echo "CLI: this tree has no modifynvram firmwaresetup, which is not checked"
+          else
+            # Here for the first time: tried.
+            kind=tried
+            # OsIndications as hexadecimal bytes, "none" if the VM has no such variable.
+            osind() {
+              rm -f cli-osind.bin
+              if vbm modifynvram cli queryvar --name OsIndications --filename cli-osind.bin > /dev/null 2>&1 && [ -e cli-osind.bin ]; then
+                od -A n -t x1 cli-osind.bin | tr -d ' \n'
+                echo
+              else
+                echo none
+              fi
+            }
+            # nvram <counts|tried> <what> <ok|refused> <OsIndications afterwards> <arguments of modifynvram>
+            nvram() {
+              local kind=$1 what=$2 how=$3 want=$4 rc=0 s
+              shift 4
+              try modifynvram cli "$@" || rc=$?
+              s=$(osind)
+              if [ "$how" = ok ] && [ "$rc" = 0 ] && [ "$s" = "$want" ]; then
+                result "$kind" "$what" ok
+              elif [ "$how" = refused ] && [ "$rc" != 0 ] && [ "$s" = "$want" ]; then
+                result "$kind" "$what" ok "refused, and the variable is as it was"
+              else
+                result "$kind" "$what" failed "exit code $rc, OsIndications is $s, expected $want and the command to be $how"
+              fi
+            }
+            try modifyvm cli --firmware efi || true
+            nvram $kind "the setup of the firmware asked for where the VM has no variable store" refused none \
+              firmwaresetup --enable
+            try modifynvram cli inituefivarstore || true
+            echo "    the variable store as made: OsIndications is $(osind)"
+            nvram $kind "nothing to take back where nothing was asked for" ok none \
+              firmwaresetup --disable
+            nvram $kind "the setup of the firmware is asked for" ok 0100000000000000 \
+              firmwaresetup --enable
+            nvram $kind "the setup of the firmware is asked for a second time" ok 0100000000000000 \
+              firmwaresetup --enable
+            nvram $kind "the request is taken back" ok 0000000000000000 \
+              firmwaresetup --disable
+            nvram $kind "neither asked for nor taken back" refused 0000000000000000 \
+              firmwaresetup
+            # The other bits of the variable are not the command's.
+            printf '\004\000\000\000\000\000\000\000' > cli-osind-in.bin
+            try modifynvram cli changevar --name OsIndications --filename cli-osind-in.bin || true
+            nvram $kind "asked for with another bit of the variable set" ok 0500000000000000 \
+              firmwaresetup --enable
+            nvram $kind "taken back with another bit of the variable set" ok 0400000000000000 \
+              firmwaresetup --disable
+          fi
+
           vbm unregistervm cli --delete > /dev/null 2>&1 || true
           # VBoxSVC ends by itself when nothing uses it any more; nobody waits for that here.
           pkill -x VBoxSVC 2> /dev/null || true

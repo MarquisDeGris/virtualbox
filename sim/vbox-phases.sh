@@ -1642,6 +1642,104 @@ phase_mfbusreset()
 }
 
 
+# The variable through which the firmware of the VM is asked for things at its
+# next start, as hexadecimal bytes; "none" if the VM has no such variable.
+os_indications()
+{
+    rm -f "$SIM_WORK/osind.bin"
+    if    vbm modifynvram "$VM" queryvar --name OsIndications --filename "$SIM_WORK/osind.bin" > /dev/null 2>&1 \
+       && [ -e "$SIM_WORK/osind.bin" ]; then
+        od -A n -t x1 "$SIM_WORK/osind.bin" | tr -d ' \n'
+        echo
+    else
+        echo none
+    fi
+}
+
+# The VM is asked to enter the setup of its firmware at its next start
+# (VBoxManage modifynvram firmwaresetup): the firmware does that instead of
+# starting the guest, once, and takes the request back.  Nothing of the
+# passthrough work is in this.  It is here for the command, which a branch
+# has or has not, and for the firmware going by what the command writes.
+phase_fwsetup()
+{
+    local n t0 took quiet=90
+    PHASE=fwsetup
+    reset_vm
+    # The variable store of the VM is there once the VM has run.  Where this
+    # phase is the first one, it is made.
+    if ! vbm modifynvram "$VM" listvars > /dev/null 2>&1; then
+        run modifynvram "$VM" inituefivarstore
+    fi
+    echo "    OsIndications before: $(os_indications)"
+    if ! run modifynvram "$VM" firmwaresetup --enable; then
+        stage "the setup of the firmware is asked for" FAILED
+        end_phase
+        return
+    fi
+    n=$(os_indications)
+    case "$n" in
+        ?[13579bdf]??????????????)
+            stage "the setup of the firmware is asked for" ok "OsIndications is $n" ;;
+        *)
+            stage "the setup of the firmware is asked for" FAILED "OsIndications is $n"
+            end_phase
+            return ;;
+    esac
+
+    # The start with the request: no guest comes up, and the VM runs on.
+    if ! start_vm; then
+        stage "the VM which was asked for the setup of its firmware starts" FAILED
+        diag
+        end_phase
+        return
+    fi
+    if wait_serial 'GUEST: READY' "$quiet" 1; then
+        stage "the VM which was asked for the setup of its firmware does not start the guest" FAILED "the guest came up"
+    elif [ "$(vmstate)" != running ]; then
+        stage "the VM which was asked for the setup of its firmware does not start the guest" FAILED "the VM is in state '$(vmstate)'"
+    else
+        stage "the VM which was asked for the setup of its firmware does not start the guest" ok "none in $quiet seconds, and the VM runs"
+    fi
+    # What the screen shows is kept for a person to look at; nothing here reads it.
+    rm -f "$SIM_OUT/screen-fwsetup.png"
+    run controlvm "$VM" screenshotpng "$SIM_OUT/screen-fwsetup.png"
+    echo "    the screen of the VM is kept, a picture of $(stat -c %s "$SIM_OUT/screen-fwsetup.png" 2> /dev/null || echo 0) bytes"
+    keep_logs -setup
+    power_off
+    settle
+    n=$(os_indications)
+    case "$n" in
+        ?[02468ace]??????????????)
+            stage "the firmware has taken the request back" ok "OsIndications is $n" ;;
+        *)
+            stage "the firmware has taken the request back" FAILED "OsIndications is $n" ;;
+    esac
+
+    # The start after it is an ordinary one.
+    t0=$(date +%s)
+    if boot "the next start boots the guest"; then
+        took=$(( $(date +%s) - t0 ))
+        if [ "$took" -ge "$quiet" ]; then
+            echo "    that took $took seconds: no guest in $quiet seconds tells nothing on a machine as slow as this"
+        else
+            echo "    in $took seconds"
+        fi
+    fi
+    keep_logs -next
+    reset_vm
+
+    # A request which is taken back before the VM starts is none.
+    if run modifynvram "$VM" firmwaresetup --enable && run modifynvram "$VM" firmwaresetup --disable; then
+        echo "    OsIndications after asking and taking it back: $(os_indications)"
+        boot "a request which was taken back leaves the start as it is"
+    else
+        stage "a request which was taken back leaves the start as it is" FAILED "the command failed"
+    fi
+    end_phase
+}
+
+
 # win-phases.sh takes the functions above and has phases of its own.
 [ -n "${SIM_LIB_ONLY:-}" ] && return 0
 
@@ -1654,6 +1752,7 @@ if setup; then
             nat)         phase_nat ;;
             import)      phase_import ;;
             gfx3d)       phase_gfx3d ;;
+            fwsetup)     phase_fwsetup ;;
             passthrough) phase_passthrough ;;
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;

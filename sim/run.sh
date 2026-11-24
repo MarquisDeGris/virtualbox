@@ -413,6 +413,10 @@ runner_phases="plain emptyslot nat import"
 # the testcase of it, has no hot-plug capable slot to look at.
 [ -e "$WS/src/VBox/Devices/testcase/tstDevPciVfio.cpp" ] || runner_phases="plain nat import"
 [ -n "$GUEST_RAW_3D" ] && runner_phases="$runner_phases gfx3d"
+# A tree whose VBoxManage can ask the firmware of a VM for its setup.
+if grep -q -s 'firmwaresetup' "$WS/src/VBox/Frontends/VBoxManage/VBoxManageModifyNvram.cpp"; then
+    runner_phases="$runner_phases fwsetup"
+fi
 # A build with the sanitizers (SIM_SANITIZED is yes): what they find in a
 # program of VirtualBox goes to files, one for each process, and the program
 # ends where the address sanitizer finds something.  Memory which is not
