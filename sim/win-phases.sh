@@ -1395,6 +1395,10 @@ win_host_plug()
         stage "plugpci of the device which is not on the host is refused" ok
     fi
 
+    if ! port_link_has_width; then
+        stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width since the bus behind it was reset, and the kernel of the host takes no device from such a port"
+        return 0
+    fi
     dmesg -C 2> /dev/null
     echo "+ the device is plugged into the host again"
     if ! host_request plug; then
@@ -1520,8 +1524,20 @@ phase_hotplug()
     win_second "guest: takes the second function again and reads from its drive" 600
     win_intx
     win_audio ", with the drive at INTx as well"
-    win_host_error
-    [ "$WIN_UP" = yes ] && win_host_plug
+    # The device is unplugged from the host and plugged in again, and the host
+    # reports an error of it.  In this order where the port still has its
+    # link: after the error which its kernel takes for fatal it has not, and
+    # the device could not be plugged in again (see port_link_has_width in
+    # vbox-phases.sh).  Where the bus behind the port was reset before, as it
+    # is for a device whose functions have no reset of their own, the
+    # unplugging comes last and is all there is of it.
+    if port_link_has_width; then
+        win_host_plug
+        [ "$WIN_UP" = yes ] && win_host_error
+    else
+        win_host_error
+        [ "$WIN_UP" = yes ] && win_host_plug
+    fi
     check_log_quiet
     shot
 }

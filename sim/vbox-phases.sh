@@ -1089,6 +1089,24 @@ port_says() # <when>
 }
 HOST_PORT=
 
+# Whether the port in front of the device tells of a link which has a width.
+# The port this machine emulates loses the width and the speed of its link
+# when the bus behind it is reset (run 341: link status 2011 before, 2000
+# after), and the kernel of the host does not take a device which is plugged
+# into such a port ("Cannot train link").  A port of a real host keeps them.
+# Where the register cannot be read, the port is taken to be in order.
+port_link_has_width()
+{
+    local port v
+    port=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/.." 2> /dev/null)" 2> /dev/null)
+    [ -e "/sys/bus/pci/devices/$port/vendor" ] || port=$HOST_PORT
+    [ -n "$port" ] || return 0
+    HOST_PORT=$port
+    v=$(setpci -s "$port" CAP_EXP+12.w 2> /dev/null) || return 0
+    [ -n "$v" ] || return 0
+    [ $(( (16#$v >> 4) & 63 )) != 0 ]
+}
+
 # Whether the host has a function of the device, and whether it has them all.
 host_has_any()
 {
@@ -1188,6 +1206,11 @@ phase_hostplug()
             guest_goes_on "the VM runs on after the command which was refused" 90
         fi
 
+        if ! port_link_has_width; then
+            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width since the bus behind it was reset, and the kernel of the host takes no device from such a port"
+            end_phase
+            return
+        fi
         dmesg -C 2> /dev/null
         echo "+ the device is plugged into the host again"
         if host_request plug; then

@@ -609,7 +609,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     # failed (run 327, where all else went as it should).  This port lets it
     # get through.
     [ "$where" = errhost ] && port="$port,x-speed=2_5,x-width=1"
-    if [ "$where" = plughost ]; then
+    if [ "$where" = plughost ] || [ "$where" = winhost ]; then
         # The part in which the device is unplugged from this machine and
         # plugged in again.  The drive is given a name the device can be
         # taken away from, and the image is not the device's: a drive which
@@ -685,7 +685,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     fi
     # The script in the machine is told that its device can be unplugged.
     case "$where" in
-        plughost|mfplughost|mfwinhost) cmdline="$cmdline SIM_HOSTPLUG=1" ;;
+        plughost|mfplughost|winhost|mfwinhost) cmdline="$cmdline SIM_HOSTPLUG=1" ;;
     esac
     # A part whose phases ask for something the machine cannot do to itself
     # has somebody on the runner who does it, see host-agent.sh.  The machine
