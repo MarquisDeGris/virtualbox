@@ -1358,6 +1358,7 @@ win_host_plug()
     local i t0 drv
     serial_mark
     dmesg -C 2> /dev/null
+    port_says "with the device in the VM"
     echo "+ the device is unplugged from the host"
     t0=$(date +%s)
     if ! host_request unplug; then
@@ -1407,6 +1408,7 @@ win_host_plug()
         i=$((i + 1))
     done
     dmesg | grep -i -E 'pciehp|pci 0000:01' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+    port_says "with the device plugged in again"
     if host_has_all; then
         drv=
         [ -e "/sys/bus/pci/devices/$HOSTADDR/driver" ] && drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver")")

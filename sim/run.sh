@@ -860,14 +860,16 @@ fi
 if has_part plughost; then
     note "Part 2g: the device is unplugged from the host and plugged in again"
     if part_simhost_prepare; then
-        run_simhost plughost hostplug 600 5 2400
+        # Once more after an error of the device: a device which had one is
+        # what gets unplugged and plugged in again.
+        run_simhost plughost hostplug,hosterror,hostplug-again 600 5 3000
     fi
 fi
 
 if has_part mfplughost; then
     note "Part 2h: the same with a device of two functions"
     if part_simhost_prepare; then
-        run_simhost mfplughost hostplug 600 5 2400 "" 2
+        run_simhost mfplughost hostplug,hosterror,hostplug-again 600 5 3000 "" 2
     fi
 fi
 

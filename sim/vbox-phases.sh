@@ -1074,6 +1074,21 @@ phase_hosterror()
     bind_dev
 }
 
+# What the port in front of the device tells of its link and of its slot, for
+# the log: the registers Link Status and Slot Status of its PCI Express
+# capability.  A port which claims a link of no width is one the kernel of
+# the host does not take a device from.
+port_says() # <when>
+{
+    local port
+    port=$(basename "$(readlink -f "/sys/bus/pci/devices/${HOSTADDR%:*}:00.0/.." 2> /dev/null)" 2> /dev/null)
+    [ -e "/sys/bus/pci/devices/$port/vendor" ] || port=$HOST_PORT
+    [ -n "$port" ] || return 0
+    HOST_PORT=$port
+    echo "    the port $port, $1: link status $(setpci -s "$port" CAP_EXP+12.w 2> /dev/null || echo '?'), slot status $(setpci -s "$port" CAP_EXP+1a.w 2> /dev/null || echo '?')"
+}
+HOST_PORT=
+
 # Whether the host has a function of the device, and whether it has them all.
 host_has_any()
 {
@@ -1111,7 +1126,7 @@ phase_hostplug()
         state=check_pcistate_all
         from="both drives"
     fi
-    PHASE=hostplug
+    PHASE=${1:-hostplug}
     reset_vm
     if [ -z "${SIM_HOSTAGENT:-}" ]; then
         stage "the device can be unplugged from the host" skipped "nobody outside this machine to do that"
@@ -1130,6 +1145,7 @@ phase_hostplug()
 
         serial_mark
         dmesg -C 2> /dev/null
+        port_says "with the device in the VM"
         echo "+ the device is unplugged from the host"
         t0=$(date +%s)
         if host_request unplug; then
@@ -1151,6 +1167,7 @@ phase_hostplug()
             stage "host: the device is gone from it" FAILED "it is still there after $i s"
             diag
         fi
+        port_says "with the device unplugged"
         if wait_serial 'GUEST: GONE 1' 60; then
             stage "guest: was asked and let go, the drive is gone" ok
         else
@@ -1186,6 +1203,7 @@ phase_hostplug()
             i=$((i + 1))
         done
         dmesg | grep -i -E 'pciehp|acpiphp|pci 0000:01|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+        port_says "with the device plugged in again"
         if host_has_all; then
             drv=
             [ -e "/sys/bus/pci/devices/$HOSTADDR/driver" ] && drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver")")
@@ -2059,6 +2077,7 @@ if setup; then
             hostremove)  phase_hostremove ;;
             hosterror)   phase_hosterror ;;
             hostplug)    phase_hostplug ;;
+            hostplug-again) phase_hostplug hostplug-again ;;
             startempty)  phase_startempty ;;
             intx)        phase_intx ;;
             mfpassthrough) phase_mfpassthrough ;;
