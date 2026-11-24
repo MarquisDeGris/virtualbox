@@ -7,7 +7,7 @@ Updated: 2026-11-22
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `4add131b`, 37 commits. The last one is INTx, in since 2026-11-22, see "INTx (WP8)". The two before it are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `432ae816`, 38 commits. The last one has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -2052,22 +2052,101 @@ three lines of the device at its end,
 and the same for 0xd and 0xf, 70 milliseconds after the first function
 was taken out of service in a removal by force. What they are: the
 device lets go of a function at once, its file descriptor taken by one
-which refuses everything, and has an EMT do the rest a moment later,
-which is to switch the decoding of the function off through the PCI
-bus. The bus reads registers of the function for that, three of them
-ones the device passes on to the hardware, and the stand-in refuses
-those reads. Nothing which is not there is reached and the reader is
-given zero; the line says "Failed". It takes a function which has its
-decoding on at that moment, as the firmware of a VM without an
-operating system has it for a while after the start, longer where all
+which refuses everything, and has an EMT do the rest a moment later;
+until then the function is still there for the guest. A guest which
+reads registers of the function in that moment gets the ones the
+device passes on to the hardware from the stand-in, which refuses
+those reads. The three offsets fit one read of four bytes at 0xc, of
+which the byte at 0xe is not passed on. Nothing which is not there is
+reached and the reader is given zero; the line says "Failed". It takes
+a guest which reads at that moment, as the firmware of a VM without an
+operating system does for a while after the start, longer where all
 is slower, which is why the sanitizers brought it out.
+
+(Corrected the same day. This said that the PCI bus reads these
+registers when the EMT switches the decoding of the function off. The
+code of the bus reads none of the three; the reader is the guest.)
 
 Two things follow. The test counts lines of this kind by themselves
 and not as something which did not work. And the device should answer
 such a read from what it knows of the function instead of asking a
 device it has let go of, and say nothing of it: a change to the device
-on all its branches, with a test, which is not written yet (item 8
-under "Next").
+on all its branches, with a test. It is written and on every branch
+since 2026-11-24, see "The device does not ask a function which is out
+of service" below.
+
+**The scripts once more, after their correction** (run 315, the same
+day, `scratch/intx-7.2-kvm` @ `26e4045a`, the part with the device of
+four gigabytes, without the sanitizers, 34 minutes, Intel Xeon
+6975P-C). All 50 checks pass. The script which runs every test ran
+them one after the other, 15 and 14 checks, and the second one found a
+VirtualBox which knows of no VM. No line of the kind run 313 found was
+written in this run, so the count of such lines was not tried by it.
+
+**The device does not ask a function which is out of service** (the
+same day). The change which follows from run 313. A register which
+the device passes on to the hardware, and the status register, are
+read from the hardware while the function is in service and at no
+other time. From the moment it is out of service until the EMT has
+made it go away for the guest, such a read is answered from what is
+kept of the register for the PCI bus, like the registers the device
+never asks the hardware for; after that everything reads as ones, as
+before. A read which is under way when the function goes out of
+service fails at the stand-in and is answered the same way. No line is
+written for either, and none for a write which is under way then; a
+write after that was dropped before already.
+
+What a guest has of it: the three registers of run 313 read as zero in
+that moment as they did, going by the code, which keeps nothing of
+them (no test reads their values then), and the status register reads
+as what is kept of it, with its bit for the capability list, where it
+read as zero. What the log has of it: nothing.
+
+The test. The fake kernel of the testcase counts the reads and writes
+at an offset which the real kernel refuses because the file has no
+offsets, which is what becomes of a read of the stand-in, and it can
+call the test before a read of the configuration space is done. The
+test of a device which is taken back has two new parts. In the first
+the guest reads all 256 bytes of the configuration space after the
+device has let go of the function and before the EMT has done its
+part: the IDs read as before, the status register has its bit for the
+capability list, and nobody has asked the stand-in. In the second the
+plug is pulled from inside the read of the status register, at the
+point where the device is about to ask: that read is the one which
+reaches the stand-in, the guest gets the status register as kept, and
+the same read again gets the same without anybody being asked.
+
+The runs. On the development line the testcase passes with the
+sanitizers, its 57 tests and the three random tests in full length, no
+report (run 316, `scratch/cfg-gone` @ `432ae816`). On the 7.2 line
+with the KVM backend the testcase passes and so does the whole
+simulation with a Linux guest, all 211 checks: the runner, the drive,
+the device of two functions, the device of four gigabytes and the VGA
+adapter (run 317, `scratch/cfg-gone-7.2-kvm` @ `585a8166`). On the 7.1
+line with the KVM backend the testcase passes (run 318,
+`scratch/cfg-gone-7.1-kvm` @ `656e0e59`); the simulation was not run
+again there, the change being the same lines. Two deliberate defects
+in the change, each on a branch of its own. Without the second look at
+the function after a read which failed, the part which pulls the plug
+from inside a read fails and nothing else does: the status register
+reads as zero in that read and as kept in the next (run 319).
+With the device asked whether the function is in service or not, both
+parts fail and nothing else does: the read of the whole configuration
+space counts 65 reads which reach the stand-in, and the part with the
+plug pulled counts two where one was under way (run 320).
+
+The branches of the merge requests have the change since 2026-11-24,
+each by a push which only adds to what was there:
+`pci-passthrough-hotplug-v1` @ `432ae816`, `-7.2` @ `5edbdf1a`,
+`-7.2-kvm` @ `585a8166`, `-7.1` @ `9cd83b17` and `-7.1-kvm` @
+`656e0e59`. The build which a machine with real hardware fetches does
+not have it yet.
+
+What no run can show: that the lines of run 313 are gone from a VM.
+They came in two runs on one kind of runner and in none on another
+(runs 309 and 313, and 310), so a run without them proves nothing. The
+testcase is what shows it, with the device asked for nothing where
+it wrote those lines.
 
 Not done this way yet: Windows with a device in the slot.
 
@@ -2903,15 +2982,12 @@ harness since WP5, saved states since the fourth part of WP6.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
    device coming and going, a device pulled without notice and a device
    error in the simulation.
-8. A register of a function which went out of service a moment ago: the
-   device asks the stand-in for the device file for the registers it
-   passes on, is refused, answers zero and writes a line which says
-   "Failed" (run 313, see "VMs with the sanitizers"). It is to answer
-   from the configuration space it keeps for the function and to write
-   no line, for reads and for writes, with a test in the testcase which
-   takes a function out of service with its decoding on. Nothing is
-   reached that should not be; it is the answer and the line which are
-   wrong.
+8. Done on 2026-11-24: a register of a function which went out of
+   service a moment ago is answered from what is kept of the function,
+   and no line is written, see "The device does not ask a function
+   which is out of service" under "VMs with the sanitizers". What is
+   left of it: a build for a machine with real hardware which has the
+   change.
 
 ## Decisions
 
@@ -3035,6 +3111,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-23 | The workflow keeps the packages of the kernel the simulation runs from one run to the next | Fetching them took close to an hour in two runs of one day (308 and 311) and seconds in the others. A run which waits an hour for a mirror tells nothing in that hour, and a runner is not to be kept for it |
 | 2026-11-23 | The build which a machine with real hardware fetches is the one with 3D acceleration | Run 302 had it go through the parts with a passed through device as the build without goes through them. One build for the passthrough and for VMs with 3D acceleration spares the person at the machine fetching twice and knowing which is in place. The build without stays published and can be named |
 | 2026-11-23 | A build with 3D acceleration is asked for with a word among the arguments for kmk, not with an input of its own | The workflow has ten inputs, which was the most a workflow could have when it was written, and the word has to be there for kmk anyway |
+| 2026-11-24 | From the moment a function is out of service until the guest is told, a read of a register the device passes on is answered from what is kept of the register, not by asking and not with ones | Asking reaches what stands in for the device, which has no answer; and the function is to stay as it was for the guest until the PCI bus has taken its mappings away, which is why reads are not all ones before that |
+| 2026-11-24 | The simulation is not run again on the 7.1 line for that change | It is the same lines on every line. The testcase passes with it on 7.1 (run 318) and the whole simulation does on 7.2 (run 317); 50 minutes more would tell nothing new |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3295,5 +3373,11 @@ virtual machine.
 | 312 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part vgahost, exploring | passed | 24 minutes, Intel Xeon 6975P-C. All 47 pass. The first run with the workflow keeping the packages of the kernel: none were kept yet, they were fetched in 5 seconds and are kept now |
 | 313 | `pci-passthrough-hotplug-7.2-kvm` @ `26e4045a` | sim with the parts runner, mfhost and vgahost, the whole tree built with the sanitizers and with 3D acceleration, exploring | passed | 52 minutes, AMD EPYC 7763. 127 pass, 1 fails. The device of two functions and the VGA adapter with the sanitizers: they wrote nothing. The check which fails counted three lines of the device which say "Failed" and are the answer to a register read while a function was on its way out; they explain the twelve of run 309, see "The device of two functions and the VGA adapter, with the sanitizers" |
 | 314 | `pci-passthrough-hotplug-v1` @ `4add131b` | sim with the parts runner, simhost and barhost, the whole tree built with the sanitizers, exploring | passed | 46 minutes, AMD EPYC 9V45. 130 pass, 1 fails. The development line with the sanitizers: they wrote nothing. The check which fails found a defect of the scripts for a machine with real hardware: a test started before the service of the test before it was gone, see "The development line, with the sanitizers" |
+| 315 | `scratch/intx-7.2-kvm` @ `26e4045a` | sim with the part barhost, exploring | passed | 34 minutes, Intel Xeon 6975P-C. All 50 pass. The scripts for a machine with real hardware after their correction: the script which runs every test runs them one after the other, 15 and 14 checks. No line of a register read from a function on its way out was written, so nothing was there for the new count |
+| 316 | `scratch/cfg-gone` @ `432ae816` | sanitize | passed | 12 minutes. The change which has the device not ask a function which is out of service, on the development line: the 57 tests, the one of a device taken back with its two new parts among them, and the three random tests in full length pass with the sanitizers, no report. AMD EPYC 7763 |
+| 317 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | sim, not strict | passed | 49 minutes, AMD EPYC 9V45. The change on the 7.2 line with the KVM backend: the testcase passes, and all 211 checks of the simulation with a Linux guest do, in every part it has |
+| 318 | `scratch/cfg-gone-7.1-kvm` @ `656e0e59` | tests | passed | 15 minutes, Intel Xeon 6975P-C. The change on the 7.1 line with the KVM backend: it builds, the 57 tests and the three random tests pass |
+| 319 | `scratch/mutant-cg1` @ `9f19ab15` | tests | failed as intended | 8 minutes, AMD EPYC 9V45. A deliberate defect in the change: a read which fails is not looked at again for the function having gone out of service meanwhile. The part of the test which pulls the plug from inside a read fails, twice, and nothing else does |
+| 320 | `scratch/mutant-cg2` @ `deaac27b` | tests | failed as intended | 12 minutes, Intel Xeon Platinum 8573C. A second deliberate defect: the device asks whether the function is in service or not. The read of the whole configuration space of a function which is out of service counts 65 reads which reach what stands in for the device, and the part with the plug pulled from inside a read counts two where one was under way. Nothing else fails |
 
 Run numbers are those GitHub shows for the `build` workflow.
