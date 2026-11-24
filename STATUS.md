@@ -2240,9 +2240,22 @@ reset of the bus got through, with the device already let go of by
 VirtualBox. The part is among those a run of the simulation has by
 default since.
 
+**The same with a device of two functions** (a part of its own,
+`mferrhost`, with the machine of the part about such a device; **run
+329**, the same day, the two parts with an error, the same branch, 19
+minutes, Intel Xeon 6975P-C). A graphics card with its audio function
+is such a device, and the kernel tells the drivers of both functions
+when the port in front of them reports an error, so VirtualBox is told
+twice of what is one event. All 22 checks of the phase pass with it,
+and the 20 with the drive again, 89 in the run: both functions are
+taken out of service, each once and within a fraction of a second of
+each other, the guest finds both drives gone, the VM runs on, and
+`plugpci` puts the device back with both drives read from again; after
+the fatal error the kernel's reset of the bus gets through as well.
+This part is a default one too.
+
 What this does not show: an error of a real device, which may leave
-the device in a state no reset gets it out of; the device of two
-functions, where the kernel tells both drivers; Windows as the guest,
+the device in a state no reset gets it out of; Windows as the guest,
 which has been through losing the drive by force (`unplugpci --force`)
 and not through this; and a device which is pulled without the host
 being told first, which the emulated port cannot do.
@@ -3134,11 +3147,11 @@ harness since WP5, saved states since the fourth part of WP6.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
    device coming and going, and a device pulled without notice in the
    simulation, which the port it emulates cannot do. A device error in
-   the simulation is done since 2026-11-24, see "An error of the device,
-   in the simulation". What could follow there: the same with the device
-   of two functions and with Windows, and the device leaving the host
-   and coming back by the host's own hot-plug, for which the script on
-   the runner would have to take two more requests.
+   the simulation is done since 2026-11-24, with a device of one function
+   and of two, see "An error of the device, in the simulation". What
+   could follow there: the same with Windows, and the device leaving
+   the host and coming back by the host's own hot-plug, for which the
+   script on the runner would have to take two more requests.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3547,5 +3560,6 @@ virtual machine.
 | 326 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, exploring | passed | 16 minutes. The first run of a part about the host reporting an error of the device. Its phase was skipped: the kernel of the runners has no module for making up such an error. See "An error of the device, in the simulation" |
 | 327 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, exploring | passed | 18 minutes, Intel Xeon Platinum 8573C. All 59 pass. The error is made from the runner, at the port in front of the device: 20 checks, with an error which is not fatal and with one which is. VirtualBox takes the device out of service, the guest notices, the VM runs on, the device is put back. After the fatal error the kernel of the machine called its own recovery failed, for what the emulated port does not tell |
 | 328 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, not strict | passed | 17 minutes, Intel Xeon 6975P-C. All 59 pass. The same with a port which lets the reset of the bus get through: the kernel's recovery succeeds after both errors, and the 20 checks pass again |
+| 329 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the parts errhost and mferrhost, not strict | passed | 19 minutes, Intel Xeon 6975P-C. All 89 pass. The error of the device with a device of two functions: the kernel tells both drivers, each function is taken out of service once, the guest loses both drives and has them again after `plugpci`: 22 checks, and the 20 with one function again |
 
 Run numbers are those GitHub shows for the `build` workflow.
