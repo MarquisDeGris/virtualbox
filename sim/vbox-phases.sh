@@ -1074,6 +1074,25 @@ phase_hosterror()
     bind_dev
 }
 
+# Whether the host has a function of the device, and whether it has them all.
+host_has_any()
+{
+    local a
+    for a in $HOSTFUNCS; do
+        [ -e "/sys/bus/pci/devices/$a" ] && return 0
+    done
+    return 1
+}
+
+host_has_all()
+{
+    local a
+    for a in $HOSTFUNCS; do
+        [ -e "/sys/bus/pci/devices/$a" ] || return 1
+    done
+    return 0
+}
+
 # The device is unplugged from the host and plugged in again, as a device in
 # an enclosure on a cable is.  Not by a word to the kernel as in the phase
 # hostremove: the port the device is behind is told from outside this machine
@@ -1084,7 +1103,14 @@ phase_hosterror()
 # again the device is a new one to the host, which has no driver bound to it.
 phase_hostplug()
 {
-    local i t0 drv
+    local i t0 drv reads=guest_reads state=check_pcistate from="the drive"
+    # The device of one function, or the one of two, which a graphics card
+    # with its audio function is: all of it goes and comes as one.
+    if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
+        reads=guest_reads_both
+        state=check_pcistate_all
+        from="both drives"
+    fi
     PHASE=hostplug
     reset_vm
     if [ -z "${SIM_HOSTAGENT:-}" ]; then
@@ -1093,10 +1119,14 @@ phase_hostplug()
     fi
     bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
     dmesg | grep -i -E '_OSC: OS now controls|pciehp|acpiphp' | cut -c1-200 | tail -n 6 | sed 's/^/    | /'
-    run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
+        attach_funcs
+    else
+        run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    fi
     run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
     if boot "a VM with the device in the hot-plug capable slot boots the guest"; then
-        guest_reads 1 "guest: reads from the drive in the slot"
+        $reads 1 "guest: reads from $from in the slot"
 
         serial_mark
         dmesg -C 2> /dev/null
@@ -1110,12 +1140,12 @@ phase_hostplug()
             return
         fi
         i=0
-        while [ -e "/sys/bus/pci/devices/$HOSTADDR" ] && [ "$i" -lt 180 ]; do
+        while host_has_any && [ "$i" -lt 180 ]; do
             sleep 1
             i=$((i + 1))
         done
         dmesg | grep -i -E 'pciehp|acpiphp|vfio|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
-        if [ ! -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
+        if ! host_has_any; then
             stage "host: the device is gone from it" ok "$(( $(date +%s) - t0 )) s after it was told"
         else
             stage "host: the device is gone from it" FAILED "it is still there after $i s"
@@ -1129,10 +1159,10 @@ phase_hostplug()
         serial_show 'pciehp|GUEST: GONE' 10
         grep -a -E 'taken out of service|wants the device back' "$VMDIR/Logs/VBox.log" | tail -n 3 | cut -c1-200 | sed 's/^/    | /'
         guest_goes_on "the VM runs on after that" 90
-        check_pcistate hotplug,absent,unused
+        $state hotplug,absent,unused
 
         # What is not on the host cannot be put into the VM.
-        if [ ! -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
+        if ! host_has_any; then
             if run controlvm "$VM" plugpci "$HOSTADDR"; then
                 stage "plugpci of the device which is not on the host is refused" FAILED "it was taken"
             else
@@ -1151,12 +1181,12 @@ phase_hostplug()
             return
         fi
         i=0
-        while [ ! -e "/sys/bus/pci/devices/$HOSTADDR" ] && [ "$i" -lt 120 ]; do
+        while ! host_has_all && [ "$i" -lt 120 ]; do
             sleep 1
             i=$((i + 1))
         done
         dmesg | grep -i -E 'pciehp|acpiphp|pci 0000:01|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
-        if [ -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
+        if host_has_all; then
             drv=
             [ -e "/sys/bus/pci/devices/$HOSTADDR/driver" ] && drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver")")
             stage "host: has the device again" ok "after $i s, with ${drv:-no} driver"
@@ -1182,8 +1212,8 @@ phase_hostplug()
             stage "plugpci of the device which came back" FAILED
             diag
         fi
-        guest_reads 2 "guest: takes the device which came back and reads from the drive"
-        check_pcistate hotplug,present,inuse
+        $reads 2 "guest: takes the device which came back and reads from $from"
+        $state hotplug,present,inuse
         check_log_quiet
     fi
     end_phase

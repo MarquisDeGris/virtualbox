@@ -14,17 +14,20 @@
 #   unplug         the device behind that port (dev0) is unplugged: the port
 #                  tells the machine that somebody wants it out, and the device
 #                  is gone once the machine has switched its slot off.
-#   plug           the same device is plugged into the port again.
+#   plug           the same device is plugged into the port again; where it has
+#                  two functions, the second one first, as the machine is told
+#                  of a device when its first function is there.
 # Nothing else is taken, and no request has a word of the machine in what is
 # given to the monitor but the status of an error, which is checked.  The
 # machine has no monitor of its own.
 #
-# usage: host-agent.sh <directory shared with the machine> <QMP socket> <seconds to live at most>
+# usage: host-agent.sh <directory shared with the machine> <QMP socket> <seconds to live at most> [<functions of the device: 1 or 2>]
 # Ends when the file host-agent.stop appears in that directory.
 
 dir=$1
 qmp=$2
 limit=$3
+funcs=${4:-1}
 here=$(cd "$(dirname "$0")" && pwd)
 
 # monitor <what has to be at the start of the answer, or "" for an answer without an error> <command line>
@@ -65,7 +68,14 @@ while [ ! -e "$dir/host-agent.stop" ] && [ $(( $(date +%s) - t0 )) -lt "$limit" 
         elif [ "$what" = unplug ] && [ -z "$arg" ]; then
             monitor "" "device_del dev0"
         elif [ "$what" = plug ] && [ -z "$arg" ]; then
-            monitor "" "device_add nvme,drive=nvm0,serial=SIM0001,bus=rp1,id=dev0"
+            if [ "$funcs" = 2 ]; then
+                monitor "" "device_add nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1,id=dev1"
+                if grep -q '^OK' "$dir/host-reply.tmp"; then
+                    monitor "" "device_add nvme,drive=nvm0,serial=SIM0001,bus=rp1,addr=00.0,multifunction=on,id=dev0"
+                fi
+            else
+                monitor "" "device_add nvme,drive=nvm0,serial=SIM0001,bus=rp1,id=dev0"
+            fi
         else
             echo "refused: not a request this takes" > "$dir/host-reply.tmp"
         fi

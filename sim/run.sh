@@ -91,9 +91,13 @@
 #      drive out, which is gone from the machine afterwards, and takes it in
 #      again as a new device.  What an enclosure on a cable does to a host.
 #
+#   2h. The same with the device of two functions (SIM_PARTS has
+#      "mfplughost"): both functions go when the device is unplugged, and
+#      both are there again when it is plugged in.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, barhost, vgahost, errhost, mferrhost, plughost, win, winhost,
-# mfwinhost, hdawinhost.
+# mfhost, barhost, vgahost, errhost, mferrhost, plughost, mfplughost, win,
+# winhost, mfwinhost, hdawinhost.
 # Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
@@ -168,6 +172,9 @@ finish()
         missing=1
     fi
     if has_part plughost && ! grep -q '^plughost/hostplug: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part mfplughost && ! grep -q '^mfplughost/hostplug: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -661,6 +668,18 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -device "intel-hda,id=hda0,bus=rp1,addr=00.1"
              -device "hda-output,bus=hda0.0,audiodev=snd0")
     fi
+    if [ "$where" = mfplughost ]; then
+        # The same as for the part plughost above, with the device of two
+        # functions: each drive is a name of its own which outlives its
+        # controller, and both controllers have a name to be told by.
+        dev=(-blockdev "driver=file,filename=$WORK/nvme.img,node-name=nvmf"
+             -blockdev "driver=raw,file=nvmf,node-name=nvm0"
+             -blockdev "driver=file,filename=$WORK/nvme2.img,node-name=nvmg"
+             -blockdev "driver=raw,file=nvmg,node-name=nvm1"
+             -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1,addr=00.0,multifunction=on,id=dev0"
+             -device "nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1,id=dev1")
+        extra+=(-global "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off")
+    fi
     # A part whose phases ask for something the machine cannot do to itself
     # has somebody on the runner who does it, see host-agent.sh.  The machine
     # gets a socket for that which nothing inside it can reach.
@@ -673,7 +692,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
             sudo rm -f "$qmp" "$OUT/$where/host-request" "$OUT/$where/host-reply" "$OUT/$where/host-agent.stop"
             mon=(-qmp "unix:$qmp,server=on,wait=off")
             cmdline="$cmdline SIM_HOSTAGENT=1"
-            sudo bash "$SIM/host-agent.sh" "$OUT/$where" "$qmp" "$limit" &
+            sudo bash "$SIM/host-agent.sh" "$OUT/$where" "$qmp" "$limit" "$funcs" &
             ;;
     esac
     t0=$(date +%s)
@@ -835,6 +854,13 @@ if has_part plughost; then
     note "Part 2g: the device is unplugged from the host and plugged in again"
     if part_simhost_prepare; then
         run_simhost plughost hostplug 600 5 2400
+    fi
+fi
+
+if has_part mfplughost; then
+    note "Part 2h: the same with a device of two functions"
+    if part_simhost_prepare; then
+        run_simhost mfplughost hostplug 600 5 2400 "" 2
     fi
 fi
 
