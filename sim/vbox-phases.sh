@@ -1666,16 +1666,16 @@ phase_fwsetup()
     local n t0 took quiet=90
     PHASE=fwsetup
     reset_vm
-    # The variable store of the VM is there once the VM has run.  Where this
-    # phase is the first one, it is made.
-    if ! vbm modifynvram "$VM" listvars > /dev/null 2>&1; then
-        run modifynvram "$VM" inituefivarstore
-    fi
     echo "    OsIndications before: $(os_indications)"
     if ! run modifynvram "$VM" firmwaresetup --enable; then
-        stage "the setup of the firmware is asked for" FAILED
-        end_phase
-        return
+        # The variable store of the VM is there once the VM has run.  Where
+        # this phase is the first one, it is made.
+        run modifynvram "$VM" inituefivarstore
+        if ! run modifynvram "$VM" firmwaresetup --enable; then
+            stage "the setup of the firmware is asked for" FAILED
+            end_phase
+            return
+        fi
     fi
     n=$(os_indications)
     case "$n" in
