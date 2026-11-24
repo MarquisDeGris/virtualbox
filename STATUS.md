@@ -1677,6 +1677,15 @@ in the workflows which may write to the repository. **Run 286**
 11 minutes) made the first one, 110 MB, and the release workflow
 published it. `hw/builds.txt` lists it. That build is the 7.2 line with
 the KVM backend; it has no emulated 3D in it (`--disable-dxvk`).
+**Run 321** (2026-11-24, `package` with 3D acceleration, the same
+branch @ `585a8166`, 37 minutes, Intel Xeon 6975P-C) made the build
+which is fetched since then, `vbox-585a816662b0-3d-ubuntu2404.tar.zst`,
+155 MB. It has the change to the device of that day, see "The device
+does not ask a function which is out of service". The build without 3D
+acceleration is still the one of run 286 and does not have it, which
+`hw/README.md` says. No run has fetched the new build yet: the simulation
+does that in its part with the device of four gigabytes, with the next
+run which has that part.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -2139,8 +2148,9 @@ The branches of the merge requests have the change since 2026-11-24,
 each by a push which only adds to what was there:
 `pci-passthrough-hotplug-v1` @ `432ae816`, `-7.2` @ `5edbdf1a`,
 `-7.2-kvm` @ `585a8166`, `-7.1` @ `9cd83b17` and `-7.1-kvm` @
-`656e0e59`. The build which a machine with real hardware fetches does
-not have it yet.
+`656e0e59`. The build which a machine with real hardware fetches has
+it since run 321, see "The build to fetch" under "Machines with real
+hardware".
 
 What no run can show: that the lines of run 313 are gone from a VM.
 They came in two runs on one kind of runner and in none on another
@@ -2985,9 +2995,9 @@ harness since WP5, saved states since the fourth part of WP6.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
-   which is out of service" under "VMs with the sanitizers". What is
-   left of it: a build for a machine with real hardware which has the
-   change.
+   which is out of service" under "VMs with the sanitizers". The build
+   for a machine with real hardware has the change (run 321). What is
+   left of it: a run of the simulation which fetches that build.
 
 ## Decisions
 
@@ -3379,5 +3389,6 @@ virtual machine.
 | 318 | `scratch/cfg-gone-7.1-kvm` @ `656e0e59` | tests | passed | 15 minutes, Intel Xeon 6975P-C. The change on the 7.1 line with the KVM backend: it builds, the 57 tests and the three random tests pass |
 | 319 | `scratch/mutant-cg1` @ `9f19ab15` | tests | failed as intended | 8 minutes, AMD EPYC 9V45. A deliberate defect in the change: a read which fails is not looked at again for the function having gone out of service meanwhile. The part of the test which pulls the plug from inside a read fails, twice, and nothing else does |
 | 320 | `scratch/mutant-cg2` @ `deaac27b` | tests | failed as intended | 12 minutes, Intel Xeon Platinum 8573C. A second deliberate defect: the device asks whether the function is in service or not. The read of the whole configuration space of a function which is out of service counts 65 reads which reach what stands in for the device, and the part with the plug pulled from inside a read counts two where one was under way. Nothing else fails |
+| 321 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | package, built with 3D acceleration | passed | 37 minutes, Intel Xeon 6975P-C. The package `vbox-585a816662b0-3d-ubuntu2404.tar.zst`, 155 MB, with the change of 2026-11-24 to the device: the testcase passes on the head of the branch, and the release workflow published the package next to the two before it. `hw/builds.txt` has it as the build which is fetched |
 
 Run numbers are those GitHub shows for the `build` workflow.

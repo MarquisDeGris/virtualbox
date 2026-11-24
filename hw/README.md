@@ -63,7 +63,10 @@ which can also be run by itself:
   The build it fetches has 3D acceleration for VMs, which takes a graphics
   card with a Vulkan driver on the host for a VM that has it switched on;
   the tests here do not switch it on. There is a build without it as well:
-  `HW_BUILD=60-ubuntu sh hw/linux/fetch.sh`, see `hw/builds.txt`.
+  `HW_BUILD=60-ubuntu sh hw/linux/fetch.sh`, see `hw/builds.txt`. That one
+  is older and lacks a change to the device of 2026-11-24: with it a log
+  can have lines about a register read which failed while a device was
+  on its way out, which the tests count by themselves and not as trouble.
 - `bind.sh` refuses the card the firmware shows its screen on. A card the
   desktop of the host uses does not take being taken from its driver well;
   no monitor on the card and nothing of the host using it is the safe way.
