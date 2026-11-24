@@ -673,8 +673,8 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         # functions: each drive is a name of its own which outlives its
         # controller, and both controllers have a name to be told by.
         # The part with Windows and such a device has this machine too, and
-        # ends with the device being unplugged from it (win_host_plug in
-        # win-phases.sh).
+        # has the device unplugged from it and plugged in again
+        # (win_host_plug in win-phases.sh).
         dev=(-blockdev "driver=file,filename=$WORK/nvme.img,node-name=nvmf"
              -blockdev "driver=raw,file=nvmf,node-name=nvm0"
              -blockdev "driver=file,filename=$WORK/nvme2.img,node-name=nvmg"

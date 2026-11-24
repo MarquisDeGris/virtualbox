@@ -952,6 +952,7 @@ host_error_round() # <round> <what the error is called> <status>
     want=$(echo $HOSTFUNCS | wc -w)
     serial_mark
     dmesg -C 2> /dev/null
+    port_says "before the error which is $what"
     echo "+ the port in front of the device reports an error: $what (status $status)"
     if ! host_request aer "$status"; then
         stage "host: the port in front of the device reports an error which is $what" FAILED "the machine was not made to"
@@ -1001,6 +1002,7 @@ host_error_round() # <round> <what the error is called> <status>
     serial_show 'pciehp|GUEST: GONE' 10
     guest_goes_on "the VM runs on after the error ($what)" 150
     $HE_STATE hotplug,absent,unused
+    port_says "after the error which is $what"
     # The device is what it was to the host, or is made that again.
     [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
     if ! bind_dev; then
@@ -1090,10 +1092,14 @@ port_says() # <when>
 HOST_PORT=
 
 # Whether the port in front of the device tells of a link which has a width.
-# The port this machine emulates loses the width and the speed of its link
-# when the bus behind it is reset (run 341: link status 2011 before, 2000
-# after), and the kernel of the host does not take a device which is plugged
-# into such a port ("Cannot train link").  A port of a real host keeps them.
+# The port this machine emulates has lost the width and the speed of its link
+# after the phase in which the host reports errors of the device, the second
+# of which its kernel takes for fatal and answers with a reset behind the port
+# (runs 341 and 342: link status 2011 before, 2000 after).  The kernel of the
+# host does not take a device which is plugged into such a port ("Cannot
+# train link").  The resets of the bus which VirtualBox asks for, for a
+# device whose functions have no reset of their own, leave the link as it is
+# (run 343).  A port of a real host keeps its link.
 # Where the register cannot be read, the port is taken to be in order.
 port_link_has_width()
 {
@@ -1207,7 +1213,7 @@ phase_hostplug()
         fi
 
         if ! port_link_has_width; then
-            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width since the bus behind it was reset, and the kernel of the host takes no device from such a port"
+            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does after an error which the kernel of the host took for fatal, and that kernel takes no device from such a port"
             end_phase
             return
         fi
