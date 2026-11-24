@@ -2254,6 +2254,16 @@ each other, the guest finds both drives gone, the VM runs on, and
 the fatal error the kernel's reset of the bus gets through as well.
 This part is a default one too.
 
+**The other two lines** (runs 330 and 331, the same day, the two
+parts with an error): on the branch of the merge request,
+`pci-passthrough-hotplug-v1` @ `432ae816`, which has the KVM backend
+of upstream (15 minutes, AMD EPYC 9V45), and on the branch for 7.1
+with the KVM backend, `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59`
+(21 minutes, AMD EPYC 7763). All 89 checks pass on both, the 20 and
+the 22 of the phase among them, and the kernel's recovery succeeds
+after each error. With that every branch of a merge request about the
+passthrough work has been through it.
+
 What this does not show: an error of a real device, which may leave
 the device in a state no reset gets it out of; Windows as the guest,
 which has been through losing the drive by force (`unplugpci --force`)
@@ -3561,5 +3571,7 @@ virtual machine.
 | 327 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, exploring | passed | 18 minutes, Intel Xeon Platinum 8573C. All 59 pass. The error is made from the runner, at the port in front of the device: 20 checks, with an error which is not fatal and with one which is. VirtualBox takes the device out of service, the guest notices, the VM runs on, the device is put back. After the fatal error the kernel of the machine called its own recovery failed, for what the emulated port does not tell |
 | 328 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, not strict | passed | 17 minutes, Intel Xeon 6975P-C. All 59 pass. The same with a port which lets the reset of the bus get through: the kernel's recovery succeeds after both errors, and the 20 checks pass again |
 | 329 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the parts errhost and mferrhost, not strict | passed | 19 minutes, Intel Xeon 6975P-C. All 89 pass. The error of the device with a device of two functions: the kernel tells both drivers, each function is taken out of service once, the guest loses both drives and has them again after `plugpci`: 22 checks, and the 20 with one function again |
+| 330 | `pci-passthrough-hotplug-v1` @ `432ae816` | sim with the parts errhost and mferrhost, not strict | passed | 15 minutes, AMD EPYC 9V45. All 89 pass. The two parts about an error of the device on the branch of the merge request: 20 and 22 checks |
+| 331 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the parts errhost and mferrhost, not strict | passed | 21 minutes, AMD EPYC 7763. All 89 pass. The same on the branch for 7.1 with the KVM backend |
 
 Run numbers are those GitHub shows for the `build` workflow.
