@@ -2270,6 +2270,47 @@ which has been through losing the drive by force (`unplugpci --force`)
 and not through this; and a device which is pulled without the host
 being told first, which the emulated port cannot do.
 
+### The device leaves the host and comes back, in the simulation (2026-11-24)
+
+A device in an enclosure on a cable is not there all the time. So far
+the simulation had the host take the device back by a word to its
+kernel and have it again by looking for it; the device never left the
+machine. With the script on the runner which does things to that
+machine from outside (see the section before this one) it can. A part
+of its own, `plughost`: its machine has its kernel run the slot of the
+port itself, as a kernel does for a port an enclosure connects to (the
+firmware of the emulated machine keeps that to itself by default), and
+a drive which outlives the device which is taken away.
+
+The phase (`hostplug`): a Linux guest uses the drive in the hot-plug
+capable slot of the VM. The device is unplugged from the host: the
+port is told so from the runner, the kernel of the host announces that
+it will switch the slot off and asks the driver which has the device
+to let go of it. That driver asks VirtualBox, VirtualBox asks the
+guest, the guest lets go, and the host has no such device any more.
+`plugpci` of the device is refused then, and the VM runs on. The
+device is plugged in again: the kernel of the host finds a card in the
+slot and a new device at the address, with no driver; it is bound to
+`vfio-pci`, which INSTALL.md says is to be done each time a device was
+plugged in; `plugpci` puts it into the VM, and the guest reads from
+the drive.
+
+**Run 333** (2026-11-24, `sim` with that part only, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `585a8166`, 14 minutes, AMD EPYC
+9V45): all 16 checks of the phase pass at its first run, 55 in the
+run. The device was gone from the host 13 seconds after the port was
+told; five of them the kernel of the host waits after its own
+announcement, and five the guest does the same in its VM. The log of
+the VM has "The device is not reset now, the host is busy with it and
+refuses. The host resets it when it is let go of", which is how it is
+meant to go when it is the host which takes the device. The part is
+one a run has by default since.
+
+What this does not show: a device which is gone without the host
+having been asked, as when a cable is pulled; with the emulated port
+the host is asked first. The device of two functions and Windows as
+the guest have not been through this part.
+
 ### The issue with upstream, 2026-11-23
 
 The work is made known to upstream since 2026-11-23: issue 999 in the
@@ -3170,10 +3211,13 @@ harness since WP5, saved states since the fourth part of WP6.
    device coming and going, and a device pulled without notice in the
    simulation, which the port it emulates cannot do. A device error in
    the simulation is done since 2026-11-24, with a device of one function
-   and of two, see "An error of the device, in the simulation". What
-   could follow there: the same with Windows, and the device leaving
-   the host and coming back by the host's own hot-plug, for which the
-   script on the runner would have to take two more requests.
+   and of two, see "An error of the device, in the simulation", and so
+   is the device leaving the host and coming back by the host's own
+   hot-plug, see "The device leaves the host and comes back, in the
+   simulation". What could follow there: both with Windows as the
+   guest (the error is written for Windows and has not run: run 332
+   had a runner on which Windows does not get through its start, see
+   4d), and the unplugging with the device of two functions.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3309,6 +3353,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-24 | The simulation has the host report an error of the device, with the error made from the runner through the monitor of the emulated machine | What VirtualBox does about such an error was only tried against a kernel the testcase makes up. The kernel of the runners cannot make one up itself (run 326), the emulator can, and what it does is nearer to hardware. The script on the runner takes that one request and no other, so that the machine gets no way to its own emulator |
 | 2026-11-24 | That part is one a run of the simulation has by default | 17 minutes of which most is the build; a change to how the device goes out of service is what it is there to catch |
 | 2026-11-24 | Upstream is told of the defect in the event queue of Main, as a comment on the issue which is there already and not as an issue of its own | Who this work is for said yes to telling. The issue lists the defects of `main` which were found on the way, and this is one more of them; a second issue would be one more thing for upstream to sort |
+| 2026-11-24 | A run which is about Windows in the machine standing in for a host is cancelled at once when its runner has an AMD processor, and started again | Run 332 took two and a half hours to show nothing new: on such runners Windows does not get through its start at that depth (item 4d). A run tells its processor in its first minute, and a cancelled run costs that minute |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3586,5 +3631,8 @@ virtual machine.
 | 329 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the parts errhost and mferrhost, not strict | passed | 19 minutes, Intel Xeon 6975P-C. All 89 pass. The error of the device with a device of two functions: the kernel tells both drivers, each function is taken out of service once, the guest loses both drives and has them again after `plugpci`: 22 checks, and the 20 with one function again |
 | 330 | `pci-passthrough-hotplug-v1` @ `432ae816` | sim with the parts errhost and mferrhost, not strict | passed | 15 minutes, AMD EPYC 9V45. All 89 pass. The two parts about an error of the device on the branch of the merge request: 20 and 22 checks |
 | 331 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the parts errhost and mferrhost, not strict | passed | 21 minutes, AMD EPYC 7763. All 89 pass. The same on the branch for 7.1 with the KVM backend |
+| 332 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | winsim, exploring | passed (11 checks of the simulation fail) | 149 minutes, AMD EPYC 7763. 104 pass. Meant for the error of the device with Windows as the guest, which it did not get to: Windows did not get through its start in the machine standing in for a host with the drive and with the audio function, and stood still with the device of two functions, as on such runners before (item 4d under "Next"). Nothing of it is about the new step |
+| 333 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part plughost, exploring | passed | 14 minutes, AMD EPYC 9V45. All 55 pass. The device is unplugged from the host and plugged in again, by the hot-plug of the host's own kernel: 16 checks at their first run. See "The device leaves the host and comes back, in the simulation" |
+| 334, 335 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | cancelled | Each within a minute, for having a runner of the kind run 332 had; the run after them is the one which was kept |
 
 Run numbers are those GitHub shows for the `build` workflow.

@@ -1157,7 +1157,8 @@ phase_hostplug()
         done
         dmesg | grep -i -E 'pciehp|acpiphp|pci 0000:01|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
         if [ -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
-            drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver" 2> /dev/null)" 2> /dev/null)
+            drv=
+            [ -e "/sys/bus/pci/devices/$HOSTADDR/driver" ] && drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver")")
             stage "host: has the device again" ok "after $i s, with ${drv:-no} driver"
         else
             stage "host: has the device again" FAILED "nothing at $HOSTADDR after $i s"
