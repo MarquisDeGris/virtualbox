@@ -2306,10 +2306,24 @@ refuses. The host resets it when it is let go of", which is how it is
 meant to go when it is the host which takes the device. The part is
 one a run has by default since.
 
+**The same with a device of two functions** (a part of its own,
+`mfplughost`; **run 337**, the same day, the two parts in which the
+device is unplugged, the same branch, 19 minutes, Intel Xeon 6975P-C).
+All 16 checks of the phase pass with it, and the 16 with the drive
+again, 79 in the run. The kernel of the host asks the driver of each
+function to let go, the second function six seconds before the first;
+VirtualBox asks the guest once and takes both functions out of service
+in the same moment; both are gone from the host 13 seconds after the
+port was told. Plugged in again, second function first as the emulator
+wants it, both are there within a second, are bound and put into the
+VM, and the guest reads from both drives. The phase tells rightly now
+that a device which came back has no driver. This part is a default
+one too.
+
 What this does not show: a device which is gone without the host
 having been asked, as when a cable is pulled; with the emulated port
-the host is asked first. The device of two functions and Windows as
-the guest have not been through this part.
+the host is asked first. Windows as the guest has not been through
+this part.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3217,7 +3231,8 @@ harness since WP5, saved states since the fourth part of WP6.
    simulation". What could follow there: both with Windows as the
    guest (the error is written for Windows and has not run: run 332
    had a runner on which Windows does not get through its start, see
-   4d), and the unplugging with the device of two functions.
+   4d). The unplugging has run with the device of two functions as
+   well (run 337).
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3634,5 +3649,6 @@ virtual machine.
 | 332 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | winsim, exploring | passed (11 checks of the simulation fail) | 149 minutes, AMD EPYC 7763. 104 pass. Meant for the error of the device with Windows as the guest, which it did not get to: Windows did not get through its start in the machine standing in for a host with the drive and with the audio function, and stood still with the device of two functions, as on such runners before (item 4d under "Next"). Nothing of it is about the new step |
 | 333 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part plughost, exploring | passed | 14 minutes, AMD EPYC 9V45. All 55 pass. The device is unplugged from the host and plugged in again, by the hot-plug of the host's own kernel: 16 checks at their first run. See "The device leaves the host and comes back, in the simulation" |
 | 334, 335 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | cancelled | Each within a minute, for having a runner of the kind run 332 had; the run after them is the one which was kept |
+| 337 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the parts plughost and mfplughost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 79 pass. The device of two functions is unplugged from the host and plugged in again: 16 checks at their first run, and the 16 with the drive again |
 
 Run numbers are those GitHub shows for the `build` workflow.
