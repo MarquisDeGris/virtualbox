@@ -2337,10 +2337,51 @@ VM, and the guest reads from both drives. The phase tells rightly now
 that a device which came back has no driver. This part is a default
 one too.
 
+**All parts in one run** (**run 338**, the same day,
+`pci-passthrough-hotplug-7.2-kvm` @ `585a8166`, the simulation as it
+is by default now, with its nine parts, 72 minutes, Intel Xeon
+6975P-C). All 315 checks pass, none is left out, and the testcase of
+the device passes in the same run. The four parts of this day, the two
+with an error and the two with the device unplugged, go through with
+the five there were.
+
+**With Windows as the guest, and what the emulated port does not do**
+(**run 340**, the same day, `winsim` with the device of two functions,
+36 minutes, Intel Xeon 6975P-C; 147 checks pass and 1 fails). The part
+with Windows and the device of two functions ended with the device
+being unplugged from the host. That went as it should: the host lost
+both functions 15 seconds after the port was told, Windows found the
+drive and the second function gone and ran on, and `plugpci` was
+refused. Plugged in again the device did not come back to the host,
+whose kernel said "Cannot train link: status 0x2000".
+
+**Run 341** (the same day, the two parts with the Linux guest, each
+going through the unplugging, an error of the device and the
+unplugging once more, and telling what the port says of its link at
+each step; 32 minutes, Intel Xeon 6975P-C; 141 pass, 2 fail) shows
+what that is. The port has link status 2011 while nothing has happened
+to it, and the device comes back when it is plugged in. After the
+error which the kernel takes for fatal, when the kernel has reset the
+bus behind the port, the port has link status 2000: the speed and the
+width of its link are gone, and stay gone. Unplugging still works.
+Plugged in again the device is not taken, with the same words as in
+run 340, in both parts. So it is the emulator: its port does not keep
+the width of its link over a reset of the bus, and the kernel of the
+host takes no device from a port whose link has no width. In run 340
+the bus had been reset before as well: by the error, which came before
+the unplugging there, and by the resets of the device, whose two
+functions have no reset of their own in that part. A port of a real host
+keeps its link, and this is no finding about VirtualBox; what it
+means for the simulation is that a device cannot be plugged in again
+after its bus was reset. The phases look at the port before they try,
+and leave the plugging in out, saying why, where the port has no
+width; with Windows the unplugging and plugging in comes before the
+error where the port still has its link.
+
 What this does not show: a device which is gone without the host
 having been asked, as when a cable is pulled; with the emulated port
-the host is asked first. Windows as the guest has not been through
-this part.
+the host is asked first. And a device which is plugged in again after
+an error which had its bus reset, for the reason above.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3384,6 +3425,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-24 | That part is one a run of the simulation has by default | 17 minutes of which most is the build; a change to how the device goes out of service is what it is there to catch |
 | 2026-11-24 | Upstream is told of the defect in the event queue of Main, as a comment on the issue which is there already and not as an issue of its own | Who this work is for said yes to telling. The issue lists the defects of `main` which were found on the way, and this is one more of them; a second issue would be one more thing for upstream to sort |
 | 2026-11-24 | A run which is about Windows in the machine standing in for a host is cancelled at once when its runner has an AMD processor, and started again | Run 332 took two and a half hours to show nothing new: on such runners Windows does not get through its start at that depth (item 4d). A run tells its processor in its first minute, and a cancelled run costs that minute |
+| 2026-11-24 | Where the emulated port has lost the width of its link, the simulation does not plug the device in again, and says so in its result | Runs 340 and 341: after a reset of the bus the port tells of a link without a width and the kernel of the machine takes no device from it. Nothing which can be done from inside that machine brings the width back. A check which can only fail tells nothing; one which is left out with its reason does |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3666,5 +3708,9 @@ virtual machine.
 | 334, 335 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | cancelled | Each within a minute, for having a runner of the kind run 332 had; the run after them is the one which was kept |
 | 336 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | passed | 61 minutes, Intel Xeon 6975P-C. 258 pass, none fails, 1 is left out. The host reports an error of the device with Windows as the guest, in all three parts with Windows and a device: the device goes out of the VM, Windows runs on, takes it again after `plugpci` and reads from the drive, after an error which is not fatal and after one which is |
 | 337 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the parts plughost and mfplughost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 79 pass. The device of two functions is unplugged from the host and plugged in again: 16 checks at their first run, and the 16 with the drive again |
+| 338 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim, not strict | passed | 72 minutes, Intel Xeon 6975P-C. All 315 pass. The first run of the simulation with its nine parts as they are by default now, the two about an error and the two about the device being unplugged among them; the testcase of the device passes in it |
+| 339 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | cancelled | Within a minute, for its runner, as runs 334 and 335 |
+| 340 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim with the parts runner, win and mfwinhost, exploring | passed (1 check of the simulation fails) | 36 minutes, Intel Xeon 6975P-C. 147 pass. The device of two functions is unplugged from the host while Windows uses it: the host loses it, Windows finds it gone and runs on. Plugged in again it does not come back to the host, whose kernel cannot train the link of the port |
+| 341 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | sim with the parts plughost and mfplughost, exploring | passed (2 checks of the simulation fail) | 32 minutes, Intel Xeon 6975P-C. 141 pass. The unplugging, an error, and the unplugging once more: the emulated port loses the speed and width of its link when the bus behind it is reset (link status 2011 before, 2000 after), and a device which is plugged into it then is not taken. That is what failed in run 340, and it is the emulator |
 
 Run numbers are those GitHub shows for the `build` workflow.
