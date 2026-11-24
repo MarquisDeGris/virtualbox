@@ -2180,6 +2180,73 @@ sanitizers as well (409 to 521 seconds in five earlier runs).
 Not done this way: Windows with the device of two functions and with
 the one whose second function is an audio controller.
 
+### An error of the device, in the simulation (2026-11-24)
+
+What VirtualBox does when the host reports an error of a device it has
+passed on was tried by the testcase only, against the kernel the
+testcase makes up; "Next" had the same in the simulation as not
+planned. It is there now, as a part of its own (`errhost`, a machine
+of its own, so that a kernel which does not get over an error costs
+no other check): a Linux guest uses the drive in the hot-plug capable
+slot, and the port the drive is behind reports an error it cannot
+correct. The kernel of the machine which stands in for the host takes
+that up as it does with real hardware: its AER driver reads the
+registers of the port, tells the drivers of all which is behind the
+port, and for an error it takes for fatal resets the bus. The driver
+which has the drive for VirtualBox (`vfio-pci`) tells VirtualBox, and
+VirtualBox takes the device out of service and tells the guest that
+the slot is empty.
+
+The error has to come from somewhere, and it is made up. The first
+try was the means the kernel has for trying this out, the module
+`aer_inject`; the kernel of the runners does not have it (**run 326**,
+where the phase was skipped). So it comes from outside that machine:
+the emulator which is the machine has a command for making a port
+report an error, the machine gets a socket for commands which nothing
+inside it can reach, and a script on the runner (`sim/host-agent.sh`)
+gives that one command when the script inside the machine asks for it
+through the directory the two share. It takes no other request. The
+port then does what hardware does: it sets its status and raises its
+interrupt.
+
+The phase (`hosterror`), twice, with an error which by the
+specification is not fatal (Completer Abort) and with one which is
+(Malformed TLP): the port is made to report it; the kernel has it in
+its log; the log of the VM says "The function is taken out of service:
+the host reported an error of the device"; the guest finds its slot
+empty and its drive gone; the VM runs on; VirtualBox tells the slot is
+empty; the host still has the device; `plugpci` puts it back; the
+guest takes it and reads from the drive.
+
+**Run 327** (2026-11-24, `sim` with that part only, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `585a8166`, 18 minutes, Intel Xeon
+Platinum 8573C): all 20 checks of the phase pass, both errors.
+VirtualBox had the device out of service in the second the kernel
+logged the error. After the error which is not fatal the kernel says
+"device recovery successful". After the fatal one it reset the bus
+behind the port, waited for a link which that emulated port never
+tells of ("Data Link Layer Link Active not set"), and said "device
+recovery failed": the port of the machine again, as in run 265, and no
+finding about VirtualBox, which did the same as before, and the device
+could be put back all the same. A host whose recovery fails is a case
+of its own, and this run is what there is of it.
+
+**Run 328** (the same day, the same part and branch, 17 minutes, Intel
+Xeon 6975P-C): the machine of this part has the port which does not
+claim to tell of its link, as the parts with other devices have it.
+All 20 checks pass again, and after the fatal error the kernel says
+"Root Port link has been reset" and "device recovery successful": its
+reset of the bus got through, with the device already let go of by
+VirtualBox. The part is among those a run of the simulation has by
+default since.
+
+What this does not show: an error of a real device, which may leave
+the device in a state no reset gets it out of; the device of two
+functions, where the kernel tells both drivers; Windows as the guest,
+which has been through losing the drive by force (`unplugpci --force`)
+and not through this; and a device which is pulled without the host
+being told first, which the emulated port cannot do.
+
 ### The issue with upstream, 2026-11-23
 
 The work is made known to upstream since 2026-11-23: issue 999 in the
@@ -3065,8 +3132,13 @@ harness since WP5, saved states since the fourth part of WP6.
    card: other requests about `VBoxManage` and about settings. The two
    large ones about 3D are not planned.
 7. Not planned for now: T3 (see the test tiers), events in the API for a
-   device coming and going, a device pulled without notice and a device
-   error in the simulation.
+   device coming and going, and a device pulled without notice in the
+   simulation, which the port it emulates cannot do. A device error in
+   the simulation is done since 2026-11-24, see "An error of the device,
+   in the simulation". What could follow there: the same with the device
+   of two functions and with Windows, and the device leaving the host
+   and coming back by the host's own hot-plug, for which the script on
+   the runner would have to take two more requests.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3199,6 +3271,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-23 | A build with 3D acceleration is asked for with a word among the arguments for kmk, not with an input of its own | The workflow has ten inputs, which was the most a workflow could have when it was written, and the word has to be there for kmk anyway |
 | 2026-11-24 | From the moment a function is out of service until the guest is told, a read of a register the device passes on is answered from what is kept of the register, not by asking and not with ones | Asking reaches what stands in for the device, which has no answer; and the function is to stay as it was for the guest until the PCI bus has taken its mappings away, which is why reads are not all ones before that |
 | 2026-11-24 | The simulation is not run again on the 7.1 line for that change | It is the same lines on every line. The testcase passes with it on 7.1 (run 318) and the whole simulation does on 7.2 (run 317); 50 minutes more would tell nothing new |
+| 2026-11-24 | The simulation has the host report an error of the device, with the error made from the runner through the monitor of the emulated machine | What VirtualBox does about such an error was only tried against a kernel the testcase makes up. The kernel of the runners cannot make one up itself (run 326), the emulator can, and what it does is nearer to hardware. The script on the runner takes that one request and no other, so that the machine gets no way to its own emulator |
+| 2026-11-24 | That part is one a run of the simulation has by default | 17 minutes of which most is the build; a change to how the device goes out of service is what it is there to catch |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3470,5 +3544,8 @@ virtual machine.
 | 323 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | sim with the parts runner, win and winhost, the whole tree built with the sanitizers, exploring | passed | 62 minutes, Intel Xeon 6975P-C. All 110 pass. Windows Server 2025 with the drive in the hot-plug capable slot, VBoxSVC and the VM process built with both sanitizers: 32 checks with Windows and the drive, and the sanitizers wrote nothing in any part. See "Windows with a device in the slot, with the sanitizers" |
 | 324 | `feat/nvram-firmware-setup` @ `83aa0765` | sim with the part runner, exploring | passed | 25 minutes, Intel Xeon 6975P-C. A branch from `main` for request 944 of the tracker of upstream. It builds; all 24 checks of the simulation pass, the new phase `fwsetup` among them: the firmware enters its setup when asked and takes the request back. One of the eight new command line checks passes, the others fail with a variable store which was just made. See "Requests from the tracker of upstream" |
 | 325 | `feat/nvram-firmware-setup` @ `acd8fb87` | sim with the part runner, not strict | passed | 9 minutes, AMD EPYC 7763. The second commit of that branch: all eight command line checks pass, and all 24 of the simulation again |
+| 326 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, exploring | passed | 16 minutes. The first run of a part about the host reporting an error of the device. Its phase was skipped: the kernel of the runners has no module for making up such an error. See "An error of the device, in the simulation" |
+| 327 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, exploring | passed | 18 minutes, Intel Xeon Platinum 8573C. All 59 pass. The error is made from the runner, at the port in front of the device: 20 checks, with an error which is not fatal and with one which is. VirtualBox takes the device out of service, the guest notices, the VM runs on, the device is put back. After the fatal error the kernel of the machine called its own recovery failed, for what the emulated port does not tell |
+| 328 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part errhost, not strict | passed | 17 minutes, Intel Xeon 6975P-C. All 59 pass. The same with a port which lets the reset of the bus get through: the kernel's recovery succeeds after both errors, and the 20 checks pass again |
 
 Run numbers are those GitHub shows for the `build` workflow.
