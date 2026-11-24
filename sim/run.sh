@@ -71,9 +71,19 @@
 #      what the second script for real hardware looks for with a graphics
 #      card.  Nobody sees its picture.
 #
+#   2e. An error of the device (SIM_PARTS has "errhost"): the kernel of the
+#      machine which stands in for the host is told that the device has
+#      reported an error it cannot correct, by the means the kernel has for
+#      trying that out, while a guest uses the drive in the hot-plug capable
+#      slot.  The error is made up; what the kernel, the driver which has the
+#      device and VirtualBox do about it is what they do about a real one.
+#      The device goes out of the VM, the VM runs on, and the device can be
+#      put in again.  Once with an error the kernel does not take for fatal
+#      and once with one it does, after which it resets the bus.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, barhost, vgahost, win, winhost, mfwinhost, hdawinhost.  Without it:
-# runner,simhost.
+# mfhost, barhost, vgahost, errhost, win, winhost, mfwinhost, hdawinhost.
+# Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
 # its serial port what it sees of the drive.  vbox-phases.sh drives VirtualBox
@@ -138,6 +148,9 @@ finish()
         missing=1
     fi
     if has_part vgahost && ! grep -q '^vgahost/setup: the first script' "$STAGES"; then
+        missing=1
+    fi
+    if has_part errhost && ! grep -q '^errhost/hosterror: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -753,6 +766,15 @@ if has_part vgahost; then
     note "Part 2d: a graphics card, as far as the simulation has one"
     if part_simhost_prepare; then
         run_simhost vgahost none 600 5 3000 "" vga
+    fi
+fi
+
+if has_part errhost; then
+    # A machine of its own for this: where its kernel does not get over what
+    # it is told, nothing else is lost.
+    note "Part 2e: an error of the device, as the kernel of the host tells of it"
+    if part_simhost_prepare; then
+        run_simhost errhost hosterror 600 5 2400
     fi
 fi
 

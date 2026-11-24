@@ -358,6 +358,15 @@ SIM_BOOT_WAIT=${SIM_BOOT_WAIT:-300} \
 SIM_PATIENCE=${SIM_PATIENCE:-3} \
     bash "$SIM_DIR/vbox-phases.sh" $PHASES
 
+if [ "$WHERE" = errhost ]; then
+    # This machine is for what its kernel does about an error of the device,
+    # and for nothing which comes after that.
+    echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
+    dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|aer_inject|pcieport' | cut -c1-220 | tail -n 60
+    dmesg > "$OUT/$WHERE/dmesg.log" 2> /dev/null
+    exit 0
+fi
+
 # The scripts for a machine with real hardware, with the drive in the place
 # of a graphics card: they are to have run here before they run where a run
 # costs somebody's time.
