@@ -358,11 +358,11 @@ SIM_BOOT_WAIT=${SIM_BOOT_WAIT:-300} \
 SIM_PATIENCE=${SIM_PATIENCE:-3} \
     bash "$SIM_DIR/vbox-phases.sh" $PHASES
 
-if [ "$WHERE" = errhost ] || [ "$WHERE" = mferrhost ]; then
+if [ "$WHERE" = errhost ] || [ "$WHERE" = mferrhost ] || [ "$WHERE" = plughost ]; then
     # This machine is for what its kernel does about an error of the device,
     # and for nothing which comes after that.
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"
-    dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|aer_inject|pcieport' | cut -c1-220 | tail -n 60
+    dmesg | grep -i -E 'DMAR.*fault|vfio|iommufd|AER|pciehp|acpiphp|pcieport' | cut -c1-220 | tail -n 60
     dmesg > "$OUT/$WHERE/dmesg.log" 2> /dev/null
     exit 0
 fi

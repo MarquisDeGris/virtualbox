@@ -1074,6 +1074,123 @@ phase_hosterror()
     bind_dev
 }
 
+# The device is unplugged from the host and plugged in again, as a device in
+# an enclosure on a cable is.  Not by a word to the kernel as in the phase
+# hostremove: the port the device is behind is told from outside this machine
+# (see host_request) that the device is to go, the hot-plug of the host's own
+# kernel takes it from there, and afterwards the host has no such device any
+# more.  The kernel asks the driver which has the device for VirtualBox to let
+# go, that one asks VirtualBox, and VirtualBox asks the guest.  Plugged in
+# again the device is a new one to the host, which has no driver bound to it.
+phase_hostplug()
+{
+    local i t0 drv
+    PHASE=hostplug
+    reset_vm
+    if [ -z "${SIM_HOSTAGENT:-}" ]; then
+        stage "the device can be unplugged from the host" skipped "nobody outside this machine to do that"
+        return
+    fi
+    bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
+    dmesg | grep -i -E '_OSC: OS now controls|pciehp|acpiphp' | cut -c1-200 | tail -n 6 | sed 's/^/    | /'
+    run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    if boot "a VM with the device in the hot-plug capable slot boots the guest"; then
+        guest_reads 1 "guest: reads from the drive in the slot"
+
+        serial_mark
+        dmesg -C 2> /dev/null
+        echo "+ the device is unplugged from the host"
+        t0=$(date +%s)
+        if host_request unplug; then
+            stage "host: is told that the device is to be unplugged" ok
+        else
+            stage "host: is told that the device is to be unplugged" FAILED
+            end_phase
+            return
+        fi
+        i=0
+        while [ -e "/sys/bus/pci/devices/$HOSTADDR" ] && [ "$i" -lt 180 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        dmesg | grep -i -E 'pciehp|acpiphp|vfio|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+        if [ ! -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
+            stage "host: the device is gone from it" ok "$(( $(date +%s) - t0 )) s after it was told"
+        else
+            stage "host: the device is gone from it" FAILED "it is still there after $i s"
+            diag
+        fi
+        if wait_serial 'GUEST: GONE 1' 60; then
+            stage "guest: was asked and let go, the drive is gone" ok
+        else
+            stage "guest: was asked and let go, the drive is gone" FAILED
+        fi
+        serial_show 'pciehp|GUEST: GONE' 10
+        grep -a -E 'taken out of service|wants the device back' "$VMDIR/Logs/VBox.log" | tail -n 3 | cut -c1-200 | sed 's/^/    | /'
+        guest_goes_on "the VM runs on after that" 90
+        check_pcistate hotplug,absent,unused
+
+        # What is not on the host cannot be put into the VM.
+        if [ ! -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
+            if run controlvm "$VM" plugpci "$HOSTADDR"; then
+                stage "plugpci of the device which is not on the host is refused" FAILED "it was taken"
+            else
+                stage "plugpci of the device which is not on the host is refused" ok
+            fi
+            guest_goes_on "the VM runs on after the command which was refused" 90
+        fi
+
+        dmesg -C 2> /dev/null
+        echo "+ the device is plugged into the host again"
+        if host_request plug; then
+            stage "host: the device is plugged in again" ok
+        else
+            stage "host: the device is plugged in again" FAILED
+            end_phase
+            return
+        fi
+        i=0
+        while [ ! -e "/sys/bus/pci/devices/$HOSTADDR" ] && [ "$i" -lt 120 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        dmesg | grep -i -E 'pciehp|acpiphp|pci 0000:01|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+        if [ -e "/sys/bus/pci/devices/$HOSTADDR" ]; then
+            drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver" 2> /dev/null)" 2> /dev/null)
+            stage "host: has the device again" ok "after $i s, with ${drv:-no} driver"
+        else
+            stage "host: has the device again" FAILED "nothing at $HOSTADDR after $i s"
+            diag
+            end_phase
+            return
+        fi
+        # A device which came back is a new one to the host: what was done to
+        # bind it to vfio-pci went with the old one.
+        if bind_dev; then
+            stage "host: the device which came back is bound to vfio-pci" ok
+        else
+            stage "host: the device which came back is bound to vfio-pci" FAILED
+            end_phase
+            return
+        fi
+        serial_mark
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci of the device which came back" ok
+        else
+            stage "plugpci of the device which came back" FAILED
+            diag
+        fi
+        guest_reads 2 "guest: takes the device which came back and reads from the drive"
+        check_pcistate hotplug,present,inuse
+        check_log_quiet
+    fi
+    end_phase
+    # For what comes after this phase.
+    [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
+    bind_dev
+}
+
 # The VM starts without the device and gets it later; its state is saved
 # while the slot is empty.
 phase_startempty()
@@ -1910,6 +2027,7 @@ if setup; then
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;
             hosterror)   phase_hosterror ;;
+            hostplug)    phase_hostplug ;;
             startempty)  phase_startempty ;;
             intx)        phase_intx ;;
             mfpassthrough) phase_mfpassthrough ;;

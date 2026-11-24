@@ -11,7 +11,13 @@
 #                  uncorrectable error with that status, one bit as a
 #                  hexadecimal number.  The port tells the machine as hardware
 #                  does: by its registers and its interrupt.
-# Nothing else is taken.  The machine has no monitor of its own.
+#   unplug         the device behind that port (dev0) is unplugged: the port
+#                  tells the machine that somebody wants it out, and the device
+#                  is gone once the machine has switched its slot off.
+#   plug           the same device is plugged into the port again.
+# Nothing else is taken, and no request has a word of the machine in what is
+# given to the monitor but the status of an error, which is checked.  The
+# machine has no monitor of its own.
 #
 # usage: host-agent.sh <directory shared with the machine> <QMP socket> <seconds to live at most>
 # Ends when the file host-agent.stop appears in that directory.
@@ -20,6 +26,34 @@ dir=$1
 qmp=$2
 limit=$3
 here=$(cd "$(dirname "$0")" && pwd)
+
+# monitor <what has to be at the start of the answer, or "" for an answer without an error> <command line>
+monitor()
+{
+    local ok=no
+    if python3 "$here/qmp.py" "$qmp" "$2" > "$dir/host-reply.tmp" 2>&1; then
+        if [ -n "$1" ]; then
+            grep -q "^$1" "$dir/host-reply.tmp" && ok=yes
+        elif ! grep -q -i -E 'error|not found|failed' "$dir/host-reply.tmp"; then
+            ok=yes
+        fi
+    fi
+    if [ "$ok" = yes ]; then
+        if [ -z "$1" ]; then
+            # An answer which says nothing is one which went well.
+            if [ -s "$dir/host-reply.tmp" ]; then
+                sed -i -e '1s/^/OK /' "$dir/host-reply.tmp"
+            else
+                echo "OK" > "$dir/host-reply.tmp"
+            fi
+        fi
+    else
+        # What the monitor said, behind a word which is not "OK".
+        [ -s "$dir/host-reply.tmp" ] || echo "the monitor said nothing" > "$dir/host-reply.tmp"
+        sed -i -e '1s/^/failed: /' "$dir/host-reply.tmp"
+    fi
+}
+
 t0=$(date +%s)
 while [ ! -e "$dir/host-agent.stop" ] && [ $(( $(date +%s) - t0 )) -lt "$limit" ]; do
     if [ -s "$dir/host-request" ]; then
@@ -27,14 +61,11 @@ while [ ! -e "$dir/host-agent.stop" ] && [ $(( $(date +%s) - t0 )) -lt "$limit" 
         read -r what arg rest < "$dir/host-request"
         rm -f "$dir/host-request"
         if [ "$what" = aer ] && [[ "$arg" =~ ^0x[0-9a-f]{1,8}$ ]] && [ -z "$rest" ]; then
-            if python3 "$here/qmp.py" "$qmp" "pcie_aer_inject_error rp1 $arg" > "$dir/host-reply.tmp" 2>&1 \
-               && grep -q '^OK' "$dir/host-reply.tmp"; then
-                :
-            else
-                # What the monitor said, behind a word which is not "OK".
-                sed -i -e '1s/^/failed: /' "$dir/host-reply.tmp"
-                [ -s "$dir/host-reply.tmp" ] || echo "failed: the monitor said nothing" > "$dir/host-reply.tmp"
-            fi
+            monitor OK "pcie_aer_inject_error rp1 $arg"
+        elif [ "$what" = unplug ] && [ -z "$arg" ]; then
+            monitor "" "device_del dev0"
+        elif [ "$what" = plug ] && [ -z "$arg" ]; then
+            monitor "" "device_add nvme,drive=nvm0,serial=SIM0001,bus=rp1,id=dev0"
         else
             echo "refused: not a request this takes" > "$dir/host-reply.tmp"
         fi

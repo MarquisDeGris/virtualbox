@@ -85,9 +85,15 @@
 #      "mferrhost"): the kernel tells the drivers of both functions of the
 #      error, and the device goes out of the VM as the one device it is.
 #
+#   2g. The device is unplugged from the host and plugged in again (SIM_PARTS
+#      has "plughost"): the port the drive is behind is told so from outside
+#      the machine, and the hot-plug of the machine's own kernel takes the
+#      drive out, which is gone from the machine afterwards, and takes it in
+#      again as a new device.  What an enclosure on a cable does to a host.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, barhost, vgahost, errhost, mferrhost, win, winhost, mfwinhost,
-# hdawinhost.
+# mfhost, barhost, vgahost, errhost, mferrhost, plughost, win, winhost,
+# mfwinhost, hdawinhost.
 # Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
@@ -159,6 +165,9 @@ finish()
         missing=1
     fi
     if has_part mferrhost && ! grep -q '^mferrhost/hosterror: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part plughost && ! grep -q '^plughost/hostplug: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -593,6 +602,19 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     # failed (run 327, where all else went as it should).  This port lets it
     # get through.
     [ "$where" = errhost ] && port="$port,x-speed=2_5,x-width=1"
+    if [ "$where" = plughost ]; then
+        # The part in which the device is unplugged from this machine and
+        # plugged in again.  The drive is given a name the device can be
+        # taken away from, and the image is not the device's: a drive which
+        # is given as the others are goes when its device goes.  And the
+        # kernel of the machine is to run the slot of the port itself, as a
+        # kernel does for a port to which an enclosure on a cable connects:
+        # by default the firmware of this kind of machine keeps that.
+        dev=(-blockdev "driver=file,filename=$WORK/nvme.img,node-name=nvmf"
+             -blockdev "driver=raw,file=nvmf,node-name=nvm0"
+             -device "nvme,drive=nvm0,serial=SIM0001,bus=rp1,id=dev0")
+        extra+=(-global "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off")
+    fi
     if [ "$funcs" = 2 ]; then
         port="$port,x-speed=2_5,x-width=1"
         cmdline="$cmdline SIM_MD5B=$MD5B"
@@ -645,7 +667,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     local qmp=
     local -a mon=()
     case ",$phases," in
-        *,hosterror,*|*,win-hotplug,*)
+        *,hosterror,*|*,hostplug,*|*,win-hotplug,*)
             qmp=$WORK/$where-qmp.sock
             sudo mkdir -p "$OUT/$where"
             sudo rm -f "$qmp" "$OUT/$where/host-request" "$OUT/$where/host-reply" "$OUT/$where/host-agent.stop"
@@ -806,6 +828,13 @@ if has_part errhost; then
     note "Part 2e: an error of the device, as the kernel of the host tells of it"
     if part_simhost_prepare; then
         run_simhost errhost hosterror 600 5 2400
+    fi
+fi
+
+if has_part plughost; then
+    note "Part 2g: the device is unplugged from the host and plugged in again"
+    if part_simhost_prepare; then
+        run_simhost plughost hostplug 600 5 2400
     fi
 fi
 
