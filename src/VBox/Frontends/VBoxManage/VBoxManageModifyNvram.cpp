@@ -382,24 +382,19 @@ static RTEXITCODE handleModifyNvramFirmwareSetup(HandlerArg *a, ComPtr<INvramSto
      * what makes this a request for the next start only.  The variable is not
      * there before somebody asked for something with it, and its other bits are
      * none of ours.
+     *
+     * The variable is asked for by its name.  Not getting it is taken as its not
+     * being there, which is the usual reason and not told from others by the API.
      */
-    com::SafeArray<BSTR> aNames;
-    com::SafeArray<BSTR> aOwnerGuids;
-    CHECK_ERROR2I_RET(uefiVarStore, QueryVariables(ComSafeArrayAsOutParam(aNames), ComSafeArrayAsOutParam(aOwnerGuids)), RTEXITCODE_FAILURE);
-    bool fExists = false;
-    for (size_t i = 0; i < aNames.size() && !fExists; i++)
-        fExists = com::Utf8Str(aNames[i]).equals(MODIFYNVRAM_OS_INDICATIONS_NAME);
-
     uint64_t fOsIndications = 0;
+    Bstr strOwnerGuid;
+    com::SafeArray<UefiVariableAttributes_T> aVarAttrs;
+    com::SafeArray<BYTE> aData;
+    HRESULT hrcQuery = uefiVarStore->QueryVariableByName(Bstr(MODIFYNVRAM_OS_INDICATIONS_NAME).raw(), strOwnerGuid.asOutParam(),
+                                                         ComSafeArrayAsOutParam(aVarAttrs), ComSafeArrayAsOutParam(aData));
+    bool const fExists = SUCCEEDED(hrcQuery);
     if (fExists)
     {
-        Bstr strOwnerGuid;
-        com::SafeArray<UefiVariableAttributes_T> aVarAttrs;
-        com::SafeArray<BYTE> aData;
-        CHECK_ERROR2I_RET(uefiVarStore, QueryVariableByName(Bstr(MODIFYNVRAM_OS_INDICATIONS_NAME).raw(), strOwnerGuid.asOutParam(),
-                                                            ComSafeArrayAsOutParam(aVarAttrs), ComSafeArrayAsOutParam(aData)),
-                          RTEXITCODE_FAILURE);
-
         /* The firmware does not go by a variable of another size, so what such a one holds does not count. */
         if (aData.size() == sizeof(fOsIndications))
         {
