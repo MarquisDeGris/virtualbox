@@ -645,7 +645,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
     local qmp=
     local -a mon=()
     case ",$phases," in
-        *,hosterror,*)
+        *,hosterror,*|*,win-hotplug,*)
             qmp=$WORK/$where-qmp.sock
             sudo mkdir -p "$OUT/$where"
             sudo rm -f "$qmp" "$OUT/$where/host-request" "$OUT/$where/host-reply" "$OUT/$where/host-agent.stop"

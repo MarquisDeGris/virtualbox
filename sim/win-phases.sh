@@ -1279,6 +1279,74 @@ frozen_note()
 # The drive in the hot-plug capable slot of a VM with Windows: there when
 # Windows starts, then taken out and put in while it runs, with the guest
 # being asked and without.
+# One error of the device, as the host tells of it, while Windows uses the
+# drive in the slot.  The port in front of the device is made to report it
+# from outside this machine, see host_request and phase_hosterror in
+# vbox-phases.sh, where the same is done with the Linux guest.
+win_host_error_round() # <what the error is called> <status>
+{
+    local what=$1 status=$2 log="$VMDIR/Logs/VBox.log" n0 i=0
+    n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
+    serial_mark
+    dmesg -C 2> /dev/null
+    echo "+ the port in front of the device reports an error: $what (status $status)"
+    if ! host_request aer "$status"; then
+        stage "host: the port in front of the device reports an error which is $what" FAILED "the machine was not made to"
+        return 1
+    fi
+    stage "host: the port in front of the device reports an error which is $what" ok
+    while [ "$i" -lt 60 ] && [ "$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)" = "${n0:-0}" ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    dmesg | grep -i -E 'aer|pcieport|reset' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+    if [ "$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)" != "${n0:-0}" ]; then
+        stage "VirtualBox is told of the error and takes the device out of service ($what)" ok "after $i s"
+    else
+        stage "VirtualBox is told of the error and takes the device out of service ($what)" FAILED "nothing in the log of the VM after $i s"
+        diag
+        return 1
+    fi
+    grep -a -E 'taken out of service|reported an error' "$log" | tail -n 4 | cut -c1-200 | sed 's/^/    | /'
+    win_drive_gone "guest: notices that the drive is gone ($what)" 420
+    win_second_gone "guest: notices that the second function is gone ($what)" 420
+    if ! guest_goes_on "the VM runs on after the error ($what)" 300; then
+        frozen_note
+        WIN_UP=no
+        return 1
+    fi
+    check_pcistate hotplug,absent,unused
+    [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
+    if ! bind_dev; then
+        stage "host: has the device after the error ($what)" FAILED
+        return 1
+    fi
+    stage "host: has the device after the error ($what)" ok
+    serial_mark
+    if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$HOSTADDR"; then
+        stage "plugpci after the error ($what)" ok
+    else
+        stage "plugpci after the error ($what)" FAILED
+        diag
+        return 1
+    fi
+    win_has_drive "guest: takes the device again after the error, its driver has it ($what)" 600
+    win_reads "guest: reads from the drive after the error ($what)"
+    win_second "guest: takes the second function again after the error ($what)" 600
+}
+
+# The host reports an error of the device, first one its kernel does not take
+# for fatal, then one it does.  Only where there is somebody outside this
+# machine to make the port report it.
+win_host_error()
+{
+    [ -n "${SIM_HOSTAGENT:-}" ] || return 0
+    if win_host_error_round "not fatal" 0x8000; then
+        win_host_error_round "fatal" 0x40000
+    fi
+    return 0
+}
+
 phase_hotplug()
 {
     PHASE=win-hotplug
@@ -1360,6 +1428,7 @@ phase_hotplug()
     win_second "guest: takes the second function again and reads from its drive" 600
     win_intx
     win_audio ", with the drive at INTx as well"
+    win_host_error
     check_log_quiet
     shot
 }
