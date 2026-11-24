@@ -1683,9 +1683,13 @@ which is fetched since then, `vbox-585a816662b0-3d-ubuntu2404.tar.zst`,
 155 MB. It has the change to the device of that day, see "The device
 does not ask a function which is out of service". The build without 3D
 acceleration is still the one of run 286 and does not have it, which
-`hw/README.md` says. No run has fetched the new build yet: the simulation
-does that in its part with the device of four gigabytes, with the next
-run which has that part.
+`hw/README.md` says. **Run 322** (the same day, `sim` with the part
+`barhost`, the same branch and commit, 24 minutes, Intel Xeon Platinum
+8573C) fetched the new build as a machine with real hardware does: the
+script which fetches gets the file which is listed, with its checksum,
+and its `VBoxManage` runs; the first test goes through its 15 checks
+with that build and the device of four gigabytes. All 50 checks of the
+run pass.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -2996,8 +3000,9 @@ harness since WP5, saved states since the fourth part of WP6.
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
    which is out of service" under "VMs with the sanitizers". The build
-   for a machine with real hardware has the change (run 321). What is
-   left of it: a run of the simulation which fetches that build.
+   for a machine with real hardware has the change (run 321), and the
+   simulation has fetched and used that build (run 322). Nothing is
+   left of this.
 
 ## Decisions
 
@@ -3390,5 +3395,6 @@ virtual machine.
 | 319 | `scratch/mutant-cg1` @ `9f19ab15` | tests | failed as intended | 8 minutes, AMD EPYC 9V45. A deliberate defect in the change: a read which fails is not looked at again for the function having gone out of service meanwhile. The part of the test which pulls the plug from inside a read fails, twice, and nothing else does |
 | 320 | `scratch/mutant-cg2` @ `deaac27b` | tests | failed as intended | 12 minutes, Intel Xeon Platinum 8573C. A second deliberate defect: the device asks whether the function is in service or not. The read of the whole configuration space of a function which is out of service counts 65 reads which reach what stands in for the device, and the part with the plug pulled from inside a read counts two where one was under way. Nothing else fails |
 | 321 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | package, built with 3D acceleration | passed | 37 minutes, Intel Xeon 6975P-C. The package `vbox-585a816662b0-3d-ubuntu2404.tar.zst`, 155 MB, with the change of 2026-11-24 to the device: the testcase passes on the head of the branch, and the release workflow published the package next to the two before it. `hw/builds.txt` has it as the build which is fetched |
+| 322 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part barhost, not strict | passed | 24 minutes, Intel Xeon Platinum 8573C. All 50 pass. The first run which fetches the package of run 321: the script gets the file which is listed, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
 
 Run numbers are those GitHub shows for the `build` workflow.
