@@ -319,6 +319,122 @@ static RTEXITCODE handleModifyNvramSecureBoot(HandlerArg *a, ComPtr<INvramStore>
 }
 
 
+/** The UEFI variable through which the firmware is asked for things at its next start. */
+#define MODIFYNVRAM_OS_INDICATIONS_NAME             "OsIndications"
+/** The owner of that variable: the variables which the UEFI specification defines. */
+#define MODIFYNVRAM_EFI_GLOBAL_VARIABLE_UUID        "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+/** The bit of that variable which asks for the setup of the firmware (EFI_OS_INDICATIONS_BOOT_TO_FW_UI). */
+#define MODIFYNVRAM_OS_INDICATIONS_BOOT_TO_FW_UI    UINT64_C(0x0000000000000001)
+
+/**
+ * Handles the 'modifynvram myvm firmwaresetup' sub-command.
+ * @returns Exit code.
+ * @param   a               The handler argument package.
+ * @param   nvramStore      Reference to the NVRAM store interface.
+ */
+static RTEXITCODE handleModifyNvramFirmwareSetup(HandlerArg *a, ComPtr<INvramStore> &nvramStore)
+{
+    static const RTGETOPTDEF s_aOptions[] =
+    {
+        /* common options */
+        { "--enable",       'e', RTGETOPT_REQ_NOTHING },
+        { "--disable",      'd', RTGETOPT_REQ_NOTHING }
+    };
+
+    int enable = -1;
+
+    RTGETOPTSTATE GetState;
+    int vrc = RTGetOptInit(&GetState, a->argc - 2, &a->argv[2], s_aOptions, RT_ELEMENTS(s_aOptions), 0, 0);
+    AssertRCReturn(vrc, RTEXITCODE_FAILURE);
+
+    int c;
+    RTGETOPTUNION ValueUnion;
+    while ((c = RTGetOpt(&GetState, &ValueUnion)) != 0)
+    {
+        switch (c)
+        {
+            case 'e':   // --enable
+                if (enable >= 0)
+                    return errorSyntax(Nvram::tr("You can specify either --enable or --disable once."));
+                enable = 1;
+                break;
+
+            case 'd':   // --disable
+                if (enable >= 0)
+                    return errorSyntax(Nvram::tr("You can specify either --enable or --disable once."));
+                enable = 0;
+                break;
+
+            default:
+                return errorGetOpt(c, &ValueUnion);
+        }
+    }
+
+    if (enable < 0)
+        return errorSyntax(Nvram::tr("You have to specify either --enable or --disable."));
+
+    ComPtr<IUefiVariableStore> uefiVarStore;
+    CHECK_ERROR2I_RET(nvramStore, COMGETTER(UefiVariableStore)(uefiVarStore.asOutParam()), RTEXITCODE_FAILURE);
+
+    /*
+     * The firmware is asked through a variable which the UEFI specification has
+     * for that.  The firmware takes the request back when it acts on it, which is
+     * what makes this a request for the next start only.  The variable is not
+     * there before somebody asked for something with it, and its other bits are
+     * none of ours.
+     *
+     * The variable is asked for by its name.  Not getting it is taken as its not
+     * being there, which is the usual reason and not told from others by the API.
+     */
+    uint64_t fOsIndications = 0;
+    Bstr strOwnerGuid;
+    com::SafeArray<UefiVariableAttributes_T> aVarAttrs;
+    com::SafeArray<BYTE> aData;
+    HRESULT hrcQuery = uefiVarStore->QueryVariableByName(Bstr(MODIFYNVRAM_OS_INDICATIONS_NAME).raw(), strOwnerGuid.asOutParam(),
+                                                         ComSafeArrayAsOutParam(aVarAttrs), ComSafeArrayAsOutParam(aData));
+    bool const fExists = SUCCEEDED(hrcQuery);
+    if (fExists)
+    {
+        /* The firmware does not go by a variable of another size, so what such a one holds does not count. */
+        if (aData.size() == sizeof(fOsIndications))
+        {
+            memcpy(&fOsIndications, aData.raw(), sizeof(fOsIndications));
+            fOsIndications = RT_LE2H_U64(fOsIndications);
+        }
+    }
+    else if (!enable)
+        return RTEXITCODE_SUCCESS; /* Nothing was asked for, so there is nothing to take back. */
+
+    if (enable)
+        fOsIndications |= MODIFYNVRAM_OS_INDICATIONS_BOOT_TO_FW_UI;
+    else
+        fOsIndications &= ~MODIFYNVRAM_OS_INDICATIONS_BOOT_TO_FW_UI;
+
+    uint64_t const fOsIndicationsLe = RT_H2LE_U64(fOsIndications);
+    com::SafeArray<BYTE> aNewData(sizeof(fOsIndicationsLe));
+    memcpy(aNewData.raw(), &fOsIndicationsLe, sizeof(fOsIndicationsLe));
+
+    if (fExists)
+    {
+        CHECK_ERROR2I_RET(uefiVarStore, ChangeVariable(Bstr(MODIFYNVRAM_OS_INDICATIONS_NAME).raw(), ComSafeArrayAsInParam(aNewData)),
+                          RTEXITCODE_FAILURE);
+    }
+    else
+    {
+        com::SafeArray<UefiVariableAttributes_T> aAttrs(3);
+        aAttrs[0] = UefiVariableAttributes_NonVolatile;
+        aAttrs[1] = UefiVariableAttributes_BootServiceAccess;
+        aAttrs[2] = UefiVariableAttributes_RuntimeAccess;
+        CHECK_ERROR2I_RET(uefiVarStore, AddVariable(Bstr(MODIFYNVRAM_OS_INDICATIONS_NAME).raw(),
+                                                    Bstr(MODIFYNVRAM_EFI_GLOBAL_VARIABLE_UUID).raw(),
+                                                    ComSafeArrayAsInParam(aAttrs), ComSafeArrayAsInParam(aNewData)),
+                          RTEXITCODE_FAILURE);
+    }
+
+    return RTEXITCODE_SUCCESS;
+}
+
+
 /**
  * Handles the 'modifynvram myvm listvars' sub-command.
  * @returns Exit code.
@@ -610,6 +726,11 @@ RTEXITCODE handleModifyNvram(HandlerArg *a)
     {
         setCurrentSubcommand(HELP_SCOPE_MODIFYNVRAM_SECUREBOOT);
         hrc = handleModifyNvramSecureBoot(a, nvramStore) == RTEXITCODE_SUCCESS ? S_OK : E_FAIL;
+    }
+    else if (!strcmp(a->argv[1], "firmwaresetup"))
+    {
+        setCurrentSubcommand(HELP_SCOPE_MODIFYNVRAM_FIRMWARESETUP);
+        hrc = handleModifyNvramFirmwareSetup(a, nvramStore) == RTEXITCODE_SUCCESS ? S_OK : E_FAIL;
     }
     else if (!strcmp(a->argv[1], "listvars"))
     {

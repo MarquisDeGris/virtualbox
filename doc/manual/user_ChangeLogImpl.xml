@@ -118,6 +118,11 @@ Rules for adding a changelog entry to make them look more uniform:
       </listitem>
 
       <listitem>
+        <para>VBoxManage: Added the modifynvram sub command 'firmwaresetup', which has
+          a VM with UEFI firmware enter the setup of the firmware at its next start</para>
+      </listitem>
+
+      <listitem>
         <para>placeholder</para>
       </listitem>
 
