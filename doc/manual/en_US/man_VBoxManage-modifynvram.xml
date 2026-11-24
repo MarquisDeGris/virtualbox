@@ -102,6 +102,18 @@
         <arg choice="plain">--disable</arg>
       </group>
     </cmdsynopsis>
+    <cmdsynopsis id="synopsis-vboxmanage-modifynvram-firmwaresetup">
+      <command>VBoxManage modifynvram</command>
+      <group choice="req">
+        <arg choice="plain"><replaceable>uuid</replaceable></arg>
+        <arg choice="plain"><replaceable>vmname</replaceable></arg>
+      </group>
+      <arg choice="plain">firmwaresetup</arg>
+      <group choice="req">
+        <arg choice="plain">--enable</arg>
+        <arg choice="plain">--disable</arg>
+      </group>
+    </cmdsynopsis>
     <cmdsynopsis id="synopsis-vboxmanage-modifynvram-listvars">
       <command>VBoxManage modifynvram</command>
       <group choice="req">
@@ -226,6 +238,33 @@
         <varlistentry>
           <term><option>--disable</option></term>
           <listitem><para>Disables UEFI secure boot.</para>
+          </listitem>
+        </varlistentry>
+      </variablelist>
+    </refsect2>
+
+    <refsect2 id="vboxmanage-modifynvram-firmwaresetup">
+      <title>modifynvram firmwaresetup</title>
+      <remark role="help-copy-synopsis"/>
+      <para>
+        Has the virtual machine enter the setup of its UEFI firmware the
+        next time it is started, instead of starting an operating system.
+        The request is for one start: the firmware takes it back when it
+        acts on it. It is made through the <literal>OsIndications</literal>
+        variable of the UEFI specification, which is created if the
+        variable store does not have it yet.
+      </para>
+      <variablelist>
+        <varlistentry>
+          <term><option>--enable</option></term>
+          <listitem><para>Asks for the setup of the firmware at the next
+            start of the virtual machine.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
+          <term><option>--disable</option></term>
+          <listitem><para>Takes back a request which the firmware has not
+            acted on yet.</para>
           </listitem>
         </varlistentry>
       </variablelist>
