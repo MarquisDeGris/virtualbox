@@ -921,62 +921,53 @@ phase_hostremove()
     bind_dev
 }
 
-# A number as the four bytes it is in memory, lowest first.
-le32() # <number>
+# Asks the runner to do to this machine what it cannot do to itself, see
+# host-agent.sh: the request goes into the directory this machine shares with
+# the runner, and so does the answer, which is shown.  Fails if there is no
+# answer or if it does not begin with "OK".
+host_request() # <request>
 {
-    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $(( $1 & 255 )) $(( ($1 >> 8) & 255 )) $(( ($1 >> 16) & 255 )) $(( ($1 >> 24) & 255 )))"
-}
-
-# Has the kernel of the host go through what it does when a device reports an
-# error it cannot correct (PCI Express Advanced Error Reporting).  The error
-# is made up, by the means the kernel has for trying this out (the module
-# aer_inject); what the kernel then does about it is what it does about a
-# real one: it tells the drivers of the device and of what is behind it, and
-# for an error it takes for fatal it resets the bus behind the port.
-# The device named has to have the capability for reporting errors.
-aer_inject() # <address> <status of uncorrectable errors>
-{
-    local a=$1 dom bus dev fn rec=$SIM_WORK/aer-inject.bin
-    dom=$(( 16#${a%%:*} )); a=${a#*:}
-    bus=$(( 16#${a%%:*} )); a=${a#*:}
-    dev=$(( 16#${a%%.*} ))
-    fn=$(( 16#${a#*.} ))
-    # struct aer_error_inj of the kernel: bus, device, function, a byte of
-    # padding, then the status of uncorrectable and of correctable errors,
-    # four words of a header log and the domain.  One write of all of it.
-    {
-        printf "$(printf '\\x%02x\\x%02x\\x%02x\\x00' "$bus" "$dev" "$fn")"
-        le32 "$2"; le32 0; le32 0; le32 0; le32 0; le32 0; le32 "$dom"
-    } > "$rec"
-    if [ "$(stat -c %s "$rec")" != 32 ]; then
-        echo "    the record for the kernel has $(stat -c %s "$rec") bytes, not 32"
+    local i=0
+    rm -f "$SIM_OUT/host-reply"
+    echo "$*" > "$SIM_OUT/host-request.tmp" && mv "$SIM_OUT/host-request.tmp" "$SIM_OUT/host-request"
+    while [ ! -e "$SIM_OUT/host-reply" ] && [ "$i" -lt 60 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ ! -e "$SIM_OUT/host-reply" ]; then
+        echo "    no answer from the runner in $i s"
+        rm -f "$SIM_OUT/host-request"
         return 1
     fi
-    dd if="$rec" of=/dev/aer_inject bs=32 count=1 2>&1 | grep -v -E 'records (in|out)|copied' | sed 's/^/    /'
-    return "${PIPESTATUS[0]}"
+    head -n 5 "$SIM_OUT/host-reply" | sed -e 's/^\(.\{200\}\).*/\1/' -e 's/^/    runner: /'
+    grep -q '^OK' "$SIM_OUT/host-reply"
 }
 
 # One error of the device, as the host tells of it, with the device in the
 # slot and the guest using it.
-host_error_round() # <round> <what the error is called> <address to report it for> <status>
+host_error_round() # <round> <what the error is called> <status>
 {
-    local round=$1 what=$2 at=$3 status=$4 log="$VMDIR/Logs/VBox.log" n0 i=0
+    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 i=0
     n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
     serial_mark
     dmesg -C 2> /dev/null
-    echo "+ an error of $at for the kernel of the host: $what (status $(printf '0x%08x' "$status"))"
-    if ! aer_inject "$at" "$status"; then
-        stage "host: its kernel is told of an error which is $what" FAILED "the kernel did not take it"
-        dmesg | tail -n 5 | cut -c1-200 | sed 's/^/    | /'
+    echo "+ the port in front of the device reports an error: $what (status $status)"
+    if ! host_request aer "$status"; then
+        stage "host: the port in front of the device reports an error which is $what" FAILED "the machine was not made to"
         return 1
     fi
-    stage "host: its kernel is told of an error which is $what" ok
-    # VirtualBox is told by the driver which has the device.
+    stage "host: the port in front of the device reports an error which is $what" ok
+    # The kernel tells the driver which has the device, and that one VirtualBox.
     while [ "$i" -lt 30 ] && [ "$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)" = "${n0:-0}" ]; do
         sleep 1
         i=$((i + 1))
     done
-    dmesg | grep -i -E 'aer|vfio|pcieport|nvme|reset' | cut -c1-200 | head -n 25 | sed 's/^/    | /'
+    dmesg | grep -i -E 'aer|vfio|pcieport|nvme|reset' | sed -e 's/^\(.\{200\}\).*/\1/' -e 's/^/    | /' | head -n 30
+    if dmesg | grep -q -i -E 'AER: .*error'; then
+        stage "host: its kernel takes the error up ($what)" ok
+    else
+        stage "host: its kernel takes the error up ($what)" FAILED "its log has no line of the error"
+    fi
     if [ "$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)" != "${n0:-0}" ]; then
         stage "VirtualBox is told of the error and takes the device out of service ($what)" ok "after $i s"
     else
@@ -984,7 +975,7 @@ host_error_round() # <round> <what the error is called> <address to report it fo
         diag
         return 1
     fi
-    grep -a -E 'taken out of service|reported an error' "$log" | tail -n 3 | cut -c1-200 | sed 's/^/    | /'
+    grep -a -E 'taken out of service|reported an error' "$log" | tail -n 3 | sed -e 's/^\(.\{200\}\).*/\1/' -e 's/^/    | /'
     if wait_serial "GUEST: GONE $round" 150; then
         stage "guest: notices that the drive is gone ($what)" ok
     else
@@ -1011,47 +1002,38 @@ host_error_round() # <round> <what the error is called> <address to report it fo
     guest_reads $((round + 1)) "guest: takes the device again and reads from the drive ($what)"
 }
 
-# The host reports an error of the device while the guest uses it.  The error
-# is made up (see aer_inject); the kernel of the host, the driver which has the
-# device for VirtualBox and VirtualBox go through what they do about a real
-# one.  First an error the kernel does not take for fatal, then one it does,
-# after which it resets the bus the device is on.
+# The host reports an error of the device while the guest uses it.  The port
+# the device is behind, which the machine standing in for the host emulates,
+# is made to report an error it cannot correct, from outside that machine
+# (see host_request).  The kernel of the host, the driver which has the
+# device for VirtualBox and VirtualBox then go through what they do about
+# such an error: the kernel tells the drivers of all which is behind the
+# port.  First an error the kernel does not take for fatal, then one it
+# does, after which it resets the bus the device is on.
 phase_hosterror()
 {
-    local at port
+    local port
     PHASE=hosterror
     reset_vm
-    if ! modprobe aer_inject 2> /dev/null || [ ! -e /dev/aer_inject ]; then
-        stage "the kernel of the host can be told of an error which is none" skipped "it has no module aer_inject"
+    if [ -z "${SIM_HOSTAGENT:-}" ]; then
+        stage "the port in front of the device can be made to report an error" skipped "nobody outside this machine to do that"
         return
     fi
     bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
-    # The error is reported for the device if it can report errors, and for
-    # the port it is behind if it cannot: the kernel tells everything behind
-    # a port of an error of that port.
     port=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/..")")
-    if [ -e "/sys/bus/pci/devices/$HOSTADDR/aer_dev_fatal" ]; then
-        at=$HOSTADDR
-    else
-        at=$port
-    fi
-    echo "    the device is $HOSTADDR behind the port $port; errors are reported for $at"
-    lspci -s "$at" -vv 2> /dev/null | grep -A 6 'Advanced Error Reporting' | cut -c1-160 | sed 's/^/    | /'
-    if [ ! -e "/sys/bus/pci/devices/$at/aer_dev_fatal" ]; then
-        stage "the kernel of the host can be told of an error which is none" skipped "neither the device nor its port reports errors"
-        return
-    fi
+    echo "    the device is $HOSTADDR, the port in front of it $port"
+    lspci -s "$port" -vv 2> /dev/null | grep -A 6 'Advanced Error Reporting' | sed -e 's/^\(.\{160\}\).*/\1/' -e 's/^/    | /'
     run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
     run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
     if boot "a VM with the device in the hot-plug capable slot boots the guest"; then
         guest_reads 1 "guest: reads from the drive in the slot"
         # Completer Abort, then Malformed TLP: by the specification the first
         # is not fatal unless a device says so, and the second is.
-        if host_error_round 1 "not fatal" "$at" $(( 0x00008000 )); then
-            host_error_round 2 "fatal" "$at" $(( 0x00040000 ))
+        if host_error_round 1 "not fatal" 0x8000; then
+            host_error_round 2 "fatal" 0x40000
         fi
-        echo "    errors the host has counted for $at as not fatal: $(tr '\n' ' ' < "/sys/bus/pci/devices/$at/aer_dev_nonfatal" 2> /dev/null | cut -c1-200)"
-        echo "    and as fatal: $(tr '\n' ' ' < "/sys/bus/pci/devices/$at/aer_dev_fatal" 2> /dev/null | cut -c1-200)"
+        echo "    errors the kernel has counted for $port as not fatal: $(tr '\n' ' ' < "/sys/bus/pci/devices/$port/aer_dev_nonfatal" 2> /dev/null | sed -e 's/^\(.\{200\}\).*/\1/')"
+        echo "    and as fatal: $(tr '\n' ' ' < "/sys/bus/pci/devices/$port/aer_dev_fatal" 2> /dev/null | sed -e 's/^\(.\{200\}\).*/\1/')"
     fi
     end_phase
     # For the phases after this one.

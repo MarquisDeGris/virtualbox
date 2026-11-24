@@ -624,10 +624,25 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -device "intel-hda,id=hda0,bus=rp1,addr=00.1"
              -device "hda-output,bus=hda0.0,audiodev=snd0")
     fi
+    # A part whose phases ask for something the machine cannot do to itself
+    # has somebody on the runner who does it, see host-agent.sh.  The machine
+    # gets a socket for that which nothing inside it can reach.
+    local qmp=
+    local -a mon=()
+    case ",$phases," in
+        *,hosterror,*)
+            qmp=$WORK/$where-qmp.sock
+            sudo mkdir -p "$OUT/$where"
+            sudo rm -f "$qmp" "$OUT/$where/host-request" "$OUT/$where/host-reply" "$OUT/$where/host-agent.stop"
+            mon=(-qmp "unix:$qmp,server=on,wait=off")
+            cmdline="$cmdline SIM_HOSTAGENT=1"
+            sudo bash "$SIM/host-agent.sh" "$OUT/$where" "$qmp" "$limit" &
+            ;;
+    esac
     t0=$(date +%s)
     sudo timeout -k 30 "$limit" qemu-system-x86_64 \
         -machine q35,kernel-irqchip=split -accel kvm -cpu "$cpu" -smp 4 -m "$mem" \
-        -nodefaults -display none -monitor none -serial stdio -no-reboot \
+        -nodefaults -display none -monitor none "${mon[@]}" -serial stdio -no-reboot \
         -kernel "$VMLINUZ" -initrd "$WORK/l1.cpio.gz" -append "$cmdline" \
         -device intel-iommu,intremap=on \
         -virtfs "local,path=/,mount_tag=hostroot,security_model=none,readonly=on,multidevs=remap" \
@@ -637,6 +652,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         "${extra[@]}" \
         < /dev/null 2>&1 | tr -d '\r' | cut -c1-400 | tee "$OUT/$where-console.log"
     rc=${PIPESTATUS[0]}
+    [ -n "$qmp" ] && sudo touch "$OUT/$where/host-agent.stop"
     echo "$where ended with $rc after $(( $(date +%s) - t0 )) s"
     if ! grep -q "^$where/setup: KVM is there" "$STAGES"; then
         stage "$where: the virtual machine standing in for the host ran its script" FAILED
