@@ -2264,11 +2264,28 @@ the 22 of the phase among them, and the kernel's recovery succeeds
 after each error. With that every branch of a merge request about the
 passthrough work has been through it.
 
+**With Windows as the guest** (the three parts with Windows in the
+machine standing in for a host end with the same two errors now;
+**run 336**, 2026-11-24, `winsim`, `scratch/cfg-gone-7.2-kvm` @
+`585a8166`, which is the head of the merge request for 7.2 with the
+KVM backend, 61 minutes, Intel Xeon 6975P-C). All 258 checks pass and
+one is left out as before (this Windows has no driver for the audio
+controller). With the drive, with the device of two functions and
+with the one whose second function is an audio controller: VirtualBox
+takes the device out of service in the second the kernel logs the
+error, Windows finds the drive gone, and the second function with it,
+and runs on; `plugpci` puts the device back, and the driver of Windows
+has it and reads from the drive again. 16 to 20 checks for each
+device. In the machine with the drive the kernel of the host calls its
+recovery failed after the fatal error, for what its port does not tell
+(as in run 327); in the other two it succeeds. The run before it which
+was meant for this, run 332, had a runner on which Windows does not
+get through its start, and two more were cancelled for that at once.
+
 What this does not show: an error of a real device, which may leave
-the device in a state no reset gets it out of; Windows as the guest,
-which has been through losing the drive by force (`unplugpci --force`)
-and not through this; and a device which is pulled without the host
-being told first, which the emulated port cannot do.
+the device in a state no reset gets it out of; and a device which is
+pulled without the host being told first, which the emulated port
+cannot do.
 
 ### The device leaves the host and comes back, in the simulation (2026-11-24)
 
@@ -3228,11 +3245,9 @@ harness since WP5, saved states since the fourth part of WP6.
    and of two, see "An error of the device, in the simulation", and so
    is the device leaving the host and coming back by the host's own
    hot-plug, see "The device leaves the host and comes back, in the
-   simulation". What could follow there: both with Windows as the
-   guest (the error is written for Windows and has not run: run 332
-   had a runner on which Windows does not get through its start, see
-   4d). The unplugging has run with the device of two functions as
-   well (run 337).
+   simulation". The error has run with Windows as the guest (run 336)
+   and the unplugging with the device of two functions (run 337).
+   What could follow there: the unplugging with Windows as the guest.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3649,6 +3664,7 @@ virtual machine.
 | 332 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | winsim, exploring | passed (11 checks of the simulation fail) | 149 minutes, AMD EPYC 7763. 104 pass. Meant for the error of the device with Windows as the guest, which it did not get to: Windows did not get through its start in the machine standing in for a host with the drive and with the audio function, and stood still with the device of two functions, as on such runners before (item 4d under "Next"). Nothing of it is about the new step |
 | 333 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part plughost, exploring | passed | 14 minutes, AMD EPYC 9V45. All 55 pass. The device is unplugged from the host and plugged in again, by the hot-plug of the host's own kernel: 16 checks at their first run. See "The device leaves the host and comes back, in the simulation" |
 | 334, 335 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | cancelled | Each within a minute, for having a runner of the kind run 332 had; the run after them is the one which was kept |
+| 336 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim, exploring | passed | 61 minutes, Intel Xeon 6975P-C. 258 pass, none fails, 1 is left out. The host reports an error of the device with Windows as the guest, in all three parts with Windows and a device: the device goes out of the VM, Windows runs on, takes it again after `plugpci` and reads from the drive, after an error which is not fatal and after one which is |
 | 337 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the parts plughost and mfplughost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 79 pass. The device of two functions is unplugged from the host and plugged in again: 16 checks at their first run, and the 16 with the drive again |
 
 Run numbers are those GitHub shows for the `build` workflow.
