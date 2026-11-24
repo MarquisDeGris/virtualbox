@@ -668,10 +668,13 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -device "intel-hda,id=hda0,bus=rp1,addr=00.1"
              -device "hda-output,bus=hda0.0,audiodev=snd0")
     fi
-    if [ "$where" = mfplughost ]; then
+    if [ "$where" = mfplughost ] || [ "$where" = mfwinhost ]; then
         # The same as for the part plughost above, with the device of two
         # functions: each drive is a name of its own which outlives its
         # controller, and both controllers have a name to be told by.
+        # The part with Windows and such a device has this machine too, and
+        # ends with the device being unplugged from it (win_host_plug in
+        # win-phases.sh).
         dev=(-blockdev "driver=file,filename=$WORK/nvme.img,node-name=nvmf"
              -blockdev "driver=raw,file=nvmf,node-name=nvm0"
              -blockdev "driver=file,filename=$WORK/nvme2.img,node-name=nvmg"
@@ -680,6 +683,10 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -device "nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1,id=dev1")
         extra+=(-global "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off")
     fi
+    # The script in the machine is told that its device can be unplugged.
+    case "$where" in
+        plughost|mfplughost|mfwinhost) cmdline="$cmdline SIM_HOSTPLUG=1" ;;
+    esac
     # A part whose phases ask for something the machine cannot do to itself
     # has somebody on the runner who does it, see host-agent.sh.  The machine
     # gets a socket for that which nothing inside it can reach.

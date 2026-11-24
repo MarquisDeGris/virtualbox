@@ -1347,6 +1347,96 @@ win_host_error()
     return 0
 }
 
+# The device is unplugged from the host and plugged in again while Windows
+# uses it, see phase_hostplug in vbox-phases.sh, where the same is done with
+# the Linux guest: the hot-plug of the host's own kernel takes the device out,
+# VirtualBox is asked and asks Windows, and afterwards the host has no such
+# device.  Only in a machine which is made for it (SIM_HOSTPLUG, run.sh).
+win_host_plug()
+{
+    [ -n "${SIM_HOSTPLUG:-}" ] || return 0
+    local i t0 drv
+    serial_mark
+    dmesg -C 2> /dev/null
+    echo "+ the device is unplugged from the host"
+    t0=$(date +%s)
+    if ! host_request unplug; then
+        stage "host: is told that the device is to be unplugged" FAILED
+        return 1
+    fi
+    stage "host: is told that the device is to be unplugged" ok
+    i=0
+    while host_has_any && [ "$i" -lt 420 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    dmesg | grep -i -E 'pciehp|vfio' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+    if ! host_has_any; then
+        stage "host: the device is gone from it" ok "$(( $(date +%s) - t0 )) s after it was told"
+    else
+        stage "host: the device is gone from it" FAILED "it is still there after $i s"
+        diag
+        return 1
+    fi
+    grep -a -E 'taken out of service|wants the device back' "$VMDIR/Logs/VBox.log" | tail -n 4 | cut -c1-200 | sed 's/^/    | /'
+    win_drive_gone "guest: the drive is gone after the device was unplugged from the host" 420
+    win_second_gone "guest: the second function is gone with it" 420
+    if ! guest_goes_on "the VM runs on after the device was unplugged from the host" 300; then
+        frozen_note
+        WIN_UP=no
+        return 1
+    fi
+    check_pcistate hotplug,absent,unused
+    # What is not on the host cannot be put into the VM.
+    if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$HOSTADDR"; then
+        stage "plugpci of the device which is not on the host is refused" FAILED "it was taken"
+    else
+        stage "plugpci of the device which is not on the host is refused" ok
+    fi
+
+    dmesg -C 2> /dev/null
+    echo "+ the device is plugged into the host again"
+    if ! host_request plug; then
+        stage "host: the device is plugged in again" FAILED
+        return 1
+    fi
+    stage "host: the device is plugged in again" ok
+    i=0
+    while ! host_has_all && [ "$i" -lt 120 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    dmesg | grep -i -E 'pciehp|pci 0000:01' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+    if host_has_all; then
+        drv=
+        [ -e "/sys/bus/pci/devices/$HOSTADDR/driver" ] && drv=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/driver")")
+        stage "host: has the device again" ok "after $i s, with ${drv:-no} driver"
+    else
+        stage "host: has the device again" FAILED "after $i s"
+        diag
+        return 1
+    fi
+    if bind_dev; then
+        stage "host: the device which came back is bound to vfio-pci" ok
+    else
+        stage "host: the device which came back is bound to vfio-pci" FAILED
+        return 1
+    fi
+    serial_mark
+    if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$HOSTADDR"; then
+        stage "plugpci of the device which came back" ok
+    else
+        stage "plugpci of the device which came back" FAILED
+        diag
+        return 1
+    fi
+    win_has_drive "guest: takes the device which came back, its driver has it" 600
+    win_reads "guest: reads from the drive of the device which came back"
+    win_second "guest: takes the second function of the device which came back" 600
+    check_pcistate hotplug,present,inuse
+    return 0
+}
+
 phase_hotplug()
 {
     PHASE=win-hotplug
@@ -1429,6 +1519,7 @@ phase_hotplug()
     win_intx
     win_audio ", with the drive at INTx as well"
     win_host_error
+    [ "$WIN_UP" = yes ] && win_host_plug
     check_log_quiet
     shot
 }
