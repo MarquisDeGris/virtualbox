@@ -231,11 +231,13 @@ When it is the host which wants the device back, the guest switching the
 slot off cannot reset the device, as the host holds on to it while it
 waits. The log says so, and that is as it should be:
 
-    VFIO#0: The device is not reset now, the host is busy with it and refuses.  It keeps its state apart from being disabled
+    VFIO#0: The host is busy with the device and refuses a reset.  What was not reset of it keeps its state apart from being disabled
 
-(A build of before 2026-11-25 ends the line with "The host resets it when
-it is let go of". Whether the host does is the host's matter and was
-never looked at here; the line no longer says it.)
+(Builds of before the evening of 2026-11-25 say "The device is not reset
+now, the host is busy with it and refuses", and the older of them go on
+with "The host resets it when it is let go of". Whether the host does is
+the host's matter and was never looked at here; the line no longer says
+it.)
 
 ## 3. What to try
 

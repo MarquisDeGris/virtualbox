@@ -7,7 +7,7 @@ Updated: 2026-11-22
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `2e4e6786`, 42 commits. The last three are of 2026-11-25 and came of a second reading of four commits, see "A second reader for four later commits": the PCI lock where a function goes away for the guest, with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `d85a8eed`, 44 commits. The last five are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -1690,12 +1690,17 @@ script which fetches gets the file which is listed, with its checksum,
 and its `VBoxManage` runs; the first test goes through its 15 checks
 with that build and the device of four gigabytes. All 50 checks of the
 run pass. **Run 362** (2026-11-25, `package` with 3D acceleration, the
-same branch @ `572356d1`, 12 minutes, AMD EPYC 9V45) made the build
-which is fetched since, `vbox-572356d18f9e-3d-ubuntu2404.tar.zst`, 155
-MB: it has the PCI lock where a function goes away for the guest, see
-"A second reader for four later commits", and the testcase passes on
-that head in the same run. It was not fetched by a run yet when this
-was written.
+same branch @ `572356d1`, 12 minutes, AMD EPYC 9V45) made a build
+which was the one to fetch for some hours,
+`vbox-572356d18f9e-3d-ubuntu2404.tar.zst`, 155 MB: it has the PCI lock
+where a function goes away for the guest, see "A second reader for four
+later commits", and the testcase passes on that head in the same run.
+No run fetched it. **Run 366** (the same day, `package` with 3D
+acceleration, the same branch @ `cc3dc981`, 16 minutes, AMD EPYC 9V74)
+made the build which is fetched since,
+`vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB: it has, besides, the
+lock of the slot let go of where a live state is refused, see the same
+section, and the testcase with its 59 tests passes in the run.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -2733,18 +2738,85 @@ tests and the three random tests pass, and no sanitizer has a report.
 Run 360 (`tests` on `pci-passthrough-hotplug-7.1-kvm` @ `625a36ed`):
 they pass there.
 
-The heads are `pci-passthrough-hotplug-v1` @ `2e4e6786` (three commits
+The heads were, with that, `pci-passthrough-hotplug-v1` @ `2e4e6786` (three commits
 more), `-7.2` @ `1bccc3ab`, `-7.2-kvm` @ `572356d1`, `-7.1` @ `296c0002`
 and `-7.1-kvm` @ `625a36ed`. The 7.2 line has the comment in TM and not
 the one in the I/O APIC, whose change it does not have; the 7.1 line has
 neither of the two changes and so the two commits about the device
 only. Not run: the development line without the sanitizers, and the two
 lines without the KVM backend by themselves. The simulation on the new
-head of the 7.2 line with the backend is run 361, which was under way
-when this was written. Run 362 (`package` with 3D acceleration, 12
-minutes, AMD EPYC 9V45) is the build of that head for a machine with
-real hardware; it is published, and `hw/linux/fetch.sh` fetches it
-since, see "Machines with real hardware".
+head of the 7.2 line with the backend is run 361, see below. Run 362
+(`package` with 3D acceleration, 12 minutes, AMD EPYC 9V45) was the
+build of that head for a machine with real hardware, published, and the
+one to fetch until the build of run 366 took its place the same day.
+
+**A reader for what came of it, and a second thing which is older.**
+The three commits above went to the branches without a reader of their
+own, which is not how it is decided either; they got one the same day.
+He found nothing wrong in what they do: no caller of
+`pciVfioFunGoneOnEmt` holds the PCI lock already, the lock of the slot
+is always taken before the PCI lock and never the other way round, what
+is done with the PCI lock held is what a write of the guest to the
+command register does with it, and the test fails without the lock and
+has no way to hang. Three of his points are about texts and are a
+commit of their own: the line about a reset which the host refuses
+spoke of the device where the functions are reset one by one (it says
+now that what was not reset keeps its state), the description of a
+member of TM still had the old wording, and a comment in the I/O APIC
+said more than the code of upstream keeps to.
+
+Going through who waits for whom, he found this, which is older than
+any of it. The state of a VM cannot be saved while a device is in the
+slot, and the VM is told so with a runtime error. For a state which is
+saved while the VM runs on, a live snapshot or teleporting, the thread
+which saves finds that out, and such a thread has an EMT do the telling
+and waits for it. `pciVfioSaveCheck` held the lock of the slot all the
+while, and everything the device asks to be done on an EMT takes that
+lock: an EMT which had taken up an INTx pulse in that moment, say,
+waited for the lock, and with one CPU the VM stood still where it was
+to say no. The lock is let go of before the VM is told now. A state
+which is saved for good, with the VM suspended for it, was not
+affected: that is refused on an EMT, which tells by itself. A fourth
+reader read this change before it went to the branches: nothing wrong
+in it, what it returns is what it returned, and no state can get saved
+with a device in the slot because of it; a sentence each of a comment
+and of the message were inexact and are corrected.
+
+A new test (`tstSlotLiveStateRefused`, 59 tests) has the device raise
+its INTx interrupt, so that there is work for an EMT, asks whether a
+live state can be saved, and has a thread playing the EMT do that work
+while the VM is being told: it has to get done. For this the stand-in
+for PDM can call the test when a device raises a runtime error. Run 363
+(`scratch/red-evidence-20` @ `5a8518a8`, the test without the change,
+expected to fail): that one check fails, after the five seconds the
+thread is given, and nothing else does. Run 364 (`sanitize` on the head
+of the development line, `d85a8eed`): the 59 tests and the three random
+tests pass, no sanitizer has a report.
+
+Run 365 (`tests` on `pci-passthrough-hotplug-7.1-kvm` @ `4220a8d5`):
+the 59 tests pass there. Run 361 (`sim` with its ten parts, strict,
+`pci-passthrough-hotplug-7.2-kvm` @ `572356d1`, which is the head with
+the PCI lock and before this last change, 103 minutes, Intel Xeon
+6975P-C): 415 checks pass, none fails, and three are left out with
+their reason, the plugging in after an error which no port of the
+emulator takes. It is the first run of all ten parts with the third
+script for a machine with real hardware in the four parts which run
+those scripts.
+
+The heads are `pci-passthrough-hotplug-v1` @ `d85a8eed` (44 commits),
+`-7.2` @ `690cd60a`, `-7.2-kvm` @ `cc3dc981`, `-7.1` @ `35068a8e` and
+`-7.1-kvm` @ `4220a8d5`. The 7.2 line has the text in TM and not the
+one in the I/O APIC, the 7.1 line the line of the log only. Not run:
+the development line without the sanitizers, and the two lines without
+the KVM backend by themselves.
+
+Run 366 (`package` with 3D acceleration on that head of the 7.2 line
+with the backend, 16 minutes, AMD EPYC 9V74) is the build for a machine
+with real hardware which has both changes; it is published, and
+`hw/linux/fetch.sh` fetches it since, see "Machines with real
+hardware". The testcase passes in that run. The simulation on that
+head, which also fetches that build as a machine with real hardware
+does, is run 367 and was under way when this was written.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3679,8 +3751,9 @@ harness since WP5, saved states since the fourth part of WP6.
    simulation; the plugging in after an error is for the hardware.
 7a. From the second reading of 2026-11-25, see "A second reader for
    four later commits": the device waits with the PCI lock where a
-   function goes away for the guest, on all five branches. Left, and not
-   urgent: with the KVM backend of upstream, the EMT for the timers
+   function goes away for the guest, and lets go of the lock of its slot
+   before it tells the VM that a live state is refused, on all five
+   branches. Left, and not urgent: with the KVM backend of upstream, the EMT for the timers
    could be notified at the first tick at which the flag is found set
    and not at the second, which halves a delay of 10 to 20 milliseconds
    for timers another EMT found expired. That is a change to the timer
@@ -3835,6 +3908,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-25 | The EMT for the timers is still notified again at the second tick and not at the first | It would halve a delay which only the KVM backend of upstream has, in code every VM with that backend runs through; that wants runs of its own. Noted under "Next" |
 | 2026-11-25 | The scripts for a machine with real hardware get a third test, in which the device leaves the guest and comes back while a driver of the guest has it; the one script for all runs it last | It is what the work is for, and no script did it with a guest whose driver has the device. Last, as a driver which does not take being left may leave the card in a state the other tests would trip over |
 | 2026-11-25 | A new build for a machine with real hardware, of the head with the lock | The one which is published does not have it, and a machine there may have its device in the VM for good |
+| 2026-11-25 | The commits which came of the second reading get a reader too, after the fact for the first three and before it goes to the branches for the fourth | They had gone to the branches without one, which the decisions of 2026-11-13 and 2026-11-22 do not allow for either. From here on no commit to the device or to the VMM goes to a branch of a merge request unread |
+| 2026-11-25 | `pciVfioSaveCheck` lets go of the lock of the slot before the VM is told that its state cannot be saved; a test comes with it which fails without it | The thread which saves a live state waits for an EMT to do the telling, and an EMT with work of the device waits for that lock: found by the reader of the change before |
+| 2026-11-25 | A second new build for a machine with real hardware on one day | The one of run 362 has the PCI lock and not this; a build which stands still at a live snapshot is not one to hand out when the next is twelve minutes away |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4145,7 +4221,11 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 358 | `scratch/red-evidence-19` @ `c365019f` | tests, testcase expected to fail | failed as intended | 10 minutes, AMD EPYC 7763. The test for a function which is taken back during a write of the guest to its config space, against the device without the PCI lock at that place: the check it is about fails in both variants. Two more checks failed which expected an access that does not happen; they were taken out of the test afterwards. See "A second reader for four later commits" |
 | 359 | `pci-passthrough-hotplug-v1` @ `2e4e6786` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the three commits which came of the second reading: the 58 tests and the three random tests pass with the sanitizers, without a report |
 | 360 | `pci-passthrough-hotplug-7.1-kvm` @ `625a36ed` | tests | passed | 12 minutes, Intel Xeon 6975P-C. The two commits about the device on the 7.1 line with the KVM backend, which has them by a merge of the 7.1 line: it builds and `tstDevPciVfio` passes with its 58 tests |
-| 361 | `pci-passthrough-hotplug-7.2-kvm` @ `572356d1` | sim | running when this was written | The simulation with its ten parts on the head which has the commits of the second reading |
-| 362 | `pci-passthrough-hotplug-7.2-kvm` @ `572356d1` | package, built with 3D acceleration | passed | 12 minutes, AMD EPYC 9V45. The package `vbox-572356d18f9e-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the PCI lock where a function goes away for the guest: the testcase passes in the run, the release workflow published the package next to the three before it, and `hw/builds.txt` has it as the build which is fetched |
+| 361 | `pci-passthrough-hotplug-7.2-kvm` @ `572356d1` | sim, strict | passed | 103 minutes, Intel Xeon 6975P-C. 415 pass, none fails, 3 are left out with their reason. The simulation with its ten parts on the head which has the PCI lock where a function goes away for the guest, and the first run of all ten parts with the third script for a machine with real hardware |
+| 362 | `pci-passthrough-hotplug-7.2-kvm` @ `572356d1` | package, built with 3D acceleration | passed | 12 minutes, AMD EPYC 9V45. The package `vbox-572356d18f9e-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the PCI lock where a function goes away for the guest: the testcase passes in the run, the release workflow published the package next to the three before it, and `hw/builds.txt` had it as the build which is fetched until the one of run 366 |
+| 363 | `scratch/red-evidence-20` @ `5a8518a8` | tests, testcase expected to fail | failed as intended | 11 minutes, AMD EPYC 7763. The test for a live state which is refused while an EMT has work of the device, against the device which holds the lock of its slot while the VM is told: the one check it is about fails, nothing else does |
+| 364 | `pci-passthrough-hotplug-v1` @ `d85a8eed` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the change about a live state which is refused, and the texts: the 59 tests and the three random tests pass with the sanitizers, without a report |
+| 365 | `pci-passthrough-hotplug-7.1-kvm` @ `4220a8d5` | tests | passed | 13 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend: it builds and `tstDevPciVfio` passes with its 59 tests |
+| 366 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | package, built with 3D acceleration | passed | 16 minutes, AMD EPYC 9V74. The package `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB, of the head with both changes of the day: the testcase passes in the run with its 59 tests, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched |
 
 Run numbers are those GitHub shows for the `build` workflow.
