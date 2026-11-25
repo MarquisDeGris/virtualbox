@@ -836,7 +836,7 @@ jobs:
           SIM_STRICT: ${{ inputs.sim_strict }}
           SIM_3D: ${{ contains(inputs.kmk_args, 'VBOX_WITH_VMSVGA3D=1') && 'yes' || 'no' }}
           SIM_SANITIZED: ${{ contains(inputs.kmk_args, 'VBOX_WITH_GCC_SANITIZER=1') && 'yes' || 'no' }}
-          SIM_PARTS: ${{ inputs.sim_parts != '' && inputs.sim_parts || inputs.flavor == 'winsim' && 'runner,win,winhost,mfwinhost,hdawinhost' || inputs.flavor == 'allsim' && 'runner,simhost,mfhost,barhost,vgahost,errhost,mferrhost,plughost,mfplughost,win,winhost,mfwinhost,hdawinhost' || 'runner,simhost,mfhost,barhost,vgahost,errhost,mferrhost,plughost,mfplughost' }}
+          SIM_PARTS: ${{ inputs.sim_parts != '' && inputs.sim_parts || inputs.flavor == 'winsim' && 'runner,win,winhost,mfwinhost,hdawinhost' || inputs.flavor == 'allsim' && 'runner,simhost,mfhost,barhost,vgahost,errhost,mferrhost,plughost,mfplughost,swplughost,win,winhost,mfwinhost,hdawinhost' || 'runner,simhost,mfhost,barhost,vgahost,errhost,mferrhost,plughost,mfplughost,swplughost' }}
         run: bash ci-meta/sim/run.sh
 
       - name: Upload logs

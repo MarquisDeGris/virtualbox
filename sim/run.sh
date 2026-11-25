@@ -102,7 +102,7 @@
 #      all of what is below it, and then the drive is unplugged from the
 #      port of the switch.  It is not plugged in again: the port of the
 #      switch this emulator has tells of a link without a width from the
-#      start.  Not a part a run has by default.
+#      start.
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
 # mfhost, barhost, vgahost, errhost, mferrhost, plughost, mfplughost,

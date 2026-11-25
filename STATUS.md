@@ -2480,8 +2480,21 @@ nobody took note of, where it had 0040 before. So it is the host, the
 kernel and the emulated port between them, and not VirtualBox, which
 is not asked anything. What is taken to be behind it is with the
 function `port_take_note` in `sim/vbox-phases.sh`; the phase clears
-that bit before it unplugs since, and says so where it does. Whether
-that is all there is to it, the next run tells.
+that bit before it unplugs since, and says so where it does.
+
+**Run 348** (the same day, 19 minutes, Intel Xeon 6975P-C) has the
+part pass: all 68 checks of the run, with the plugging in left out as
+it has to be. Before the unplugging the phase found slot status 0050
+at the port of the switch, with the slot control as the kernel has it
+(03f1, the interrupt of the slot on), cleared the bit, and the kernel
+heard of the request: the drive was gone from the host 12 seconds
+after the port was told, the guest having been asked and having let
+go. The part has 37 checks: 7 for its setup, 20 for the two errors, 10
+for the unplugging. It is one a run of the simulation has by default
+since. What it adds to the others: a device which is not behind a root
+port but behind a switch, at a bus two below; an error which is
+reported by another port than the one the device is in; and the reset
+of a switch with the device behind it.
 
 The third check which failed in run 346 is one of the checklist script of
 INSTALL.md, and it was the script which was wrong. The port of this
@@ -3408,12 +3421,10 @@ harness since WP5, saved states since the fourth part of WP6.
    on all three lines (runs 342, 344 and 345). A device which is
    plugged in again after an error is left for the hardware: no port
    of the emulator the runner has takes one then (runs 345 and 346).
-   The part with the drive behind a switch (`swplughost`) has run
-   twice (runs 346 and 347): the errors pass with a switch, the
-   unplugging after them does not yet, for what the port of the
-   emulated switch is left with after a reset. A run with that taken
-   care of is to come; after it the part becomes a default one or is
-   cut down to what passes.
+   The part with the drive behind a switch (`swplughost`) passes since
+   run 348 and is a default one. Still to come: a run of the
+   simulation with all its ten parts, since the phases the parts share
+   were changed for this one, and the part on the other two lines.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3553,6 +3564,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-24 | Where the emulated port has lost the width of its link, the simulation does not plug the device in again, and says so in its result | Runs 340 to 345: once the emulated port was made to report an error it tells of a link without a width, and the kernel of the machine takes no device from it (the emulator overwrites the link capabilities of the port when it injects the error; no reset has to do with it). Nothing which can be done from inside that machine brings the width back. A check which can only fail tells nothing; one which is left out with its reason does |
 | 2026-11-25 | The simulation gets a part with the device behind a switch (`swplughost`): the root port reports the error, the port of the switch has the slot | The emulator spoils the link of the port it reports an error for (QEMU 8.2.2, read in its source, fixed in its current one), so a device could not be plugged in again after an error. With a switch the slot is at another port, and it is how an enclosure on a cable is connected. No other emulator is built or installed on the runner for this: the runner keeps what its distribution has. Run 346: the port of that switch has no link width at all in this emulator, so the part is kept for what it can show, the errors and the unplugging with a switch in between, and the plugging in after an error is left for the hardware. A root port behind a root port would have a slot which works, and is not done: no machine is built like that |
 | 2026-11-25 | The checklist script does not count a port the device is behind as another device in its IOMMU group; it says that the port is there | Run 346: a port of a switch without access control services is in the group of what is behind it. The kernel permits such a group and keeps its driver on the port, nothing of the port goes to the VM, and VirtualBox had the device. Another device in the group is counted as before, and so is a bridge which is not on the way to the device |
+| 2026-11-25 | Before it unplugs, a phase clears a completed command which is pending at the port, and says so in the log | Runs 347 and 348: after the reset of everything below the root port the port of the emulated switch is left with that bit, and the kernel of the machine hears of nothing from the slot until it is cleared. It is a matter between that kernel and the emulator; VirtualBox is not part of it, and without this the part could not unplug after an error |
+| 2026-11-25 | The part with the drive behind a switch is one a run of the simulation has by default | Run 348: it passes, in under five minutes. It is the only part in which the port which reports an error is not the one the device is in, a switch is reset with the device behind it, and the device is two buses down |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3615,7 +3628,8 @@ guest, and since run 267 functions which the host can only reset
 together; since run 327 an error of the device as the kernel of the
 host reports it, and since run 333 the device leaving the host and
 coming back by the host's own hot-plug, both with a Linux guest and
-with Windows. What the hardware test is still the first to show: a
+with Windows; since run 346 a device behind a switch, with a Linux
+guest. What the hardware test is still the first to show: a
 real device, a graphics card with its driver in the guest,
 Thunderbolt, a cable which is pulled without the host being asked, an
 IOMMU of AMD, and what a host does which is not a virtual machine.
@@ -3849,5 +3863,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 345 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the parts plughost and mfplughost, not strict | passed | 29 minutes, Intel Xeon 6975P-C. 139 pass, none fails, 2 are left out with their reason: the same on the 7.1 line. The first run which looks at the port before and after each error: link status 2011 before the error which is not fatal and 2000 after it, with nothing reset. It is the error injection of the emulator, see "What takes the width of the link" |
 | 346 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 17 minutes, Intel Xeon 6975P-C. 47 pass, 1 is left out. The first run with the drive behind a switch: the VM has it, the guest reads from it, and it is unplugged from the port of the switch (gone after 12 s). The port of the emulated switch has no link width from the start, so the drive is not plugged in again, and the two phases after that had no device. The third: the checklist script took the port in the IOMMU group of the drive for another device, which was the script |
 | 347 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 25 minutes, Intel Xeon 6975P-C. 63 pass, 1 is left out. With the drive behind a switch both errors go as without one: the root port reports, the driver of the drive two ports below is told, VirtualBox takes the drive out of service, and it is put back, also after the kernel reset the whole switch. The link capabilities of the root port are 00300604 before the first error and 00300000 after it: the defect of the emulator, seen. The unplugging after that fails: the port of the switch has a completed command pending since the reset and its kernel does not hear of the request |
+| 348 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 68 pass, 1 is left out (the plugging in, which the port of the emulated switch cannot take). The drive behind a switch: both errors, the reset of the switch after the second, and the unplugging from the port of the switch after the phase cleared what the reset had left pending there. 37 checks in the part |
 
 Run numbers are those GitHub shows for the `build` workflow.
