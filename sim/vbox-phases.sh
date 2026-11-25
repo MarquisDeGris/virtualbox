@@ -1531,11 +1531,12 @@ phase_intx()
 # The same guest, which uses neither MSI nor MSI-X, with the device in the
 # hot-plug capable slot.  The interrupt of the drive is INTx and goes through
 # the port of the slot, and the port has no MSI for telling the guest of its
-# slot either.  What the other phases do with the slot is done here once
-# with that: the guest is asked for the device and lets go of it, the device
-# is put in again, and a snapshot for which the VM keeps running is refused.
-# That last one is where a VM could stand still: an INTx interrupt is work
-# for an EMT, and the thread which refuses waits for an EMT.
+# slot either: by a decision of 2026-11-12 it tells of the slot by MSI only,
+# so this guest is not told and does not let go of the device when asked.
+# A snapshot for which the VM keeps running is refused, which is where a VM
+# could stand still: an INTx interrupt is work for an EMT, and the thread
+# which refuses waits for an EMT.  And as this guest keeps whoever takes the
+# device out waiting, the frontend is told to end in that moment.
 phase_intxslot()
 {
     PHASE=intxslot
@@ -1581,30 +1582,19 @@ phase_intxslot()
         [ "$(vmstate)" = paused ] && run controlvm "$VM" resume
         guest_goes_on "the VM runs on after the live snapshot was refused" 60
 
-        # Out with the guest asked, and in again.
-        serial_mark
+        # The port tells of its slot by MSI only, see the decisions in
+        # STATUS.md, so this guest does not hear that it is asked for the
+        # device and does not let go of it.  The command says so when the
+        # time the guest was given is over, and the device stays where it is.
         t0=$(date +%s)
-        if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
-            stage "unplugpci: the guest is asked and lets go of the device" ok "$(( $(date +%s) - t0 )) s"
+        what="unplugpci: a guest which is not told of its slot does not let go, and the command says so"
+        if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=15000; then
+            stage "$what" FAILED "it tells that the device was taken out"
         else
-            stage "unplugpci: the guest is asked and lets go of the device" FAILED
-            diag
+            stage "$what" ok "$(( $(date +%s) - t0 )) s"
         fi
-        if wait_serial 'GUEST: GONE 1' 30; then
-            stage "guest: the drive is gone" ok
-        else
-            stage "guest: the drive is gone" FAILED
-        fi
-        serial_show 'pciehp|GUEST: GONE' 10
-        serial_mark
-        if run controlvm "$VM" plugpci "$HOSTADDR"; then
-            stage "plugpci puts the device into the slot" ok
-        else
-            stage "plugpci puts the device into the slot" FAILED
-            diag
-        fi
-        guest_reads 2 "guest: takes the device in the slot and reads from the drive, with INTx again"
-        serial_show 'pciehp|GUEST: (PRESENT|READ)' 10
+        check_pcistate hotplug,present,inuse
+        guest_goes_on "the VM runs on with the device after that" 60
 
         bad=$(tr -d '\r' < "$SERIAL" 2> /dev/null | grep -a -c -E 'nobody cared|Disabling IRQ|completion polled|I/O [^ ]+ .*timeout')
         if [ "${bad:-0}" = 0 ]; then
@@ -1614,6 +1604,39 @@ phase_intxslot()
             tr -d '\r' < "$SERIAL" | grep -a -E 'nobody cared|Disabling IRQ|completion polled|timeout' | head -n 6 | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
         fi
         check_log_quiet
+
+        # Last, as the VM is gone after it: the frontend is told to end while
+        # a device is being taken out.  It tries to save the state, which is
+        # refused with the device in the VM, and closes the session, which
+        # powers the VM down.  The method of Main which takes the device out
+        # holds on to the VM for as long as the guest is given, and until late
+        # on 2026-11-25 what waits for the VM to be let go of could wait for
+        # good then: the VM process did not end.
+        local pid i=0
+        what="the VM process ends when it is told to while a device is being taken out"
+        pid=$(pgrep -f "VBoxHeadless.*--comment $VM " | head -n 1)
+        if [ -z "$pid" ]; then
+            stage "$what" skipped "no process of the VM was found"
+        else
+            ( VBM_TIMEOUT=120 vbm controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000 > "$SIM_WORK/unplug-bg.out" 2>&1 ) &
+            sleep 5
+            echo "+ kill -TERM $pid (the VM process), with unplugpci waiting for the guest"
+            kill -TERM "$pid"
+            while kill -0 "$pid" 2> /dev/null && [ "$i" -lt 90 ]; do
+                sleep 1
+                i=$((i + 1))
+            done
+            if kill -0 "$pid" 2> /dev/null; then
+                stage "$what" FAILED "it is still there after $i s"
+                kill -KILL "$pid"
+            else
+                stage "$what" ok "$i s"
+            fi
+            wait
+            head -n 4 "$SIM_WORK/unplug-bg.out" 2> /dev/null | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
+            sleep 3
+            echo "    the VM is in state '$(vmstate)' after that"
+        fi
     fi
     end_phase
     if vbm showvminfo "$VM" --machinereadable 2> /dev/null | grep -a -q '^SnapshotName'; then
