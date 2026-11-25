@@ -1396,7 +1396,7 @@ win_host_plug()
     fi
 
     if ! port_link_has_width; then
-        stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does after an error which the kernel of the host took for fatal, and that kernel takes no device from such a port"
+        stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does once it was made to report an error (its emulator overwrites its link capabilities then), and the kernel of the host takes no device from such a port"
         return 0
     fi
     dmesg -C 2> /dev/null
@@ -1526,9 +1526,9 @@ phase_hotplug()
     win_audio ", with the drive at INTx as well"
     # The device is unplugged from the host and plugged in again, and the host
     # reports an error of it.  In this order where the port still has its
-    # link: after the error which its kernel takes for fatal it has not, and
-    # the device could not be plugged in again (see port_link_has_width in
-    # vbox-phases.sh).  The port had its link at this point in both parts of
+    # link: after the first error it has not, and the device could not be
+    # plugged in again (see port_link_has_width in vbox-phases.sh, and the
+    # part swplughost in run.sh).  The port had its link here in both parts of
     # run 343, the one whose device is reset by a reset of its bus among
     # them.  Should it not, the unplugging comes last and is all there is of
     # it.

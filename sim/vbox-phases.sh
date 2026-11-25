@@ -953,12 +953,12 @@ host_error_round() # <round> <what the error is called> <status>
     serial_mark
     dmesg -C 2> /dev/null
     port_says "before the error which is $what"
-    echo "+ the port in front of the device reports an error: $what (status $status)"
+    echo "+ $HE_PORT reports an error: $what (status $status)"
     if ! host_request aer "$status"; then
-        stage "host: the port in front of the device reports an error which is $what" FAILED "the machine was not made to"
+        stage "host: $HE_PORT reports an error which is $what" FAILED "the machine was not made to"
         return 1
     fi
-    stage "host: the port in front of the device reports an error which is $what" ok
+    stage "host: $HE_PORT reports an error which is $what" ok
     # The kernel tells the driver which has the device, and that one VirtualBox.
     while [ "$i" -lt 30 ] && [ "$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)" = "${n0:-0}" ]; do
         sleep 1
@@ -1031,7 +1031,7 @@ host_error_round() # <round> <what the error is called> <status>
 # does, after which it resets the bus the device is on.
 phase_hosterror()
 {
-    local port
+    local port root
     PHASE=hosterror
     reset_vm
     # The device of one function, or the one of two, which a graphics card
@@ -1053,6 +1053,17 @@ phase_hosterror()
     bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
     port=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/..")")
     echo "    the device is $HOSTADDR, the port in front of it $port"
+    # The port which reports the error is the root port.  That is the port
+    # in front of the device, or the one above the switch the device is
+    # behind.
+    HE_PORT="the port in front of the device"
+    root=$(root_port_of "$port")
+    if [ -n "$root" ] && [ "$root" != "$port" ]; then
+        HE_PORT="the root port above the switch the device is behind"
+        echo "    the root port above it is $root, with between them: $(readlink -f "/sys/bus/pci/devices/$port" | sed -e "s#^.*/$root/##" -e "s#/$port\$##")"
+        echo "    the IOMMU group of the device has: $(ls "/sys/bus/pci/devices/$HOSTADDR/iommu_group/devices" 2>&1 | tr '\n' ' ')"
+        port=$root
+    fi
     lspci -s "$port" -vv 2> /dev/null | grep -A 6 'Advanced Error Reporting' | sed -e 's/^\(.\{160\}\).*/\1/' -e 's/^/    | /'
     if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
         attach_funcs
@@ -1076,30 +1087,41 @@ phase_hosterror()
     bind_dev
 }
 
+# The root port a port is behind: itself, where it is one.
+root_port_of() # <port>
+{
+    readlink -f "/sys/bus/pci/devices/$1" 2> /dev/null | sed -n -e 's#^/sys/devices/pci[^/]*/\([^/]*\).*$#\1#p'
+}
+
 # What the port in front of the device tells of its link and of its slot, for
-# the log: the registers Link Status and Slot Status of its PCI Express
-# capability.  A port which claims a link of no width is one the kernel of
-# the host does not take a device from.
+# the log: the registers Link Status, Slot Status and Link Capabilities of its
+# PCI Express capability.  A port which claims a link of no width is one the
+# kernel of the host does not take a device from.  Where the device is behind
+# a switch, the root port above it is shown as well.
 port_says() # <when>
 {
-    local port
+    local port root
     port=$(basename "$(readlink -f "/sys/bus/pci/devices/${HOSTADDR%:*}:00.0/.." 2> /dev/null)" 2> /dev/null)
     [ -e "/sys/bus/pci/devices/$port/vendor" ] || port=$HOST_PORT
     [ -n "$port" ] || return 0
     HOST_PORT=$port
-    echo "    the port $port, $1: link status $(setpci -s "$port" CAP_EXP+12.w 2> /dev/null || echo '?'), slot status $(setpci -s "$port" CAP_EXP+1a.w 2> /dev/null || echo '?')"
+    echo "    the port $port, $1: link status $(setpci -s "$port" CAP_EXP+12.w 2> /dev/null || echo '?'), slot status $(setpci -s "$port" CAP_EXP+1a.w 2> /dev/null || echo '?'), link capabilities $(setpci -s "$port" CAP_EXP+0c.l 2> /dev/null || echo '?')"
+    root=$(root_port_of "$port")
+    if [ -n "$root" ] && [ "$root" != "$port" ]; then
+        echo "    the root port $root above it: link status $(setpci -s "$root" CAP_EXP+12.w 2> /dev/null || echo '?'), link capabilities $(setpci -s "$root" CAP_EXP+0c.l 2> /dev/null || echo '?')"
+    fi
 }
 HOST_PORT=
+HE_PORT="the port in front of the device"
 
 # Whether the port in front of the device tells of a link which has a width.
 # The port this machine emulates has lost the width and the speed of its link
-# after the phase in which the host reports errors of the device, the second
-# of which its kernel takes for fatal and answers with a reset behind the port
-# (runs 341 and 342: link status 2011 before, 2000 after).  The kernel of the
-# host does not take a device which is plugged into such a port ("Cannot
-# train link").  The resets of the bus which VirtualBox asks for, for a
-# device whose functions have no reset of their own, leave the link as it is
-# (run 343).  A port of a real host keeps its link.
+# once it was made to report an error, the first one already, which its
+# kernel does not take for fatal and resets nothing for (run 345: link status
+# 2011 before, 2000 after).  It is the emulator: see the part swplughost in
+# run.sh for what it does.  The kernel of the host does not take a device
+# which is plugged into such a port ("Cannot train link").  No reset has to
+# do with it (run 343), and a port of a real host keeps its link.
 # Where the register cannot be read, the port is taken to be in order.
 port_link_has_width()
 {
@@ -1213,7 +1235,7 @@ phase_hostplug()
         fi
 
         if ! port_link_has_width; then
-            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does after an error which the kernel of the host took for fatal, and that kernel takes no device from such a port"
+            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does once it was made to report an error (its emulator overwrites its link capabilities then), and the kernel of the host takes no device from such a port"
             end_phase
             return
         fi
@@ -1231,7 +1253,7 @@ phase_hostplug()
             sleep 1
             i=$((i + 1))
         done
-        dmesg | grep -i -E 'pciehp|acpiphp|pci 0000:01|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
+        dmesg | grep -i -E 'pciehp|acpiphp|pci 0000:0|nvme' | cut -c1-200 | head -n 20 | sed 's/^/    | /'
         port_says "with the device plugged in again"
         if host_has_all; then
             drv=

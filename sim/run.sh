@@ -95,9 +95,16 @@
 #      "mfplughost"): both functions go when the device is unplugged, and
 #      both are there again when it is plugged in.
 #
+#   2i. The same with the drive behind a switch (SIM_PARTS has
+#      "swplughost"): a root port, the two ports of a switch behind it, and
+#      the drive in the slot of the lower one, which is how a device in an
+#      enclosure on a cable is connected.  The drive is unplugged from the
+#      port of the switch; the error is one the root port reports.  Not a
+#      part a run has by default.
+#
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
-# mfhost, barhost, vgahost, errhost, mferrhost, plughost, mfplughost, win,
-# winhost, mfwinhost, hdawinhost.
+# mfhost, barhost, vgahost, errhost, mferrhost, plughost, mfplughost,
+# swplughost, win, winhost, mfwinhost, hdawinhost.
 # Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
@@ -175,6 +182,9 @@ finish()
         missing=1
     fi
     if has_part mfplughost && ! grep -q '^mfplughost/hostplug: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part swplughost && ! grep -q '^swplughost/hostplug: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -683,9 +693,39 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
              -device "nvme,drive=nvm1,serial=SIM0002,bus=rp1,addr=00.1,id=dev1")
         extra+=(-global "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off")
     fi
+    # The port the device is plugged into, by the name the machine is told
+    # it by from outside: the root port, but for the part with a switch.
+    local slotport=rp1
+    if [ "$where" = swplughost ]; then
+        # The drive behind a switch: the root port, the upstream port of the
+        # switch in it, a downstream port of the switch with a slot, and the
+        # drive in that slot.  The kernel of the machine runs the slots
+        # itself, as in the part plughost.  An error is reported by the root
+        # port (host-agent.sh), and the drive is unplugged from the port of
+        # the switch and plugged into it again.  Two things come of that.
+        # It is how an enclosure on a cable is connected: the device is
+        # behind the ports of the switch the cable ends in, and what a root
+        # port reports is told to the drivers of all which is below it.  And
+        # the port the drive is plugged into is not the one the emulator
+        # reports the error for: QEMU 8.2 overwrites the lower half of the
+        # link capabilities of a port when it makes it report an error which
+        # cannot be corrected (pcie_aer_inject_uncor_error writes the 16 bit
+        # device status with 32 bits; later versions write 16), and tells of
+        # the link of a port, each time it is asked, as limited to those
+        # capabilities.  The kernel of the machine takes no device from a
+        # port whose link has no width, so in the parts without a switch the
+        # drive cannot be plugged in again after an error (runs 340 to 345).
+        dev=(-device "x3130-upstream,id=sw0,bus=rp1"
+             -device "xio3130-downstream,id=dp1,bus=sw0,chassis=2,slot=2"
+             -blockdev "driver=file,filename=$WORK/nvme.img,node-name=nvmf"
+             -blockdev "driver=raw,file=nvmf,node-name=nvm0"
+             -device "nvme,drive=nvm0,serial=SIM0001,bus=dp1,id=dev0")
+        extra+=(-global "ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off")
+        slotport=dp1
+    fi
     # The script in the machine is told that its device can be unplugged.
     case "$where" in
-        plughost|mfplughost|winhost|mfwinhost) cmdline="$cmdline SIM_HOSTPLUG=1" ;;
+        plughost|mfplughost|swplughost|winhost|mfwinhost) cmdline="$cmdline SIM_HOSTPLUG=1" ;;
     esac
     # A part whose phases ask for something the machine cannot do to itself
     # has somebody on the runner who does it, see host-agent.sh.  The machine
@@ -699,7 +739,7 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
             sudo rm -f "$qmp" "$OUT/$where/host-request" "$OUT/$where/host-reply" "$OUT/$where/host-agent.stop"
             mon=(-qmp "unix:$qmp,server=on,wait=off")
             cmdline="$cmdline SIM_HOSTAGENT=1"
-            sudo bash "$SIM/host-agent.sh" "$OUT/$where" "$qmp" "$limit" "$funcs" &
+            sudo bash "$SIM/host-agent.sh" "$OUT/$where" "$qmp" "$limit" "$funcs" "$slotport" &
             ;;
     esac
     t0=$(date +%s)
@@ -870,6 +910,13 @@ if has_part mfplughost; then
     note "Part 2h: the same with a device of two functions"
     if part_simhost_prepare; then
         run_simhost mfplughost hostplug,hosterror,hostplug-again 600 5 3000 "" 2
+    fi
+fi
+
+if has_part swplughost; then
+    note "Part 2i: the same with the drive behind a switch"
+    if part_simhost_prepare; then
+        run_simhost swplughost hostplug,hosterror,hostplug-again 600 5 3000
     fi
 fi
 
