@@ -2572,6 +2572,162 @@ static void tstRemoval(void)
 
 
 /**
+ * What tstRemovalWhileWritingHook() goes by and reports.
+ */
+typedef struct TSTREMOVALWHILEWRITING
+{
+    /** The thread which plays the guest. */
+    RTNATIVETHREAD  hNativeThread;
+    /** The register at the write to which the plug is pulled. */
+    uint32_t        offReg;
+    /** What tstPdmGetRequestCount() returned before the write. */
+    uint32_t        cReqsBefore;
+    /** Whether the plug was pulled. */
+    bool            fPulled;
+    /** Whether the device has let go of the function in time. */
+    bool            fReleased;
+    /** Whether there was another EMT for what is left to do for the function. */
+    bool            fOtherEmt;
+    /** Whether that EMT got done with it while the write was under way. */
+    bool            fDoneWhileWriting;
+    /** The thread which plays that EMT. */
+    RTTHREAD        hThreadEmt;
+    /** Set by that thread when it is done. */
+    bool volatile   fDone;
+} TSTREMOVALWHILEWRITING;
+
+
+/**
+ * @callback_method_impl{FNRTTHREAD, Plays an EMT which gets around to what the
+ *      device has asked to be done on one.}
+ */
+static DECLCALLBACK(int) tstRemovalWhileWritingThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    TSTREMOVALWHILEWRITING *pState = (TSTREMOVALWHILEWRITING *)pvUser;
+    RT_NOREF(hThreadSelf);
+    tstPdmProcessRequests();
+    ASMAtomicWriteBool(&pState->fDone, true);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNTSTVFIOCFGWRITE, Pulls the plug of the function when
+ *      a write of the guest to its config space is on its way to the device\,
+ *      waits until the device has let go of the function\, and has another EMT
+ *      get around to what is left to do for the function.  That EMT is to wait
+ *      for the write.}
+ */
+static DECLCALLBACK(void) tstRemovalWhileWritingHook(PTSTVFIODEV pDev, uint32_t offReg, size_t cb, void *pvUser)
+{
+    TSTREMOVALWHILEWRITING *pState = (TSTREMOVALWHILEWRITING *)pvUser;
+    RT_NOREF(cb);
+    if (   offReg == pState->offReg
+        && !pState->fPulled
+        && RTThreadNativeSelf() == pState->hNativeThread)
+    {
+        pState->fPulled = true;
+        tstVfioKrnlDevRemove(pDev);
+        pState->fReleased = tstWaitForRelease(pDev, pState->cReqsBefore, RT_MS_5SEC);
+        if (pState->fReleased)
+        {
+            int rc = RTThreadCreate(&pState->hThreadEmt, tstRemovalWhileWritingThread, pState, 0 /*cbStack*/,
+                                    RTTHREADTYPE_DEFAULT, RTTHREADFLAGS_WAITABLE, "tstEmt");
+            pState->fOtherEmt = RT_SUCCESS(rc);
+            if (RT_SUCCESS(rc))
+            {
+                /* Half a second for it to show that it does not wait. */
+                for (uint32_t i = 0; i < 50 && !ASMAtomicReadBool(&pState->fDone); i++)
+                    RTThreadSleep(10);
+                pState->fDoneWhileWriting = ASMAtomicReadBool(&pState->fDone);
+            }
+        }
+    }
+}
+
+
+/**
+ * The host takes the device back while an EMT is in the middle of a write of
+ * the guest to the config space of the function.  What is left to do for the
+ * function on an EMT changes the command register and with it the guest
+ * mappings of the BARs, and so can the write.  The two are not to happen at
+ * the same time: what is left to do waits for the write, like another access
+ * of the guest to the config space does.
+ */
+static void tstRemovalWhileWriting(void)
+{
+    RTTestISub("The host takes the device back while the guest writes to its config space");
+
+    /*
+     * The write which is under way is the guest enabling the decoding of memory,
+     * which gets the BAR mapped, and then one to a register which is passed
+     * through to the device, with the BAR mapped before.
+     */
+    for (uint32_t iVariant = 0; iVariant < 2; iVariant++)
+    {
+        bool const    fCommand = iVariant == 0;
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPowerOn();
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            if (!fCommand)
+            {
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+                RTTESTI_CHECK(tstPdmIsMmio2Mapped(TST_BAR0_ADDR));
+            }
+
+            TSTREMOVALWHILEWRITING State;
+            State.hNativeThread     = RTThreadNativeSelf();
+            State.offReg            = fCommand ? VBOX_PCI_COMMAND : VBOX_PCI_CACHE_LINE_SIZE;
+            State.cReqsBefore       = tstPdmGetRequestCount();
+            State.fPulled           = false;
+            State.fReleased         = false;
+            State.fOtherEmt         = false;
+            State.fDoneWhileWriting = false;
+            State.hThreadEmt        = NIL_RTTHREAD;
+            State.fDone             = false;
+            uint32_t const cStrayBefore = tstVfioKrnlGetStrayAccessCount();
+            tstPdmSetRequestProcessing(false /*fAutomatic*/);
+            tstVfioKrnlSetCfgWriteHook(tstRemovalWhileWritingHook, &State);
+            if (fCommand)
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            else
+                tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_CACHE_LINE_SIZE, 0x10, 1);
+            tstVfioKrnlSetCfgWriteHook(NULL, NULL);
+            RTTESTI_CHECK_MSG(State.fPulled, ("variant %u: the write did not get to the device\n", iVariant));
+            RTTESTI_CHECK_MSG(State.fReleased, ("variant %u: the device has not let go of the function\n", iVariant));
+            RTTESTI_CHECK_MSG(State.fOtherEmt, ("variant %u: no thread for the other EMT\n", iVariant));
+            RTTESTI_CHECK_MSG(!State.fDoneWhileWriting,
+                              ("variant %u: what is left to do on an EMT was done while another EMT was in the write\n", iVariant));
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetStrayAccessCount() == cStrayBefore + 1,
+                              ("variant %u: %u access(es) to what stands in for the function, expected the one which was under way\n",
+                               iVariant, tstVfioKrnlGetStrayAccessCount() - cStrayBefore));
+
+            /* The write is done, the other EMT gets its turn. */
+            if (State.fOtherEmt)
+            {
+                RTTESTI_CHECK_RC(RTThreadWait(State.hThreadEmt, RT_MS_30SEC, NULL), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(ASMAtomicReadBool(&State.fDone), ("variant %u: the other EMT did not get done\n", iVariant));
+            }
+
+            /* Whichever EMT comes by next finds nothing left to do, and the function is gone for the guest. */
+            tstPdmProcessRequests();
+            tstPdmSetRequestProcessing(true /*fAutomatic*/);
+            tstCheckFunctionIsGone(pDev, TST_PCI_DEVFN, TST_BAR0_ADDR,
+                                   fCommand ? "function removed while it was enabled" : "function removed while it was written to");
+            RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+        }
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
  * The host takes the device back before the VM got powered on, and the host
  * reports an error of the device it can't recover from: the device is let go
  * of in both cases.
@@ -7785,6 +7941,7 @@ int main()
     tstDuplicateCaps();
     tstLegacy();
     tstRemoval();
+    tstRemovalWhileWriting();
     tstRemovalOtherCases();
     tstRemovalUnderLoad();
     tstSavedState();
