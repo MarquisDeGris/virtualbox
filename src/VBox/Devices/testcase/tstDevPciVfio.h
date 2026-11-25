@@ -227,6 +227,18 @@ typedef DECLCALLBACKTYPE(void, FNTSTPDMSTATEHOOK,(void *pvUser));
 /** Pointer to a callback between the preparations for saving or loading a state and doing it. */
 typedef FNTSTPDMSTATEHOOK *PFNTSTPDMSTATEHOOK;
 
+/**
+ * Callback for a runtime error a device raises, called before the device gets
+ * the helper back: where PDM has an EMT tell the VM and the thread of the
+ * device wait for that.
+ *
+ * @param   pszErrorId          The ID of the error.
+ * @param   pvUser              The user argument.
+ */
+typedef DECLCALLBACKTYPE(void, FNTSTPDMRUNTIMEERROR,(const char *pszErrorId, void *pvUser));
+/** Pointer to a callback for a runtime error a device raises. */
+typedef FNTSTPDMRUNTIMEERROR *PFNTSTPDMRUNTIMEERROR;
+
 int             tstPdmInit(uint32_t cbRam);
 void            tstPdmTerm(void);
 int             tstPdmDevCreate(PCPDMDEVREG pReg, uint32_t iInstance, PCFGMNODE pCfgInst, PPDMDEVINS *ppDevIns);
@@ -258,6 +270,7 @@ bool            tstPdmIntxIsHigh(void);
 uint32_t        tstPdmIntxGetRaisedCount(void);
 const char     *tstPdmGetLastError(void);
 const char     *tstPdmGetLastRuntimeErrorId(void);
+void            tstPdmSetRuntimeErrorHook(PFNTSTPDMRUNTIMEERROR pfnHook, void *pvUser);
 int             tstPdmSaveStatePrep(bool fLive);
 int             tstPdmLoadStatePrep(void);
 int             tstPdmLoadStateDone(int rcLoad);

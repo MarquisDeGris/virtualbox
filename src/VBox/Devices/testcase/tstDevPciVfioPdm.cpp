@@ -452,6 +452,10 @@ typedef struct TSTPDM
     char                szLastError[512];
     /** The ID of the last runtime error. */
     char                szLastRuntimeErrorId[64];
+    /** Called when a device raises a runtime error, optional. */
+    PFNTSTPDMRUNTIMEERROR pfnRuntimeErrorHook;
+    /** The user argument for pfnRuntimeErrorHook. */
+    void               *pvRuntimeErrorHookUser;
     /** The state of the VM the devices get to see. */
     VMSTATE             enmVmState;
     /** The saved state units in the order in which they are saved. */
@@ -1677,6 +1681,9 @@ static DECLCALLBACK(int) tstPdmHlp_VMSetRuntimeErrorV(PPDMDEVINS pDevIns, uint32
     RT_NOREF(pDevIns, fFlags);
     RTStrCopy(g_Pdm.szLastRuntimeErrorId, sizeof(g_Pdm.szLastRuntimeErrorId), pszErrorId);
     RTStrPrintfV(g_Pdm.szLastError, sizeof(g_Pdm.szLastError), pszFormat, va);
+    /* PDM has an EMT tell the VM, and a thread which is none waits for that. */
+    if (g_Pdm.pfnRuntimeErrorHook)
+        g_Pdm.pfnRuntimeErrorHook(pszErrorId, g_Pdm.pvRuntimeErrorHookUser);
     return VINF_SUCCESS;
 }
 
@@ -3040,6 +3047,20 @@ const char *tstPdmGetLastError(void)
 const char *tstPdmGetLastRuntimeErrorId(void)
 {
     return g_Pdm.szLastRuntimeErrorId;
+}
+
+
+/**
+ * Sets what is called when a device raises a runtime error.
+ *
+ * @param   pfnHook             The callback, NULL for none.
+ * @param   pvUser              The user argument for it.
+ */
+void tstPdmSetRuntimeErrorHook(PFNTSTPDMRUNTIMEERROR pfnHook, void *pvUser)
+{
+    AssertReturnVoid(g_Pdm.fInitialized);
+    g_Pdm.pvRuntimeErrorHookUser = pvUser;
+    g_Pdm.pfnRuntimeErrorHook    = pfnHook;
 }
 
 
