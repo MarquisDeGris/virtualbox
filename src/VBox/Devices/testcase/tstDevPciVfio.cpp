@@ -7293,6 +7293,122 @@ static void tstSlotIrqLeftOver(void)
 
 
 /**
+ * What tstSlotLiveRefusedHook() goes by and reports.
+ */
+typedef struct TSTSLOTLIVEREFUSED
+{
+    /** Whether the VM was told of a runtime error. */
+    bool            fCalled;
+    /** Whether there was a thread to play the EMT. */
+    bool            fEmt;
+    /** Whether that thread got done with the requests while the VM was being told. */
+    bool            fDoneInTime;
+    /** The thread which plays the EMT. */
+    RTTHREAD        hThreadEmt;
+    /** Set by that thread when it is done. */
+    bool volatile   fDone;
+} TSTSLOTLIVEREFUSED;
+
+
+/**
+ * @callback_method_impl{FNRTTHREAD, Plays an EMT which gets around to what the
+ *      device has asked to be done on one.}
+ */
+static DECLCALLBACK(int) tstSlotLiveRefusedThread(RTTHREAD hThreadSelf, void *pvUser)
+{
+    TSTSLOTLIVEREFUSED *pState = (TSTSLOTLIVEREFUSED *)pvUser;
+    RT_NOREF(hThreadSelf);
+    tstPdmProcessRequests();
+    ASMAtomicWriteBool(&pState->fDone, true);
+    return VINF_SUCCESS;
+}
+
+
+/**
+ * @callback_method_impl{FNTSTPDMRUNTIMEERROR, A thread which is no EMT has an
+ *      EMT tell the VM of a runtime error and waits for that.  The EMT has
+ *      taken up something the device asked to be done on one and gets to the
+ *      telling when it is done with that.}
+ */
+static DECLCALLBACK(void) tstSlotLiveRefusedHook(const char *pszErrorId, void *pvUser)
+{
+    TSTSLOTLIVEREFUSED *pState = (TSTSLOTLIVEREFUSED *)pvUser;
+    RT_NOREF(pszErrorId);
+    if (pState->fCalled)
+        return;
+    pState->fCalled = true;
+    int rc = RTThreadCreate(&pState->hThreadEmt, tstSlotLiveRefusedThread, pState, 0 /*cbStack*/,
+                            RTTHREADTYPE_DEFAULT, RTTHREADFLAGS_WAITABLE, "tstEmt");
+    pState->fEmt = RT_SUCCESS(rc);
+    if (RT_SUCCESS(rc))
+    {
+        /* Five seconds, of which it takes none where nothing is in its way. */
+        for (uint32_t i = 0; i < 500 && !ASMAtomicReadBool(&pState->fDone); i++)
+            RTThreadSleep(10);
+        pState->fDoneInTime = ASMAtomicReadBool(&pState->fDone);
+    }
+}
+
+
+/**
+ * Saving the state of a VM which keeps running is refused while the device is
+ * in the slot.  That is found by a thread which is no EMT, and the VM is told
+ * of it, which such a thread has an EMT do and waits for.  The EMT can have
+ * taken up something which the device asked to be done on an EMT, all of
+ * which takes the lock of the slot: whoever refuses must not hold that lock
+ * while the VM is being told, or the two wait for each other.
+ */
+static void tstSlotLiveStateRefused(void)
+{
+    RTTestISub("Hot-plug slot: a live state is refused while an EMT has work of the device to do");
+
+    TSTVFIODEVCFG Model;
+    tstModelInitDefault(&Model);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    int rc = tstSlotFixtureSetup(&Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        tstSlotGuestEnableDevice();
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+
+        /* The device raises its INTx interrupt, and what there is to do for that on an EMT waits for one. */
+        tstPdmSetRequestProcessing(false /*fAutomatic*/);
+        uint32_t const cReqsBefore = tstPdmGetRequestCount();
+        RTTESTI_CHECK_RC(tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_INTX_IRQ_INDEX, 0), VINF_SUCCESS);
+        RTTESTI_CHECK_MSG(tstIntxWait(cReqsBefore, false /*fDeliver*/), ("the interrupt did not arrive\n"));
+
+        /* The state is to be saved with the VM running on. */
+        TSTSLOTLIVEREFUSED State;
+        State.fCalled     = false;
+        State.fEmt        = false;
+        State.fDoneInTime = false;
+        State.hThreadEmt  = NIL_RTTHREAD;
+        State.fDone       = false;
+        tstPdmSetRuntimeErrorHook(tstSlotLiveRefusedHook, &State);
+        rc = tstPdmSaveStatePrep(true /*fLive*/);
+        tstPdmSetRuntimeErrorHook(NULL, NULL);
+        RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("%Rrc\n", rc));
+        RTTESTI_CHECK_MSG(State.fCalled, ("the VM was not told that its state can't be saved\n"));
+        RTTESTI_CHECK_MSG(State.fEmt, ("no thread for the EMT\n"));
+        RTTESTI_CHECK_MSG(State.fDoneInTime,
+                          ("the EMT did not get done with what the device asked for while the VM was being told\n"));
+        if (State.fEmt)
+            RTTESTI_CHECK_RC(RTThreadWait(State.hThreadEmt, RT_MS_30SEC, NULL), VINF_SUCCESS);
+        tstPdmProcessRequests();
+        tstPdmSetRequestProcessing(true /*fAutomatic*/);
+
+        /* The device is where it was and the guest has it. */
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+        RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
+        RT_NOREF(pDevInsPort, pDevInsDev);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
  * @callback_method_impl{FNTSTPDMSTATEHOOK,
  *      Time passes between the preparations for loading a state and loading it.}
  */
@@ -7964,6 +8080,7 @@ int main()
     tstSlotStateHostRequest();
     tstSlotInterface();
     tstSlotHostRequestReset();
+    tstSlotLiveStateRefused();
     tstFuzz();
     tstPortFuzz();
     tstSlotFuzz();
