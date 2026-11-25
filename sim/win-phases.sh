@@ -1396,7 +1396,7 @@ win_host_plug()
     fi
 
     if ! port_link_has_width; then
-        stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does once it was made to report an error (its emulator overwrites its link capabilities then), and the kernel of the host takes no device from such a port"
+        stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, which is its emulator's doing (a port which was made to report an error, and a port of its switch from the start), and the kernel of the host takes no device from such a port"
         return 0
     fi
     dmesg -C 2> /dev/null

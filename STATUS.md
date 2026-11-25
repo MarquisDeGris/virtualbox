@@ -2429,23 +2429,53 @@ as what the device behind it tells, limited to its own capabilities
 (`pcie_sync_bridge_lnk` in `hw/pci/pcie.c`): no speed and no width,
 with whatever device. The current source of the emulator writes 16
 bits. This much is read and not seen: the phases show the link
-capabilities of the port from the next run on.
+capabilities of the port since run 346, which has them for a root port
+nothing was done to (00300604: the speed and the width are in the
+lower half), and no run has shown them after an error yet.
 
-**A part with a switch** (`swplughost`, written on 2026-11-25, not run
-yet). The machine has a root port, the two ports of a switch behind
-it, and the drive in the slot of the lower one. The error is reported
-by the root port, whose kernel tells the drivers of all which is below
-it; the drive is unplugged from the port of the switch and plugged
-into it again, and that port is not the one the emulator spoils. So
-the drive can be plugged in again after an error there, which no part
-could show so far. It is also how a device in an enclosure on a cable
-is connected: behind the ports of the switch the cable ends in. Not a
-part a run has by default before it has run.
+**A part with a switch** (`swplughost`, 2026-11-25). The machine has a
+root port, the two ports of a switch behind it, and the drive in the
+slot of the lower one, which is how a device in an enclosure on a
+cable is connected: behind the ports of the switch the cable ends in.
+It was written so that the drive could be plugged in again after an
+error, the error being reported by the root port and the slot being at
+another port.
+
+**Run 346** (2026-11-25, `sim` with that part only, for finding out,
+`pci-passthrough-hotplug-7.2-kvm` @ `585a8166`, 17 minutes, Intel Xeon
+6975P-C; 47 checks pass, 3 fail, 1 is left out) shows what works and
+what does not. The drive behind the switch, at the host address
+`0000:03:00.0`, is passed through as any other: the VM starts with it
+and the guest reads from it. It is unplugged from the port of the
+switch as it is from a root port, gone from the host 12 seconds after
+the port was told, the guest having been asked. What does not work is
+the plugging in: the downstream port of the switch this emulator has
+tells of link capabilities without a speed and a width (00000400) and
+so of a link without a width, from the start, with nothing done to it.
+The phase saw that and left the plugging in out, and the two phases
+after it had no device, which is two of the three checks that fail.
+So this part cannot show a device which comes back, after an error or
+before one. It goes through the errors first and the unplugging last
+since: an error which the root port reports, with a switch between it
+and the device, and the reset of all of that after the error which the
+kernel takes for fatal.
+
+The third check which failed is one of the checklist script of
+INSTALL.md, and it was the script which was wrong. The port of this
+switch has no access control services, so the kernel has the port and
+the drive in one IOMMU group, and the script called that a group with
+other devices in it which would be handed over. A port the device is
+behind is not handed over: it keeps the driver of the kernel, which
+permits a group like that, and VirtualBox had the drive. The script
+tells of such a port in a line of its own now and counts nothing as
+missing for it; another device in the group is what it was. Item D2
+of INSTALL.md says the same.
 
 What this does not show: a device which is gone without the host
 having been asked, as when a cable is pulled; with the emulated port
 the host is asked first. And a device which is plugged in again after
-an error, for the reason above; the part with a switch is for that.
+an error, for the reasons above: no port of this emulator takes one
+then. That is left for the hardware, see HWTEST.md, part H.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3352,11 +3382,12 @@ harness since WP5, saved states since the fourth part of WP6.
    hot-plug, see "The device leaves the host and comes back, in the
    simulation". Both have run with a device of two functions and with
    Windows as the guest (runs 336, 337 and 343), and the unplugging
-   on all three lines (runs 342, 344 and 345). Open: a device which
-   is plugged in again after an error. The emulated port does not take
-   one then, which is a defect of the emulator's error injection; the
-   part with a switch (`swplughost`) is written for it and has its
-   first run to come.
+   on all three lines (runs 342, 344 and 345). A device which is
+   plugged in again after an error is left for the hardware: no port
+   of the emulator the runner has takes one then (runs 345 and 346).
+   The part with the drive behind a switch (`swplughost`) has run once
+   (run 346) and goes through the errors and the unplugging since;
+   that order has its first run to come.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3494,7 +3525,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-24 | Upstream is told of the defect in the event queue of Main, as a comment on the issue which is there already and not as an issue of its own | Who this work is for said yes to telling. The issue lists the defects of `main` which were found on the way, and this is one more of them; a second issue would be one more thing for upstream to sort |
 | 2026-11-24 | A run which is about Windows in the machine standing in for a host is cancelled at once when its runner has an AMD processor, and started again | Run 332 took two and a half hours to show nothing new: on such runners Windows does not get through its start at that depth (item 4d). A run tells its processor in its first minute, and a cancelled run costs that minute |
 | 2026-11-24 | Where the emulated port has lost the width of its link, the simulation does not plug the device in again, and says so in its result | Runs 340 to 345: once the emulated port was made to report an error it tells of a link without a width, and the kernel of the machine takes no device from it (the emulator overwrites the link capabilities of the port when it injects the error; no reset has to do with it). Nothing which can be done from inside that machine brings the width back. A check which can only fail tells nothing; one which is left out with its reason does |
-| 2026-11-25 | The simulation gets a part with the device behind a switch (`swplughost`): the root port reports the error, the port of the switch has the slot | The emulator spoils the link of the port it reports an error for (QEMU 8.2.2, read in its source, fixed in its current one), so a device could not be plugged in again after an error. With a switch the slot is at another port, and it is how an enclosure on a cable is connected. No other emulator is built or installed on the runner for this: the runner keeps what its distribution has |
+| 2026-11-25 | The simulation gets a part with the device behind a switch (`swplughost`): the root port reports the error, the port of the switch has the slot | The emulator spoils the link of the port it reports an error for (QEMU 8.2.2, read in its source, fixed in its current one), so a device could not be plugged in again after an error. With a switch the slot is at another port, and it is how an enclosure on a cable is connected. No other emulator is built or installed on the runner for this: the runner keeps what its distribution has. Run 346: the port of that switch has no link width at all in this emulator, so the part is kept for what it can show, the errors and the unplugging with a switch in between, and the plugging in after an error is left for the hardware. A root port behind a root port would have a slot which works, and is not done: no machine is built like that |
+| 2026-11-25 | The checklist script does not count a port the device is behind as another device in its IOMMU group; it says that the port is there | Run 346: a port of a switch without access control services is in the group of what is behind it. The kernel permits such a group and keeps its driver on the port, nothing of the port goes to the VM, and VirtualBox had the device. Another device in the group is counted as before, and so is a bridge which is not on the way to the device |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3553,10 +3585,14 @@ the kernel interface of a real kernel. And since run 226: Windows taking the roo
 the firmware tables and the empty slot; since run 250 Windows with a
 device in the slot, on the branches with the KVM backend of Cyberus
 Technology; since run 264 a device with two functions, with a Linux
-guest. What the hardware test is still the first to show: a real
-device, functions which the host can only reset together, a graphics
-card, Thunderbolt, an IOMMU of AMD, and what a host does which is not a
-virtual machine.
+guest, and since run 267 functions which the host can only reset
+together; since run 327 an error of the device as the kernel of the
+host reports it, and since run 333 the device leaving the host and
+coming back by the host's own hot-plug, both with a Linux guest and
+with Windows. What the hardware test is still the first to show: a
+real device, a graphics card with its driver in the guest,
+Thunderbolt, a cable which is pulled without the host being asked, an
+IOMMU of AMD, and what a host does which is not a virtual machine.
 
 ## CI runs
 
@@ -3785,5 +3821,6 @@ virtual machine.
 | 343 | `scratch/cfg-gone-7.2-kvm` @ `585a8166` | winsim with the parts runner, win, winhost and mfwinhost, exploring | passed | 49 minutes, Intel Xeon 6975P-C. All 223 pass, none is left out. With Windows as the guest the device is unplugged from the host and plugged in again, with the drive (13 checks) and with the device of two functions (15): Windows finds it gone and runs on, and takes it and reads from the drive when it is back. The two errors after that pass as in run 336. The port has its link after the resets of the bus which the device of two functions needs |
 | 344 | `pci-passthrough-hotplug-v1` @ `432ae816` | sim with the parts plughost and mfplughost, not strict | passed | 27 minutes, AMD EPYC 9V74. 139 pass, none fails, 2 are left out with their reason, as in run 342: the device is unplugged from the host and plugged in again, with the drive and with the device of two functions, on the development line |
 | 345 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the parts plughost and mfplughost, not strict | passed | 29 minutes, Intel Xeon 6975P-C. 139 pass, none fails, 2 are left out with their reason: the same on the 7.1 line. The first run which looks at the port before and after each error: link status 2011 before the error which is not fatal and 2000 after it, with nothing reset. It is the error injection of the emulator, see "What takes the width of the link" |
+| 346 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 17 minutes, Intel Xeon 6975P-C. 47 pass, 1 is left out. The first run with the drive behind a switch: the VM has it, the guest reads from it, and it is unplugged from the port of the switch (gone after 12 s). The port of the emulated switch has no link width from the start, so the drive is not plugged in again, and the two phases after that had no device. The third: the checklist script took the port in the IOMMU group of the drive for another device, which was the script |
 
 Run numbers are those GitHub shows for the `build` workflow.

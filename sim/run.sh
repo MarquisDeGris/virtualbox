@@ -95,12 +95,14 @@
 #      "mfplughost"): both functions go when the device is unplugged, and
 #      both are there again when it is plugged in.
 #
-#   2i. The same with the drive behind a switch (SIM_PARTS has
-#      "swplughost"): a root port, the two ports of a switch behind it, and
-#      the drive in the slot of the lower one, which is how a device in an
-#      enclosure on a cable is connected.  The drive is unplugged from the
-#      port of the switch; the error is one the root port reports.  Not a
-#      part a run has by default.
+#   2i. The drive behind a switch (SIM_PARTS has "swplughost"): a root
+#      port, the two ports of a switch behind it, and the drive in the slot
+#      of the lower one, which is how a device in an enclosure on a cable is
+#      connected.  The root port reports an error, which its kernel tells
+#      all of what is below it, and then the drive is unplugged from the
+#      port of the switch.  It is not plugged in again: the port of the
+#      switch this emulator has tells of a link without a width from the
+#      start.  Not a part a run has by default.
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
 # mfhost, barhost, vgahost, errhost, mferrhost, plughost, mfplughost,
@@ -184,7 +186,7 @@ finish()
     if has_part mfplughost && ! grep -q '^mfplughost/hostplug: ' "$STAGES"; then
         missing=1
     fi
-    if has_part swplughost && ! grep -q '^swplughost/hostplug: ' "$STAGES"; then
+    if has_part swplughost && ! grep -q '^swplughost/hosterror: ' "$STAGES"; then
         missing=1
     fi
     if [ "$STRICT" = linux ]; then
@@ -700,21 +702,24 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         # The drive behind a switch: the root port, the upstream port of the
         # switch in it, a downstream port of the switch with a slot, and the
         # drive in that slot.  The kernel of the machine runs the slots
-        # itself, as in the part plughost.  An error is reported by the root
-        # port (host-agent.sh), and the drive is unplugged from the port of
-        # the switch and plugged into it again.  Two things come of that.
-        # It is how an enclosure on a cable is connected: the device is
-        # behind the ports of the switch the cable ends in, and what a root
-        # port reports is told to the drivers of all which is below it.  And
-        # the port the drive is plugged into is not the one the emulator
-        # reports the error for: QEMU 8.2 overwrites the lower half of the
-        # link capabilities of a port when it makes it report an error which
-        # cannot be corrected (pcie_aer_inject_uncor_error writes the 16 bit
-        # device status with 32 bits; later versions write 16), and tells of
-        # the link of a port, each time it is asked, as limited to those
-        # capabilities.  The kernel of the machine takes no device from a
-        # port whose link has no width, so in the parts without a switch the
-        # drive cannot be plugged in again after an error (runs 340 to 345).
+        # itself, as in the part plughost.  It is how an enclosure on a cable
+        # is connected: the device is behind the ports of the switch the
+        # cable ends in, and what a root port reports is told to the drivers
+        # of all which is below it.  An error is reported by the root port
+        # (host-agent.sh), and the drive is unplugged from the port of the
+        # switch.
+        # Two things about this emulator (QEMU 8.2) and the link of a port.
+        # It tells of that link, each time it is asked, as what the device
+        # behind the port tells, limited to the link capabilities of the
+        # port.  When it makes a port report an error which cannot be
+        # corrected, it overwrites the lower half of those capabilities
+        # (pcie_aer_inject_uncor_error writes the 16 bit device status with
+        # 32 bits; later versions write 16).  And the downstream port of its
+        # switch has no speed and no width in them from the start (run 346:
+        # link capabilities 00000400).  Either way the link has no width,
+        # and the kernel of the machine takes no device from such a port.
+        # So a drive cannot be plugged in again after an error in the parts
+        # without a switch (runs 340 to 345), and not at all in this one.
         dev=(-device "x3130-upstream,id=sw0,bus=rp1"
              -device "xio3130-downstream,id=dp1,bus=sw0,chassis=2,slot=2"
              -blockdev "driver=file,filename=$WORK/nvme.img,node-name=nvmf"
@@ -914,9 +919,10 @@ if has_part mfplughost; then
 fi
 
 if has_part swplughost; then
-    note "Part 2i: the same with the drive behind a switch"
+    note "Part 2i: the drive behind a switch"
     if part_simhost_prepare; then
-        run_simhost swplughost hostplug,hosterror,hostplug-again 600 5 3000
+        # The unplugging comes last: the drive does not come back here.
+        run_simhost swplughost hosterror,hostplug 600 5 3000
     fi
 fi
 

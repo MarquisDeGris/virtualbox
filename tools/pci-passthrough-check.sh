@@ -147,14 +147,31 @@ for addr in "$@"; do
     if [ -e "$dev/iommu_group" ]; then
         slot=${addr%.*}
         others=
+        ports=
+        path=$(readlink -f "$dev")
         for m in "$dev"/iommu_group/devices/*; do
             m=${m##*/}
-            [ "${m%.*}" = "$slot" ] || others="$others $m"
+            [ "${m%.*}" = "$slot" ] && continue
+            # A port the device is behind (a bridge on the way from the
+            # root to it) is no other device to be handed over: the kernel
+            # keeps its own driver on it.  It is in the group where it has
+            # no access control services (ACS).
+            case "$path" in
+                */"$m"/*)
+                    case "$(cat "/sys/bus/pci/devices/$m/class" 2> /dev/null)" in
+                        0x0604*) ports="$ports $m"; continue ;;
+                    esac
+                    ;;
+            esac
+            others="$others $m"
         done
-        if [ -z "$others" ]; then
-            ok "its IOMMU group has the functions of this device only: $(ls "$dev/iommu_group/devices" | tr '\n' ' ')"
-        else
+        if [ -n "$others" ]; then
             bad "its IOMMU group has other devices too:$others. They would be handed over with it; the host cannot separate them"
+        elif [ -n "$ports" ]; then
+            ok "its IOMMU group has the functions of this device and nothing else to hand over: $(ls "$dev/iommu_group/devices" | tr '\n' ' ')"
+            note "a port above the device is in that group too:$ports. It stays with the host, which permits this; the port does not tell how it keeps what is behind it apart (no ACS)"
+        else
+            ok "its IOMMU group has the functions of this device only: $(ls "$dev/iommu_group/devices" | tr '\n' ' ')"
         fi
     else
         bad "it is in no IOMMU group"

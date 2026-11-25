@@ -365,6 +365,20 @@ With the hot-plug settings of part 2.
    device works in the guest again.
 4. Repeat five times, also pulling the cable while the device is under
    load (a large copy, a 3D benchmark).
+5. Nothing is to be done for this one, it is for when it happens: the
+   kernel log of the host has a line about an error of the device or of a
+   port above it (`AER:` with `Uncorrectable`), which a cable can cause.
+   The log of the VM then has
+
+       VFIO#0.0: The function is taken out of service: the host reported an error of the device
+
+   for each function, the device is gone from the guest as in step 2, and
+   the VM keeps running. Once the host has the device again (bind it to
+   `vfio-pci` again if the host removed it), `plugpci` puts it back. Keep
+   the lines of both logs with the result. The simulation goes through
+   this with an error which is made up (STATUS.md, "An error of the
+   device, in the simulation"); what a real device is like after a real
+   error it cannot show.
 
 ### I. Starting without the device
 

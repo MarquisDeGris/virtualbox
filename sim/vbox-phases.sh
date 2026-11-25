@@ -1121,7 +1121,8 @@ HE_PORT="the port in front of the device"
 # 2011 before, 2000 after).  It is the emulator: see the part swplughost in
 # run.sh for what it does.  The kernel of the host does not take a device
 # which is plugged into such a port ("Cannot train link").  No reset has to
-# do with it (run 343), and a port of a real host keeps its link.
+# do with it (run 343), and a port of a real host keeps its link.  The port
+# of the switch this emulator has tells of no width from the start (run 346).
 # Where the register cannot be read, the port is taken to be in order.
 port_link_has_width()
 {
@@ -1235,7 +1236,7 @@ phase_hostplug()
         fi
 
         if ! port_link_has_width; then
-            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, as it does once it was made to report an error (its emulator overwrites its link capabilities then), and the kernel of the host takes no device from such a port"
+            stage "host: the device is plugged in again" skipped "the emulated port tells of a link without a width, which is its emulator's doing (a port which was made to report an error, and a port of its switch from the start), and the kernel of the host takes no device from such a port"
             end_phase
             return
         fi

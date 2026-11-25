@@ -150,7 +150,7 @@ in or the host started. See section 4 for how.
 | | What | How to see | When it is not so | What can be done |
 |---|------|-----------|-------------------|------------------|
 | D1 | A device on Thunderbolt or USB4 is authorized, if the security level is `user` or `secure` | its PCI functions are in `/sys/bus/pci/devices` | The PCI devices do not appear | `boltctl authorize`, or a rule of the host which does it |
-| D2 | All functions of the device, and nothing else, are in one IOMMU group | `ls /sys/bus/pci/devices/<address>/iommu_group/devices` | What else is in the group belongs to the same VM as far as the IOMMU can tell | Another slot or port. See "What must not be used" below |
+| D2 | All functions of the device, and no other device, are in one IOMMU group | `ls /sys/bus/pci/devices/<address>/iommu_group/devices` | What else is in the group belongs to the same VM as far as the IOMMU can tell. A port the device is behind may be in it, as a port of a switch is which has no access control services (ACS): it stays with the host, the kernel permits that, and the script says so | Another slot or port. See "What must not be used" below |
 | D3 | Each function is bound to `vfio-pci`, and the driver of the host for the device (a graphics driver, say) does not have it | `readlink /sys/bus/pci/devices/<address>/driver` | The VM does not start: "The PCI device 0000:0a:00.0 is not bound to a VFIO driver". With hot-plug switched on it starts with the slot empty instead, if it was started with the device once before | Binding takes root and writing to sysfs (`driver_override`, `unbind`, `drivers_probe`). Where nobody may do that by hand, a service of the host has to, when the device appears |
 
 ### The user who runs the VM
