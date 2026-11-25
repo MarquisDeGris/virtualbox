@@ -168,7 +168,10 @@ the simulation ran into what they are for:
   within about 20 milliseconds and tells the thread of the CPU again. The
   log has a line when it did, 64 times at most:
 
-      TM: VMCPU_FF_TIMER pending for more than 10 ms while EMT 0 executes the guest, notified it again
+      TM: VMCPU_FF_TIMER set at two ticks in a row, 10 ms apart, while EMT 0 executes the guest, notified it
+
+  (A build of before 2026-11-25 says "pending for more than 10 ms while
+  EMT 0 executes the guest, notified it again" for the same.)
 
   The line is in order. A VM which stops doing anything without being
   paused is not: note it down, with the log.
@@ -228,7 +231,11 @@ When it is the host which wants the device back, the guest switching the
 slot off cannot reset the device, as the host holds on to it while it
 waits. The log says so, and that is as it should be:
 
-    VFIO#0: The device is not reset now, the host is busy with it and refuses.  The host resets it when it is let go of
+    VFIO#0: The device is not reset now, the host is busy with it and refuses.  It keeps its state apart from being disabled
+
+(A build of before 2026-11-25 ends the line with "The host resets it when
+it is let go of". Whether the host does is the host's matter and was
+never looked at here; the line no longer says it.)
 
 ## 3. What to try
 

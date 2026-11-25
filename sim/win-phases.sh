@@ -305,10 +305,11 @@ show_exits() # <log>
     # the last number of this line is 00000100 if it is told, 00000000 if not.
     grep -a -m 1 -E '^[0-9:.]+ +Gst: 80000007/' "$1" 2> /dev/null | sed -E 's/^[0-9:.]+ +//; s/ +/ /g' | sed 's/^/    | CPUID /'
     # VirtualBox tells in its log when it had to tell the thread of a CPU a
-    # second time that a timer was due, at most 64 times per VM.
-    n=$(grep -a -c 'TM: VMCPU_FF_TIMER pending for more than' "$1" 2> /dev/null)
+    # second time that a timer was due, at most 64 times per VM.  The line
+    # reads differently since 2026-11-25; both are counted.
+    n=$(grep -a -c -E 'TM: VMCPU_FF_TIMER (pending for more than|set at two ticks in a row)' "$1" 2> /dev/null)
     echo "    times the thread of a CPU had to be told again that a timer was due, in $(basename "$1"): ${n:-0}"
-    grep -a 'TM: VMCPU_FF_TIMER pending for more than' "$1" 2> /dev/null | head -n 3 | cut -c1-160 | sed 's/^/    | /'
+    grep -a -E 'TM: VMCPU_FF_TIMER (pending for more than|set at two ticks in a row)' "$1" 2> /dev/null | head -n 3 | cut -c1-160 | sed 's/^/    | /'
 }
 
 serial_value() # <regex with one group>: what the group matched in the first line which matches

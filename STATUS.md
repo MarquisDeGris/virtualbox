@@ -1679,7 +1679,7 @@ published it. `hw/builds.txt` lists it. That build is the 7.2 line with
 the KVM backend; it has no emulated 3D in it (`--disable-dxvk`).
 **Run 321** (2026-11-24, `package` with 3D acceleration, the same
 branch @ `585a8166`, 37 minutes, Intel Xeon 6975P-C) made the build
-which is fetched since then, `vbox-585a816662b0-3d-ubuntu2404.tar.zst`,
+which was fetched from then until run 362, `vbox-585a816662b0-3d-ubuntu2404.tar.zst`,
 155 MB. It has the change to the device of that day, see "The device
 does not ask a function which is out of service". The build without 3D
 acceleration is still the one of run 286 and does not have it, which
@@ -1689,7 +1689,13 @@ acceleration is still the one of run 286 and does not have it, which
 script which fetches gets the file which is listed, with its checksum,
 and its `VBoxManage` runs; the first test goes through its 15 checks
 with that build and the device of four gigabytes. All 50 checks of the
-run pass.
+run pass. **Run 362** (2026-11-25, `package` with 3D acceleration, the
+same branch @ `572356d1`, 12 minutes, AMD EPYC 9V45) made the build
+which is fetched since, `vbox-572356d18f9e-3d-ubuntu2404.tar.zst`, 155
+MB: it has the PCI lock where a function goes away for the guest, see
+"A second reader for four later commits", and the testcase passes on
+that head in the same run. It was not fetched by a run yet when this
+was written.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -2601,8 +2607,9 @@ testcase pass there. The heads of the five branches are
 `68c5b765` with that. The two lines without the KVM backend had no
 run of their own for it: their commit is what the lines with the
 backend have, which were run. The build for a machine with real
-hardware stays the one of `585a8166`: the head after it differs in the
-testcase only, and hw/README.md says so.
+hardware stayed the one of `585a8166` for that: the head after it
+differs in the testcase only. (It is the one of run 362 since the same
+day, for another change.)
 
 ### A second reader for four later commits (2026-11-25)
 
@@ -2733,10 +2740,11 @@ the one in the I/O APIC, whose change it does not have; the 7.1 line has
 neither of the two changes and so the two commits about the device
 only. Not run: the development line without the sanitizers, and the two
 lines without the KVM backend by themselves. The simulation on the new
-head of the 7.2 line with the backend is run 361, and a build of that
-head for a machine with real hardware is run 362; both were under way
-when this was written, and until the second is published the build
-which is fetched there is the one of `585a8166`, without the lock.
+head of the 7.2 line with the backend is run 361, which was under way
+when this was written. Run 362 (`package` with 3D acceleration, 12
+minutes, AMD EPYC 9V45) is the build of that head for a machine with
+real hardware; it is published, and `hw/linux/fetch.sh` fetches it
+since, see "Machines with real hardware".
 
 ### The issue with upstream, 2026-11-23
 
@@ -4137,5 +4145,7 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 358 | `scratch/red-evidence-19` @ `c365019f` | tests, testcase expected to fail | failed as intended | 10 minutes, AMD EPYC 7763. The test for a function which is taken back during a write of the guest to its config space, against the device without the PCI lock at that place: the check it is about fails in both variants. Two more checks failed which expected an access that does not happen; they were taken out of the test afterwards. See "A second reader for four later commits" |
 | 359 | `pci-passthrough-hotplug-v1` @ `2e4e6786` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the three commits which came of the second reading: the 58 tests and the three random tests pass with the sanitizers, without a report |
 | 360 | `pci-passthrough-hotplug-7.1-kvm` @ `625a36ed` | tests | passed | 12 minutes, Intel Xeon 6975P-C. The two commits about the device on the 7.1 line with the KVM backend, which has them by a merge of the 7.1 line: it builds and `tstDevPciVfio` passes with its 58 tests |
+| 361 | `pci-passthrough-hotplug-7.2-kvm` @ `572356d1` | sim | running when this was written | The simulation with its ten parts on the head which has the commits of the second reading |
+| 362 | `pci-passthrough-hotplug-7.2-kvm` @ `572356d1` | package, built with 3D acceleration | passed | 12 minutes, AMD EPYC 9V45. The package `vbox-572356d18f9e-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the PCI lock where a function goes away for the guest: the testcase passes in the run, the release workflow published the package next to the three before it, and `hw/builds.txt` has it as the build which is fetched |
 
 Run numbers are those GitHub shows for the `build` workflow.
