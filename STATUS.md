@@ -7,7 +7,7 @@ Updated: 2026-11-22
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `432ae816`, 38 commits. The last one has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `20438da2`, 39 commits. The last one is in the testcase only, which waits for the slot to be told that it is empty, in since 2026-11-25, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -2490,11 +2490,24 @@ at the port of the switch, with the slot control as the kernel has it
 heard of the request: the drive was gone from the host 12 seconds
 after the port was told, the guest having been asked and having let
 go. The part has 37 checks: 7 for its setup, 20 for the two errors, 10
-for the unplugging. It is one a run of the simulation has by default
-since. What it adds to the others: a device which is not behind a root
+for the unplugging, the one which is left out among them, so 36 which
+pass. It is one a run of the simulation has by default since. What it adds to the others: a device which is not behind a root
 port but behind a switch, at a bus two below; an error which is
 reported by another port than the one the device is in; and the reset
 of a switch with the device behind it.
+
+**The other two lines, and all parts in one run.** The part with the
+switch passes on the development line (**run 350**,
+`pci-passthrough-hotplug-v1` @ `432ae816`, 19 minutes, Intel Xeon
+6975P-C) and on the 7.1 line with the KVM backend (**run 352**, @
+`68c5b765`, 22 minutes, AMD EPYC 7763), with the same 68 checks and
+the same one left out as in run 348. **Run 349** (`sim` as it is by
+default now, with its ten parts, `pci-passthrough-hotplug-7.2-kvm` @
+`585a8166`, 84 minutes, Intel Xeon 6975P-C) is the first run of all of them
+since the phases the parts share were changed for the part with the
+switch: all 411 checks pass, and 3 are left out with their
+reason, the plugging in after the errors in the two parts without a
+switch and the plugging in in the part with one.
 
 The third check which failed in run 346 is one of the checklist script of
 INSTALL.md, and it was the script which was wrong. The port of this
@@ -2512,6 +2525,52 @@ having been asked, as when a cable is pulled; with the emulated port
 the host is asked first. And a device which is plugged in again after
 an error, for the reasons above: no port of this emulator takes one
 then. That is left for the hardware, see HWTEST.md, part H.
+
+### A check of the testcase which came too early (2026-11-25)
+
+**Run 351** (2026-11-25, the part with the switch on
+`pci-passthrough-hotplug-7.1-kvm` @ `656e0e59`, 10 minutes, Intel Xeon
+6975P-C) failed before it got to the simulation. The testcase of the
+device, `tstDevPciVfio`, had one of its tests fail, "Hot-plug slot: a
+state is loaded while the host waits for the device", with "line 7178:
+slot status 0x150". The workflow runs a testcase which failed once
+more in the debugger, and there it passed. The same commit had passed
+it in every run before, run 345 the last.
+
+What it is: when the host takes a device back, the thread of the
+device which watches out for that lets go of the functions first and
+tells the port of the slot right after, in that order so that nothing
+of the device can be reached by the time the guest hears of an empty
+slot. For a moment the host has the device and the slot still tells of
+a card; slot status 0x150 is a card which is there, a link which has
+changed and a command which was completed. Five places of the testcase
+waited for the host to have the device and looked at the slot at once,
+and this one looked in that moment. The testcase was wrong to expect
+otherwise. A guest which looks in that moment sees a slot it has
+switched off itself with the card still in it, and is told of the card
+going right after. The device is as it was, and the order stays.
+
+The testcase waits for the slot at these five places now
+(`tstSlotWaitForEmpty`, five seconds at most): `20438da2` on the
+development line, `53ca3518` on the 7.1 line, merged into the 7.1 line
+with the KVM backend (`68c5b765`). **Run 352** (see "The other two
+lines" above) has the testcase pass on that head and the simulation
+after it; **run 353** (`tests`, `pci-passthrough-hotplug-v1` @
+`20438da2`, 10 minutes, AMD EPYC 7763) has it pass on the development
+line. A test which fails once in some hundreds of runs is not shown
+gone by two which pass; what is shown is that the change builds and
+that the tests pass with it. The 7.2 line has the same commit since
+run 349 was done, which ran on the head before it (`7af415e3`), and
+so has the 7.2 line with the KVM backend, by a merge (`05f1d33a`);
+**run 354** (`tests` on that head, 11 minutes, AMD EPYC 9V74) has the
+testcase pass there. The heads of the five branches are
+`pci-passthrough-hotplug-v1` @ `20438da2`, `-7.2` @ `7af415e3`,
+`-7.2-kvm` @ `05f1d33a`, `-7.1` @ `53ca3518` and `-7.1-kvm` @
+`68c5b765` with that. The two lines without the KVM backend had no
+run of their own for it: their commit is what the lines with the
+backend have, which were run. The build for a machine with real
+hardware stays the one of `585a8166`: the head after it differs in the
+testcase only, and hw/README.md says so.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3422,9 +3481,11 @@ harness since WP5, saved states since the fourth part of WP6.
    plugged in again after an error is left for the hardware: no port
    of the emulator the runner has takes one then (runs 345 and 346).
    The part with the drive behind a switch (`swplughost`) passes since
-   run 348 and is a default one. Still to come: a run of the
-   simulation with all its ten parts, since the phases the parts share
-   were changed for this one, and the part on the other two lines.
+   run 348, is a default one, has passed on all three lines (runs 348,
+   350 and 352) and with the other nine parts in one run (run 349).
+   The commit which has the testcase wait for the slot is on all five
+   branches (runs 352 to 354). Nothing of this is left for the
+   simulation; the plugging in after an error is for the hardware.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3566,6 +3627,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-25 | The checklist script does not count a port the device is behind as another device in its IOMMU group; it says that the port is there | Run 346: a port of a switch without access control services is in the group of what is behind it. The kernel permits such a group and keeps its driver on the port, nothing of the port goes to the VM, and VirtualBox had the device. Another device in the group is counted as before, and so is a bridge which is not on the way to the device |
 | 2026-11-25 | Before it unplugs, a phase clears a completed command which is pending at the port, and says so in the log | Runs 347 and 348: after the reset of everything below the root port the port of the emulated switch is left with that bit, and the kernel of the machine hears of nothing from the slot until it is cleared. It is a matter between that kernel and the emulator; VirtualBox is not part of it, and without this the part could not unplug after an error |
 | 2026-11-25 | The part with the drive behind a switch is one a run of the simulation has by default | Run 348: it passes, in under five minutes. It is the only part in which the port which reports an error is not the one the device is in, a switch is reset with the device behind it, and the device is two buses down |
+| 2026-11-25 | The testcase waits for the slot to be told that it is empty; the device keeps its order, letting go of the functions before the port is told | Run 351: the other order would have a guest hear of an empty slot while something of the device can still be reached. What failed was a check which took the two for one moment |
+| 2026-11-25 | No new build for a machine with real hardware for that commit | It changes the testcase only; the build of `585a8166` is what the head has, but for the test |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3863,6 +3926,12 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 345 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the parts plughost and mfplughost, not strict | passed | 29 minutes, Intel Xeon 6975P-C. 139 pass, none fails, 2 are left out with their reason: the same on the 7.1 line. The first run which looks at the port before and after each error: link status 2011 before the error which is not fatal and 2000 after it, with nothing reset. It is the error injection of the emulator, see "What takes the width of the link" |
 | 346 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 17 minutes, Intel Xeon 6975P-C. 47 pass, 1 is left out. The first run with the drive behind a switch: the VM has it, the guest reads from it, and it is unplugged from the port of the switch (gone after 12 s). The port of the emulated switch has no link width from the start, so the drive is not plugged in again, and the two phases after that had no device. The third: the checklist script took the port in the IOMMU group of the drive for another device, which was the script |
 | 347 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 25 minutes, Intel Xeon 6975P-C. 63 pass, 1 is left out. With the drive behind a switch both errors go as without one: the root port reports, the driver of the drive two ports below is told, VirtualBox takes the drive out of service, and it is put back, also after the kernel reset the whole switch. The link capabilities of the root port are 00300604 before the first error and 00300000 after it: the defect of the emulator, seen. The unplugging after that fails: the port of the switch has a completed command pending since the reset and its kernel does not hear of the request |
-| 348 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 68 pass, 1 is left out (the plugging in, which the port of the emulated switch cannot take). The drive behind a switch: both errors, the reset of the switch after the second, and the unplugging from the port of the switch after the phase cleared what the reset had left pending there. 37 checks in the part |
+| 348 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed | 19 minutes, Intel Xeon 6975P-C. All 68 pass, 1 is left out (the plugging in, which the port of the emulated switch cannot take). The drive behind a switch: both errors, the reset of the switch after the second, and the unplugging from the port of the switch after the phase cleared what the reset had left pending there. 37 checks in the part, the one which is left out among them |
+| 349 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim, not strict | passed | 84 minutes, Intel Xeon 6975P-C. All 411 pass, 3 are left out with their reason. The first run of the simulation with its ten parts, the one with the drive behind a switch among them, and the first of all parts since the phases they share were changed for that one |
+| 350 | `pci-passthrough-hotplug-v1` @ `432ae816` | sim with the part swplughost, not strict | passed | 19 minutes, Intel Xeon 6975P-C. All 68 pass, 1 is left out, as in run 348: the drive behind a switch on the development line |
+| 351 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the part swplughost, not strict | **failed** | 10 minutes, Intel Xeon 6975P-C. Not the simulation, which it did not get to: one test of `tstDevPciVfio` failed, "a state is loaded while the host waits for the device", and passed when it was run again in the same run. A check of the testcase which came too early, see the section of that name |
+| 352 | `pci-passthrough-hotplug-7.1-kvm` @ `68c5b765` | sim with the part swplughost, not strict | passed | 22 minutes, AMD EPYC 7763. The head with the testcase waiting for the slot: the testcase passes, and all 68 checks of the simulation, 1 left out. The drive behind a switch on the 7.1 line |
+| 353 | `pci-passthrough-hotplug-v1` @ `20438da2` | tests | passed | 10 minutes, AMD EPYC 7763. The same change of the testcase on the development line: it builds and `tstDevPciVfio` passes |
+| 354 | `pci-passthrough-hotplug-7.2-kvm` @ `05f1d33a` | tests | passed | 11 minutes, AMD EPYC 9V74. The same change of the testcase on the 7.2 line with the KVM backend, which has it by a merge of the 7.2 line: it builds and `tstDevPciVfio` passes |
 
 Run numbers are those GitHub shows for the `build` workflow.
