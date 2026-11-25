@@ -4881,6 +4881,31 @@ static bool tstSlotWaitForRelease(PTSTVFIODEV pDev, RTMSINTERVAL cMsTimeout)
 
 
 /**
+ * Waits for the slot to tell of no card any more, after the device has let go
+ * of what was in it on a thread of its own.
+ *
+ * That thread lets go of the functions first and tells the port then, so that
+ * nothing of the device can be reached by the time the guest hears of an
+ * empty slot.  For a moment the host has the device and the slot still tells
+ * of a card.
+ *
+ * @returns true if the slot tells of no card, false if the time is up.
+ * @param   cMsTimeout          How long to wait at most.
+ */
+static bool tstSlotWaitForEmpty(RTMSINTERVAL cMsTimeout)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES)
+    {
+        if (RTTimeMilliTS() - msStart >= cMsTimeout)
+            return false;
+        RTThreadSleep(1);
+    }
+    return true;
+}
+
+
+/**
  * Checks that the slot is empty for the guest and that it was told so.
  *
  * @param   uLine               The line of the caller.
@@ -5184,6 +5209,7 @@ static void tstSlotHostRequest(void)
                                           tstVfioKrnlDevGetOpenCount(apDevs[0]), tstVfioKrnlDevGetOpenCount(apDevs[1])));
             if (iVariant == 1)
                 RTTESTI_CHECK_MSG(cMsElapsed >= 300, ("the guest got %RU64 ms only\n", cMsElapsed));
+            RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("the slot tells of a card after the host got the device\n"));
 
             /* The guest was asked where there was a point. */
             bool const fButton = RT_BOOL(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_ATNB);
@@ -5361,7 +5387,7 @@ static void tstSlotAttach(void)
              */
             tstVfioKrnlDevRemove(pDev);
             RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u\n", iVariant));
-            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("variant %u\n", iVariant));
             tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
             RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &Model), VINF_SUCCESS);
             RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
@@ -5373,7 +5399,7 @@ static void tstSlotAttach(void)
                also by a watcher which has seen the one before go. */
             tstVfioKrnlDevRemove(pDev);
             RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u: the second unplugging went unnoticed\n", iVariant));
-            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("variant %u\n", iVariant));
 
             RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
                               ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
@@ -7175,6 +7201,7 @@ static void tstSlotStateHostRequest(void)
                 tstVfioKrnlDevRequest(pDev);
                 RTTESTI_CHECK_MSG(tstSlotGuestLetGoWhenAsked(RT_MS_10SEC), ("the guest was not asked to let go of the device\n"));
                 RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("the host didn't get the device\n"));
+                RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("the slot tells of a card after the host got the device\n"));
                 tstSlotCheckEmpty(__LINE__, pDevInsPort);
             }
             RTTESTI_CHECK(tstVfioKrnlGetViolationCount() == 0);
@@ -7214,6 +7241,7 @@ static void tstSlotHostRequestReset(void)
         tstVfioKrnlDevRequest(pDev);
         RTTESTI_CHECK_MSG(tstSlotGuestLetGoWhenAsked(RT_MS_5SEC), ("the guest was not asked to let go of the device\n"));
         RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("the host didn't get the device\n"));
+        RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("the slot tells of a card after the host got the device\n"));
 
         /* The function was not reset, at most it was tried once, and the bus was left alone. */
         RTTESTI_CHECK_MSG(tstVfioKrnlDevGetResetCount(pDev) == cResetsBefore,
