@@ -109,13 +109,13 @@ which can also be run by itself:
   Thunderbolt being pulled. `tests.sh` runs it last; `HW_SKIP_PLUG=yes` in
   front of that command leaves it out.
 
-The workflow runs both tests in its simulation, with an emulated NVMe drive
-as the device, with a device which has four gigabytes of memory and a ROM,
-and with the graphics adapter an emulator has. The other scripts run there
-as well: the build is fetched as it is published and the first test passes
-with it, and a result is published to a repository made for the run. The
-third test is of 2026-11-25 and has run nowhere yet. On hardware nothing
-here has run yet.
+The workflow runs the three tests in its simulation, with an emulated NVMe
+drive as the device, with two of them at one address, with a device which
+has four gigabytes of memory and a ROM, and with the graphics adapter an
+emulator has, whose driver lets go of the card and takes it again in the
+third test. The other scripts run there as well: the build is fetched as it
+is published and the first test passes with it, and a result is published
+to a repository made for the run. On hardware nothing here has run yet.
 
 ## Where the machine runs Windows
 

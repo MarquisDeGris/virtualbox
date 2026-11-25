@@ -7,7 +7,7 @@ Updated: 2026-11-22
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `20438da2`, 39 commits. The last one is in the testcase only, which waits for the slot to be told that it is empty, in since 2026-11-25, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `2e4e6786`, 42 commits. The last three are of 2026-11-25 and came of a second reading of four commits, see "A second reader for four later commits": the PCI lock where a function goes away for the guest, with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -1843,6 +1843,35 @@ installed first and no test stops for it. Run 299: after the device was
 given back to the host, the one script binds it again, goes through the
 checklist and has both tests pass, 15 and 14 checks.
 
+**A third test, in which the device leaves the guest and comes back**
+(`hw/linux/test-c.sh`, 2026-11-25, run 357). The scripts had a VM
+without an operating system which has the device taken out and put in,
+and a guest whose drivers take the device. What this work is about was
+not among them: a guest whose driver has the device, and the device
+leaving and coming back. The third test is the second one with that
+added, twice: the guest is asked for the device and lets go of it, the
+device is out of the slot and stays with `vfio-pci`, it is put in
+again, and the drivers which had it take it again. The guest tells on
+its serial port, whenever it changes and every five seconds, which
+driver has which function, how many connectors the graphics cards
+behind the port have and on how many of them something is, and what its
+kernel says about the devices meanwhile; the script makes checks of
+that. `tests.sh` runs it last, `HW_SKIP_PLUG=yes` leaves it out.
+
+Run 357 (`sim` with the four parts which run these scripts,
+`pci-passthrough-hotplug-7.2-kvm` @ `05f1d33a`, 67 minutes, AMD EPYC
+9V74): all 215 checks pass. The third test passes with the drive (25
+checks; the driver `nvme` has it again), with the device of two
+functions (27), with the device of four gigabytes which no driver takes
+(26, and the same once more from `tests.sh`), and with the graphics
+adapter of the emulator (31): its driver, `bochs-drm`, lets go of the
+card and takes it again with its connector and what is on it, two to
+three seconds after the card was put in. The guest lets go five to
+eight seconds after it was asked, five of which its kernel waits after
+the attention button. What this is not: a real graphics card, whose
+driver has more to give up and to set up again than that one, and a
+cable which is pulled, as the device stays where it is on the host.
+
 Not tried: anything on a machine with real hardware and with the
 graphics card of one; a device which a driver of the host takes back,
 as the simulated host has none for its device; publishing to the fork
@@ -2574,6 +2603,140 @@ run of their own for it: their commit is what the lines with the
 backend have, which were run. The build for a machine with real
 hardware stays the one of `585a8166`: the head after it differs in the
 testcase only, and hw/README.md says so.
+
+### A second reader for four later commits (2026-11-25)
+
+The decision of 2026-11-13 has unbuilt code read by somebody who did
+not write it, and the one of 2026-11-22 had the INTx change read that
+way before it went to the branches. Four commits written in between
+and after had no such reader: `dd43ddf3` (a device on its way out is
+not reported as failing), `432ae816` (a function which is out of
+service is not asked for its config space), `20fd927d` (TM, an EMT
+which missed the notification of the timer) and `f563e7f8` (I/O APIC,
+level-triggered interrupts after a saved state was loaded with KVM).
+Two readers got them on 2026-11-25, the two about the device and the
+two others, with the code and without what the writer thinks of it.
+Every point was checked against the code before anything was changed.
+
+**What was wrong, and is changed.** When a function goes out of
+service, an EMT clears the decode bits of its command register, which
+removes the guest mappings of the BARs, and makes the function go away
+for the guest (`pciVfioFunGoneOnEmt`). It did that with the lock of the
+slot and without the PCI lock, which an EMT holds while it is in a
+write of the guest to the config space. Such a write can be past the
+check for a function which is out of service when the function goes,
+and it changes the command register and the mappings too. So two EMTs
+could be at the mappings of a function at the same time, and a write
+which enables decoding could come after the other EMT had looked at
+the command register: the memory which stands in for the BARs of a
+function that is gone stayed mapped then, until a reset of the VM. The
+code is older than the two commits which were read; it is where the
+first of them says "while this was on its way". A device in the
+hot-plug capable slot was not affected, as the slot is emptied with
+its lock held and its link is down before an EMT gets there; a device
+which is in the VM for good was. It takes the host taking the device
+back, or an error of the device, in the same moment as a write of the
+guest on another CPU. `pciVfioFunGoneOnEmt` takes the PCI lock now,
+after the lock of the slot, the order the device has everywhere else.
+
+A new test (`tstRemovalWhileWriting`, 58 tests) has a write of the
+guest on its way to the device when the host takes the device back,
+once to the command register and once to a register which is passed
+through, and another thread playing a second EMT which gets around to
+what is left to do: it has to wait for the write, and afterwards the
+function is gone for the guest with nothing of it mapped.
+
+**What was said and is not so, and is said differently now.**
+
+- The two commits about the device kept three kinds of access from
+  being reported as failing when the function went out of service in
+  that moment. Others still were: the interrupt setup ("expect a
+  broken device"), a write to the MSI or MSI-X control register, and
+  an access to a BAR or to the legacy VGA ranges through the device
+  file. They look at the function first now. Three of these lines had
+  no limit and have one of 64 now.
+- The log said of a reset which the host refuses because it is busy
+  with the device: "The host resets it when it is let go of". Nothing
+  in the device knows that, a host is busy with a device for other
+  reasons than waiting for it, and the reader recalls the kernel not
+  resetting a device which it cannot lock when it is let go of either.
+  The line ends "It keeps its state apart from being disabled" now.
+  Not changed: the reset is not tried a second time. What holds the
+  lock of a device for a moment is rare, and what holds it longest
+  besides the unbinding is the kernel recovering from an error of the
+  device, which resets it anyway.
+- "What is kept of the register" which the guest reads of a function
+  on its way out is nothing for a register which is passed through:
+  most read as zero, as they did when the read failed. The comment
+  says so now.
+- TM: the comment and the commit message named one way for
+  `VMCPU_FF_TIMER` to be set without the EMT getting to know, a poke
+  which comes too early. There is a second, and it is no race: with
+  the KVM backend of upstream every EMT polls the timers before it
+  enters the guest, and one which is not the EMT for the timers and
+  finds a timer expired sets the flag and notifies nobody
+  (`tmTimerPollInternal`). Before `20fd927d` nothing served that until
+  the EMT left the guest for another reason; since then the
+  notification of that commit does, one to two ticks (10 to 20
+  milliseconds) after the flag was set, where a timer is served within
+  one tick otherwise. The backend of Cyberus Technology, which the
+  branches for use have, does not poll that way and has a timer of its
+  own for the next deadline. The comment and the log line are
+  corrected. Not changed: notifying at the first tick already would
+  halve that delay on the backend of upstream; it is a change to the
+  timer code which wants runs of its own with guests of several CPUs,
+  and is noted under "Next".
+- I/O APIC: the comment said the interrupt was the last one "until the
+  guest writes the entry anew". A write of the guest keeps the remote
+  IRR bit; an EOI or a reset clears it. And a state which was saved
+  from a VM that already had the bit stuck, by a build before
+  `f563e7f8`, loads with the bit stuck: the load cannot tell it from an
+  interrupt in service. Such a VM gets the pin back with a reset. The
+  comment says both now.
+
+**What the readers found in order**, among other things: the order in
+which a function goes out of service (the flag before the descriptor
+is replaced, both under the lock of the slot), that the stand-in never
+answers the way a busy host does, that nothing uninitialised or out of
+bounds is read for a function which is gone, the order of the locks,
+that the saved state of the I/O APIC is unchanged in format and that
+no interrupt is delivered twice by the load, that the new member of TM
+has one writer, and that neither change reaches other hosts or other
+execution engines.
+
+**Not looked into**: a reader suspects that the EOI of a
+level-triggered interrupt can get lost after a load with another
+execution engine of upstream as well, where a table which says which
+EOIs to pass on is not rebuilt. That is not this work and was not
+checked.
+
+**What the tests do not show**, as the readers say and as is so: no
+test looks at the log, so the changes to what is logged can be taken
+out with every test passing.
+
+**Runs.** Run 358 (`scratch/red-evidence-19` @ `c365019f`, the new test
+without the change to the device, expected to fail): the check the test
+is about fails in both of its variants. Two more checks of the test as
+it was then failed too, and wrongly: they expected one access to what
+stands in for the device, and there is none, as the fake kernel tells of
+a write after it has taken it. They are not in the test any more; the
+test as it is was not run against the device without the change. Run
+359 (`sanitize` on the head of the development line, `2e4e6786`): the 58
+tests and the three random tests pass, and no sanitizer has a report.
+Run 360 (`tests` on `pci-passthrough-hotplug-7.1-kvm` @ `625a36ed`):
+they pass there.
+
+The heads are `pci-passthrough-hotplug-v1` @ `2e4e6786` (three commits
+more), `-7.2` @ `1bccc3ab`, `-7.2-kvm` @ `572356d1`, `-7.1` @ `296c0002`
+and `-7.1-kvm` @ `625a36ed`. The 7.2 line has the comment in TM and not
+the one in the I/O APIC, whose change it does not have; the 7.1 line has
+neither of the two changes and so the two commits about the device
+only. Not run: the development line without the sanitizers, and the two
+lines without the KVM backend by themselves. The simulation on the new
+head of the 7.2 line with the backend is run 361, and a build of that
+head for a machine with real hardware is run 362; both were under way
+when this was written, and until the second is published the build
+which is fetched there is the one of `585a8166`, without the lock.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3506,6 +3669,15 @@ harness since WP5, saved states since the fourth part of WP6.
    The commit which has the testcase wait for the slot is on all five
    branches (runs 352 to 354). Nothing of this is left for the
    simulation; the plugging in after an error is for the hardware.
+7a. From the second reading of 2026-11-25, see "A second reader for
+   four later commits": the device waits with the PCI lock where a
+   function goes away for the guest, on all five branches. Left, and not
+   urgent: with the KVM backend of upstream, the EMT for the timers
+   could be notified at the first tick at which the flag is found set
+   and not at the second, which halves a delay of 10 to 20 milliseconds
+   for timers another EMT found expired. That is a change to the timer
+   code and wants runs with guests of several CPUs on that backend; the
+   branches for use have another backend, which does not go that way.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3649,6 +3821,12 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-25 | The part with the drive behind a switch is one a run of the simulation has by default | Run 348: it passes, in under five minutes. It is the only part in which the port which reports an error is not the one the device is in, a switch is reset with the device behind it, and the device is two buses down |
 | 2026-11-25 | The testcase waits for the slot to be told that it is empty; the device keeps its order, letting go of the functions before the port is told | Run 351: the other order would have a guest hear of an empty slot while something of the device can still be reached. What failed was a check which took the two for one moment |
 | 2026-11-25 | No new build for a machine with real hardware for that commit | It changes the testcase only; the build of `585a8166` is what the head has, but for the test |
+| 2026-11-25 | The four commits which were written after the review round and had no reader who had not written them get one each, and every point is checked against the code before anything is changed | The decisions of 2026-11-13 and 2026-11-22 were kept for the INTx change and not for these four; two of them are in the device a guest talks to |
+| 2026-11-25 | `pciVfioFunGoneOnEmt` takes the PCI lock, after the lock of the slot; a test comes with it which fails without it | A reader found it changing the command register and the mappings of the BARs while another EMT can be in a write of the guest which does the same. The order of the two locks is the one the device has elsewhere |
+| 2026-11-25 | A reset which the host refuses because it is busy with the device is not tried again; the log no longer says that the host resets the device later | What holds the lock of a device for a moment only is rare, and the unbinding and the recovery from an error hold it for longer than a second try would wait. Whether the host resets a device it gets back is its matter and was never looked at here |
+| 2026-11-25 | The EMT for the timers is still notified again at the second tick and not at the first | It would halve a delay which only the KVM backend of upstream has, in code every VM with that backend runs through; that wants runs of its own. Noted under "Next" |
+| 2026-11-25 | The scripts for a machine with real hardware get a third test, in which the device leaves the guest and comes back while a driver of the guest has it; the one script for all runs it last | It is what the work is for, and no script did it with a guest whose driver has the device. Last, as a driver which does not take being left may leave the card in a state the other tests would trip over |
+| 2026-11-25 | A new build for a machine with real hardware, of the head with the lock | The one which is published does not have it, and a machine there may have its device in the VM for good |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -3955,5 +4133,9 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 354 | `pci-passthrough-hotplug-7.2-kvm` @ `05f1d33a` | tests | passed | 11 minutes, AMD EPYC 9V74. The same change of the testcase on the 7.2 line with the KVM backend, which has it by a merge of the 7.2 line: it builds and `tstDevPciVfio` passes |
 | 355 | `pci-passthrough-hotplug-v1` @ `20438da2` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the testcase waiting for the slot: the 57 tests and the three random tests in full length pass with the sanitizers, no report |
 | 356 | `fix/doc-modifymedium-compact` @ `5476f2d7` | tests | passed | 5 minutes, AMD EPYC 7763. The correction of the text about `modifymedium --compact` (report 996 of the upstream tracker): it builds, and the help of `VBoxManage` has the corrected text, which a new command line check looks at |
+| 357 | `pci-passthrough-hotplug-7.2-kvm` @ `05f1d33a` | sim with the parts simhost, mfhost, barhost and vgahost, not strict | passed | 67 minutes, AMD EPYC 9V74. All 215 pass. The first run with the third script for a machine with real hardware, in which the device leaves the guest and comes back while a driver of the guest has it: it passes with the drive (25 checks), with the device of two functions (27), with the device of four gigabytes (26, and once more from the one script for all) and with the graphics adapter of the emulator (31), whose driver takes the card again with its connector. See "Machines with real hardware" |
+| 358 | `scratch/red-evidence-19` @ `c365019f` | tests, testcase expected to fail | failed as intended | 10 minutes, AMD EPYC 7763. The test for a function which is taken back during a write of the guest to its config space, against the device without the PCI lock at that place: the check it is about fails in both variants. Two more checks failed which expected an access that does not happen; they were taken out of the test afterwards. See "A second reader for four later commits" |
+| 359 | `pci-passthrough-hotplug-v1` @ `2e4e6786` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the three commits which came of the second reading: the 58 tests and the three random tests pass with the sanitizers, without a report |
+| 360 | `pci-passthrough-hotplug-7.1-kvm` @ `625a36ed` | tests | passed | 12 minutes, Intel Xeon 6975P-C. The two commits about the device on the 7.1 line with the KVM backend, which has them by a merge of the 7.1 line: it builds and `tstDevPciVfio` passes with its 58 tests |
 
 Run numbers are those GitHub shows for the `build` workflow.
