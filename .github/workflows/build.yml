@@ -726,6 +726,25 @@ jobs:
               firmwaresetup --disable
           fi
 
+          # modifymedium: what the help says about --compact.  The help of
+          # VBoxManage is made from the text of the manual, so a correction
+          # of that text is seen here.
+          if ! grep -q 'non-VDI' doc/manual/en_US/man_VBoxManage-modifymedium.xml 2> /dev/null; then
+            echo "CLI: the help of modifymedium is as it was in this tree, which is not checked"
+          else
+            # Here for the first time: tried.
+            kind=tried
+            { vbm modifymedium --help; vbm help modifymedium; } > cli-help.log 2>&1 || true
+            echo "+ VBoxManage modifymedium --help, VBoxManage help modifymedium -> $(grep -c '' cli-help.log) lines"
+            grep -n -E 'non-V|ext[234]' cli-help.log | head -n 6 | cut -c1-200 | sed 's/^/    /'
+            if grep -q 'non-VDI' cli-help.log && grep -q 'ext4' cli-help.log && ! grep -q 'non-VID' cli-help.log; then
+              result $kind "the help of modifymedium names VDI and ext4 where it is about --compact" ok
+            else
+              result $kind "the help of modifymedium names VDI and ext4 where it is about --compact" failed \
+                "$(grep -c 'compact' cli-help.log) lines of the help have compact in them"
+            fi
+          fi
+
           vbm unregistervm cli --delete > /dev/null 2>&1 || true
           # VBoxSVC ends by itself when nothing uses it any more; nobody waits for that here.
           pkill -x VBoxSVC 2> /dev/null || true
