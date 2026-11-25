@@ -5443,11 +5443,19 @@ static int pciVfioSaveCheck(PPDMDEVINS pDevIns, bool fFinal)
      */
     int rc = RTCritSectEnter(&pThis->CritSectSlot);
     AssertRCReturn(rc, rc);
-    if (!pciVfioSlotIsEmptyForState(pThis))
-        rc = pciVfioRefuseSavingState(pDevIns);
-    else if (fFinal)
+    bool const fEmpty = pciVfioSlotIsEmptyForState(pThis);
+    if (fEmpty && fFinal)
         pciVfioSlotEmptyComplete(pThis);
     RTCritSectLeave(&pThis->CritSectSlot);
+
+    /*
+     * Refusing tells the VM, and a thread which is no EMT has an EMT do that and
+     * waits for it, which is how this is called while the VM keeps running.  The
+     * EMT may have something of this device to do first which takes the lock of
+     * the slot, so the lock is not held here.
+     */
+    if (!fEmpty)
+        rc = pciVfioRefuseSavingState(pDevIns);
     return rc;
 }
 
