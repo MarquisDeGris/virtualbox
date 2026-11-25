@@ -134,8 +134,8 @@
               <listitem><para>
                   <emphasis role="bold">Linux guests.</emphasis> Use the
                   <command>zerofree</command> utility, which supports
-                  <literal>ext2</literal> and <literal>ext3</literal>
-                  file systems.
+                  <literal>ext2</literal>, <literal>ext3</literal> and
+                  <literal>ext4</literal> file systems.
                 </para></listitem>
               <listitem><para>
                   <emphasis role="bold">Mac OS X guests.</emphasis> Use
@@ -145,7 +145,7 @@
             </itemizedlist>
           </note><para>
             Note that you can only use this option to compress VDI
-            images. To compress non-VID images, you can zero out free
+            images. To compress non-VDI images, you can zero out free
             blocks and then clone the disk to any other dynamically
             allocated format.
           </para></listitem>
