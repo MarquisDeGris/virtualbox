@@ -2361,11 +2361,15 @@ static DECLCALLBACK(void) tmR3TimerCallback(PRTTIMER pTimer, void *pvUser, uint6
      * With KVM the EMT is notified by poking its thread, which gets it out of
      * KVM_RUN.  A poke which arrives after the EMT has checked the forced
      * action flags and before it has entered KVM_RUN gets it out of nothing,
-     * and nobody notifies it a second time as long as the flag is set.  A
-     * guest which waits for one of our timers with all its CPUs halted in the
-     * kernel would then wait for good.  So notify the EMT again when the flag
-     * has been pending for a whole interval of this timer and the EMT is
-     * where it would not get to see it by itself.
+     * and nobody notifies it a second time as long as the flag is set.  The
+     * flag is also set without any notification: by another EMT which finds
+     * a timer expired when it polls, see tmTimerPollInternal().  A guest
+     * which waits for one of our timers with all its CPUs halted in the
+     * kernel would wait for good in both cases.  So notify the EMT when the
+     * flag is set at two ticks of this timer in a row and the EMT is where it
+     * would not get to see the flag by itself.  That is between one and two
+     * intervals after the flag was set, later than a timer is served
+     * otherwise.  Whether the flag stayed set in between is not known here.
      */
     if (!VMCPU_FF_IS_SET(pVCpuDst, VMCPU_FF_TIMER))
         pVM->tm.s.fTimerFFSeenPending = false;
@@ -2374,7 +2378,7 @@ static DECLCALLBACK(void) tmR3TimerCallback(PRTTIMER pTimer, void *pvUser, uint6
     else if (VMCPU_GET_STATE(pVCpuDst) == VMCPUSTATE_STARTED_EXEC_NEM_WAIT)
     {
         VMR3NotifyCpuFFU(pVCpuDst->pUVCpu, VMNOTIFYFF_FLAGS_DONE_REM | VMNOTIFYFF_FLAGS_POKE);
-        LogRelMax(64, ("TM: VMCPU_FF_TIMER pending for more than %u ms while EMT %u executes the guest, notified it again\n",
+        LogRelMax(64, ("TM: VMCPU_FF_TIMER set at two ticks in a row, %u ms apart, while EMT %u executes the guest, notified it\n",
                        pVM->tm.s.u32TimerMillies, pVCpuDst->idCpu));
     }
 #endif
