@@ -1136,6 +1136,33 @@ port_link_has_width()
     [ $(( (16#$v >> 4) & 63 )) != 0 ]
 }
 
+# A port which has a command to its slot completed and pending, with nobody
+# having taken note of it (bit 4 of its slot status), has that bit cleared.
+# Seen in run 347 with the port of the emulated switch, after the kernel had
+# reset everything below the root port for an error it took for fatal: slot
+# status 0050 from then on, and not a word from the kernel when the port was
+# told that its device is to be unplugged, for three minutes.  What is taken
+# to be behind it: the kernel puts the registers of the port back after the
+# reset, the slot control among them, which is a command to the slot; the
+# emulator notes it as completed while the interrupt of the port is not on
+# again; and it tells of an event of the slot only when none was pending
+# before, so the kernel hears of none after that.  Clearing the bit is what
+# the kernel does when it hears of a completed command.  A port which does
+# not tell of completed commands at all, as many real ones do not, has no
+# such bit to be left with.  Nothing of this is VirtualBox.
+port_take_note()
+{
+    local port=$HOST_PORT v
+    [ -n "$port" ] || return 0
+    v=$(setpci -s "$port" CAP_EXP+1a.w 2> /dev/null) || return 0
+    [ -n "$v" ] || return 0
+    if [ $(( 16#$v & 16 )) != 0 ]; then
+        echo "    the port $port has a completed command pending which its kernel took no note of (slot status $v, slot control $(setpci -s "$port" CAP_EXP+18.w 2> /dev/null || echo '?')): cleared here"
+        setpci -s "$port" CAP_EXP+1a.w=0010 2> /dev/null
+        echo "    the port $port after that: slot status $(setpci -s "$port" CAP_EXP+1a.w 2> /dev/null || echo '?')"
+    fi
+}
+
 # Whether the host has a function of the device, and whether it has them all.
 host_has_any()
 {
@@ -1193,6 +1220,7 @@ phase_hostplug()
         serial_mark
         dmesg -C 2> /dev/null
         port_says "with the device in the VM"
+        port_take_note
         echo "+ the device is unplugged from the host"
         t0=$(date +%s)
         if host_request unplug; then

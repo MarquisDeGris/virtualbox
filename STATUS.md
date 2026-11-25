@@ -2428,10 +2428,10 @@ on. A port of the emulator tells of its link, each time it is asked,
 as what the device behind it tells, limited to its own capabilities
 (`pcie_sync_bridge_lnk` in `hw/pci/pcie.c`): no speed and no width,
 with whatever device. The current source of the emulator writes 16
-bits. This much is read and not seen: the phases show the link
-capabilities of the port since run 346, which has them for a root port
-nothing was done to (00300604: the speed and the width are in the
-lower half), and no run has shown them after an error yet.
+bits. And it is seen, since the phases show the link capabilities of
+the port (run 347): 00300604 for the root port before the first error,
+with the speed and the width in the lower half, and 00300000 after it,
+the link status going from 2011 to 2000 with that.
 
 **A part with a switch** (`swplughost`, 2026-11-25). The machine has a
 root port, the two ports of a switch behind it, and the drive in the
@@ -2460,7 +2460,30 @@ since: an error which the root port reports, with a switch between it
 and the device, and the reset of all of that after the error which the
 kernel takes for fatal.
 
-The third check which failed is one of the checklist script of
+**Run 347** (the same day, the part with the errors first, 25 minutes,
+Intel Xeon 6975P-C; 63 checks pass, 3 fail, 1 is left out). The error
+phase passes with the switch, all of it. The root port reports the
+error, the kernel tells the driver of the drive two ports below, and
+VirtualBox takes the drive out of service in the same second; the
+guest finds its slot empty, the VM runs on, `plugpci` puts the drive
+back and the guest reads from it. With the error the kernel takes for
+fatal it resets everything below the root port, the switch with it,
+calls its recovery successful, and the drive is put back and read from
+after that as well. The checklist script finds nothing missing and has
+its line about the port.
+
+The three which fail are the unplugging after that and what follows
+from it: the port of the switch is told that the drive is to go, and
+the kernel of the host does nothing, for three minutes. That port has
+slot status 0050 since the reset, a completed command pending which
+nobody took note of, where it had 0040 before. So it is the host, the
+kernel and the emulated port between them, and not VirtualBox, which
+is not asked anything. What is taken to be behind it is with the
+function `port_take_note` in `sim/vbox-phases.sh`; the phase clears
+that bit before it unplugs since, and says so where it does. Whether
+that is all there is to it, the next run tells.
+
+The third check which failed in run 346 is one of the checklist script of
 INSTALL.md, and it was the script which was wrong. The port of this
 switch has no access control services, so the kernel has the port and
 the drive in one IOMMU group, and the script called that a group with
@@ -3385,9 +3408,12 @@ harness since WP5, saved states since the fourth part of WP6.
    on all three lines (runs 342, 344 and 345). A device which is
    plugged in again after an error is left for the hardware: no port
    of the emulator the runner has takes one then (runs 345 and 346).
-   The part with the drive behind a switch (`swplughost`) has run once
-   (run 346) and goes through the errors and the unplugging since;
-   that order has its first run to come.
+   The part with the drive behind a switch (`swplughost`) has run
+   twice (runs 346 and 347): the errors pass with a switch, the
+   unplugging after them does not yet, for what the port of the
+   emulated switch is left with after a reset. A run with that taken
+   care of is to come; after it the part becomes a default one or is
+   cut down to what passes.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3822,5 +3848,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 344 | `pci-passthrough-hotplug-v1` @ `432ae816` | sim with the parts plughost and mfplughost, not strict | passed | 27 minutes, AMD EPYC 9V74. 139 pass, none fails, 2 are left out with their reason, as in run 342: the device is unplugged from the host and plugged in again, with the drive and with the device of two functions, on the development line |
 | 345 | `pci-passthrough-hotplug-7.1-kvm` @ `656e0e59` | sim with the parts plughost and mfplughost, not strict | passed | 29 minutes, Intel Xeon 6975P-C. 139 pass, none fails, 2 are left out with their reason: the same on the 7.1 line. The first run which looks at the port before and after each error: link status 2011 before the error which is not fatal and 2000 after it, with nothing reset. It is the error injection of the emulator, see "What takes the width of the link" |
 | 346 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 17 minutes, Intel Xeon 6975P-C. 47 pass, 1 is left out. The first run with the drive behind a switch: the VM has it, the guest reads from it, and it is unplugged from the port of the switch (gone after 12 s). The port of the emulated switch has no link width from the start, so the drive is not plugged in again, and the two phases after that had no device. The third: the checklist script took the port in the IOMMU group of the drive for another device, which was the script |
+| 347 | `pci-passthrough-hotplug-7.2-kvm` @ `585a8166` | sim with the part swplughost, exploring | passed (3 checks of the simulation fail) | 25 minutes, Intel Xeon 6975P-C. 63 pass, 1 is left out. With the drive behind a switch both errors go as without one: the root port reports, the driver of the drive two ports below is told, VirtualBox takes the drive out of service, and it is put back, also after the kernel reset the whole switch. The link capabilities of the root port are 00300604 before the first error and 00300000 after it: the defect of the emulator, seen. The unplugging after that fails: the port of the switch has a completed command pending since the reset and its kernel does not hear of the request |
 
 Run numbers are those GitHub shows for the `build` workflow.
