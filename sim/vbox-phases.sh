@@ -1528,6 +1528,103 @@ phase_intx()
 }
 
 
+# The same guest, which uses neither MSI nor MSI-X, with the device in the
+# hot-plug capable slot.  The interrupt of the drive is INTx and goes through
+# the port of the slot, and the port has no MSI for telling the guest of its
+# slot either.  What the other phases do with the slot is done here once
+# with that: the guest is asked for the device and lets go of it, the device
+# is put in again, and a snapshot for which the VM keeps running is refused.
+# That last one is where a VM could stand still: an INTx interrupt is work
+# for an EMT, and the thread which refuses waits for an EMT.
+phase_intxslot()
+{
+    PHASE=intxslot
+    local what="a guest which does not use MSI boots with the device in the hot-plug capable slot"
+    reset_vm
+    if [ ! -s "${GUEST_RAW_NOMSI:-}" ]; then
+        stage "$what" skipped "there is no disk for such a guest"
+        return
+    fi
+    if ! grep -a -q 'Asking the device for its next interrupt' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
+        stage "$what" skipped "this build passes the first INTx interrupt of a function on and no more"
+        return
+    fi
+    bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
+    [ -s "$SIM_WORK/guest-nomsi.vdi" ] || run convertfromraw "$GUEST_RAW_NOMSI" "$SIM_WORK/guest-nomsi.vdi" --format VDI
+    if ! run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest-nomsi.vdi"; then
+        stage "$what" FAILED "no disk"
+        run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+        return
+    fi
+    run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    if boot "$what"; then
+        local irq bad t0
+        guest_reads 1 "guest: reads from the drive in the slot, whose interrupt is INTx"
+        wait_serial 'GUEST: (IRQ|NODRIVE) 1' 60
+        serial_show 'GUEST: (pci: 0000:01|PRESENT|READ|IRQ|NODRIVE)|pciehp' 12
+        irq=$(serial_new | grep -a 'GUEST: IRQ 1 ' | head -n 1 | sed -e 's/^.*lines: *//' -e 's/^\(.\{0,70\}\).*/\1/')
+        if serial_has 'GUEST: IRQ 1 .*IO-APIC[^|]*nvme' && ! serial_has 'GUEST: IRQ 1 .*PCI-MSI'; then
+            stage "guest: the interrupt of the drive in the slot is at the I/O APIC, not MSI or MSI-X" ok "$irq"
+        else
+            stage "guest: the interrupt of the drive in the slot is at the I/O APIC, not MSI or MSI-X" FAILED "$irq"
+        fi
+        check_pcistate hotplug,present,inuse
+
+        # The live snapshot, as in the phase with the slot.
+        if VBM_TIMEOUT=120 run snapshot "$VM" take refused-live --live; then
+            stage "a live snapshot with the device in the slot is refused" FAILED "it was taken"
+        else
+            stage "a live snapshot with the device in the slot is refused" ok
+        fi
+        sleep 3
+        [ "$(vmstate)" = paused ] && run controlvm "$VM" resume
+        guest_goes_on "the VM runs on after the live snapshot was refused" 60
+
+        # Out with the guest asked, and in again.
+        serial_mark
+        t0=$(date +%s)
+        if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
+            stage "unplugpci: the guest is asked and lets go of the device" ok "$(( $(date +%s) - t0 )) s"
+        else
+            stage "unplugpci: the guest is asked and lets go of the device" FAILED
+            diag
+        fi
+        if wait_serial 'GUEST: GONE 1' 30; then
+            stage "guest: the drive is gone" ok
+        else
+            stage "guest: the drive is gone" FAILED
+        fi
+        serial_show 'pciehp|GUEST: GONE' 10
+        serial_mark
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci puts the device into the slot" ok
+        else
+            stage "plugpci puts the device into the slot" FAILED
+            diag
+        fi
+        guest_reads 2 "guest: takes the device in the slot and reads from the drive, with INTx again"
+        serial_show 'pciehp|GUEST: (PRESENT|READ)' 10
+
+        bad=$(tr -d '\r' < "$SERIAL" 2> /dev/null | grep -a -c -E 'nobody cared|Disabling IRQ|completion polled|I/O [^ ]+ .*timeout')
+        if [ "${bad:-0}" = 0 ]; then
+            stage "guest: no interrupt of the drive went missing, and none came which nobody answered for" ok
+        else
+            stage "guest: no interrupt of the drive went missing, and none came which nobody answered for" FAILED "$bad line(s) of its kernel"
+            tr -d '\r' < "$SERIAL" | grep -a -E 'nobody cared|Disabling IRQ|completion polled|timeout' | head -n 6 | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
+        fi
+        check_log_quiet
+    fi
+    end_phase
+    if vbm showvminfo "$VM" --machinereadable 2> /dev/null | grep -a -q '^SnapshotName'; then
+        settle
+        VBM_TIMEOUT=300 run snapshot "$VM" delete refused-live
+    fi
+    settle
+    run storageattach "$VM" --storagectl sata --port 0 --device 0 --type hdd --medium "$SIM_WORK/guest.vdi"
+}
+
+
 # A VM with 3D acceleration.  Nothing of the passthrough is in it: the
 # graphics adapter of the VM gets the backend which renders with the graphics
 # card of the host, or with what the host has in the place of one (a runner
@@ -2186,6 +2283,7 @@ if setup; then
             hostplug-again) phase_hostplug hostplug-again ;;
             startempty)  phase_startempty ;;
             intx)        phase_intx ;;
+            intxslot)    phase_intxslot ;;
             mfpassthrough) phase_mfpassthrough ;;
             mfhotplug)     phase_mfhotplug ;;
             mfstartempty)  phase_mfstartempty ;;

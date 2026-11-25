@@ -772,7 +772,7 @@ if has_part simhost; then
     note "Part 2: VirtualBox in a virtual machine with an IOMMU and a PCIe device"
     if part_simhost_prepare; then
         # 12 minutes in run 224, 26 in run 231 with two VMs out of six slow.
-        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove,intx 600 5 5400
+        run_simhost simhost plain,passthrough,hotplug,startempty,hostremove,intx,intxslot 600 5 5400
 
         if grep -q 'written by the guest' "$WORK/nvme.img"; then
             stage "what the guest wrote is on the drive of the simulated host" ok \
