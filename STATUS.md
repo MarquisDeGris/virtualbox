@@ -2557,7 +2557,10 @@ with the KVM backend (`68c5b765`). **Run 352** (see "The other two
 lines" above) has the testcase pass on that head and the simulation
 after it; **run 353** (`tests`, `pci-passthrough-hotplug-v1` @
 `20438da2`, 10 minutes, AMD EPYC 7763) has it pass on the development
-line. A test which fails once in some hundreds of runs is not shown
+line, and **run 355** (`sanitize` on the same head, 11 minutes, Intel
+Xeon 6975P-C) with the sanitizers, which have nothing to report, and
+with the three random tests in full length. A test which fails once in
+some hundreds of runs is not shown
 gone by two which pass; what is shown is that the change builds and
 that the tests pass with it. The 7.2 line has the same commit since
 run 349 was done, which ran on the head before it (`7af415e3`), and
@@ -3933,5 +3936,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 352 | `pci-passthrough-hotplug-7.1-kvm` @ `68c5b765` | sim with the part swplughost, not strict | passed | 22 minutes, AMD EPYC 7763. The head with the testcase waiting for the slot: the testcase passes, and all 68 checks of the simulation, 1 left out. The drive behind a switch on the 7.1 line |
 | 353 | `pci-passthrough-hotplug-v1` @ `20438da2` | tests | passed | 10 minutes, AMD EPYC 7763. The same change of the testcase on the development line: it builds and `tstDevPciVfio` passes |
 | 354 | `pci-passthrough-hotplug-7.2-kvm` @ `05f1d33a` | tests | passed | 11 minutes, AMD EPYC 9V74. The same change of the testcase on the 7.2 line with the KVM backend, which has it by a merge of the 7.2 line: it builds and `tstDevPciVfio` passes |
+| 355 | `pci-passthrough-hotplug-v1` @ `20438da2` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the testcase waiting for the slot: the 57 tests and the three random tests in full length pass with the sanitizers, no report |
 
 Run numbers are those GitHub shows for the `build` workflow.
