@@ -2838,8 +2838,13 @@ The simulation had no snapshot for which the VM keeps running: the
 one it asks for with the device in the VM has the VM paused first, and
 that is refused on an EMT. Its part with the device in the slot asks
 for a live one as well now, which has to be refused with nothing of it
-left and the VM running on. That step had not run when this was
-written.
+left and the VM running on. Run 368 (`sim` with the part simhost, not
+strict, `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981`, 39 minutes,
+AMD EPYC 7763) is its first run: the live snapshot is refused, the VM
+has no snapshot afterwards and runs on, and all 114 checks of the run
+pass. The drive of the simulation uses MSI-X there, so no EMT has work
+of the device in that moment; what the run shows is the way through
+the VMM which the test has a stand-in for.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3934,6 +3939,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-25 | The commits which came of the second reading get a reader too, after the fact for the first three and before it goes to the branches for the fourth | They had gone to the branches without one, which the decisions of 2026-11-13 and 2026-11-22 do not allow for either. From here on no commit to the device or to the VMM goes to a branch of a merge request unread |
 | 2026-11-25 | `pciVfioSaveCheck` lets go of the lock of the slot before the VM is told that its state cannot be saved; a test comes with it which fails without it | The thread which saves a live state waits for an EMT to do the telling, and an EMT with work of the device waits for that lock: found by the reader of the change before |
 | 2026-11-25 | A second new build for a machine with real hardware on one day | The one of run 362 has the PCI lock and not this; a build which stands still at a live snapshot is not one to hand out when the next is twelve minutes away |
+| 2026-11-25 | The simulation asks for a live snapshot with the device in the slot | The snapshot it had pauses the VM first and is refused on an EMT; the live one is refused by the thread which saves, which is where the VM could stand still |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4251,5 +4257,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 365 | `pci-passthrough-hotplug-7.1-kvm` @ `4220a8d5` | tests | passed | 13 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend: it builds and `tstDevPciVfio` passes with its 59 tests |
 | 366 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | package, built with 3D acceleration | passed | 16 minutes, AMD EPYC 9V74. The package `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB, of the head with both changes of the day: the testcase passes in the run with its 59 tests, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched |
 | 367 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the parts runner, simhost and barhost, strict | passed | 49 minutes, AMD EPYC 9V74. All 130 pass. The simulation on the head with both changes of the day, and the first run which fetches the package of run 366: the script gets the file which is listed, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
+| 368 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the part simhost, not strict | passed | 39 minutes, AMD EPYC 7763. All 114 pass. The first run in which the part with the device in the slot asks for a snapshot for which the VM is not paused: it is refused, nothing of it is left, and the VM runs on |
 
 Run numbers are those GitHub shows for the `build` workflow.
