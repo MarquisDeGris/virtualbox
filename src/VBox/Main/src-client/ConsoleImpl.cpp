@@ -8404,8 +8404,21 @@ HRESULT Console::i_addVMCaller(bool aQuiet /* = false */,
  */
 void Console::i_releaseVMCaller()
 {
+    /*
+     * Whoever got to count up counts down again, whatever has become of this
+     * object meanwhile.  uninit() lets nobody else become a caller of the
+     * object from its start on, waits for the callers there are, and powers
+     * the VM down then, which waits for this count to reach zero.  Somebody who
+     * held on to the VM when uninit() started is no caller of the object here
+     * any more, and giving up for that left the count where it was and
+     * i_powerDown() waiting for good.  That takes a method which holds on to the
+     * VM for a while, and Console::unplugHostPCIDevice() does for as long as the
+     * guest is given.  The object is there: from the start of uninit() on nobody
+     * else gets to hold on to the VM, and uninit() does not get past
+     * i_powerDown() while somebody does.
+     */
     AutoCaller autoCaller(this);
-    AssertComRCReturnVoid(autoCaller.hrc());
+    Assert(SUCCEEDED(autoCaller.hrc()) || getObjectState().getState() == ObjectState::InUninit);
 
     AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
 
