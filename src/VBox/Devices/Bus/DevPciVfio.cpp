@@ -884,8 +884,11 @@ static void pciVfioFdAccess(PVFIOPCI pThis, PCVFIOPCIFUN pFun, uint64_t offVfio,
         int const iErrno = cbDone < 0 ? errno : 0;
         if (!fWrite)
             memset(pv, 0xff, cb);
-        LogRelMax(32, ("VFIO#%d.%u: %s %zu byte(s) at offset %#RX64 of the device file failed with %d\n", pThis->iInstance,
-                       pFun->uPciFun, fWrite ? "Writing" : "Reading", cb, offVfio, iErrno));
+        /* A function which went out of service while this was on its way has the stand-in in the
+           place of its device, which refuses.  That is no failure to tell about. */
+        if (!pFun->fGone)
+            LogRelMax(32, ("VFIO#%d.%u: %s %zu byte(s) at offset %#RX64 of the device file failed with %d\n", pThis->iInstance,
+                           pFun->uPciFun, fWrite ? "Writing" : "Reading", cb, offVfio, iErrno));
     }
 }
 
@@ -2504,8 +2507,10 @@ static int pciVfioIrqUpdate(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint16_t u16Cmd, u
         cVectors = 1;
     }
 
+    /* Nothing is broken when this fails because the function went out of service meanwhile. */
     int rc = pciVfioIrqReconfigure(pThis, pFun, uVfioIrq, cVectors);
-    if (RT_FAILURE(rc))
+    if (   RT_FAILURE(rc)
+        && !pFun->fGone)
         LogRelMax(32, ("VFIO#%d.%u: Failed to set up interrupt type %u with %u vector(s), expect a broken device (%Rrc)\n",
                        pThis->iInstance, pFun->uPciFun, uVfioIrq, cVectors, rc));
     return rc;
@@ -3369,7 +3374,9 @@ static int pciVfioConfigPassthroughWrite(PVFIOPCIFUN pFun, uint32_t uAddress, un
  * A function can go out of service at any time, see pciVfioFunSetGone(), and it
  * takes a moment until an EMT has made it go away for the guest as well.  There
  * is no device to ask in between, which is no failure of anything: the guest
- * gets what is kept of the register then, like the PCI bus does.
+ * gets what the PCI bus has of the register then.  Of a register which is
+ * passed through nothing is kept there but what it was when the device was put
+ * in, if that: most of them read as zero.
  *
  * @returns VBox status code, a failure only if the device was asked and has
  *          not answered while the function is in service.
@@ -3630,7 +3637,8 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
         int rc = pciVfioCfgSpaceWriteU16(pFun, VBOX_PCI_COMMAND, (uint16_t)uValue);
         if (   RT_FAILURE(rc)
             && !pFun->fGone)
-            LogRel(("VFIO#%d.%u: Failed to update command register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
+            LogRelMax(64, ("VFIO#%d.%u: Failed to update command register in device (%Rrc)\n",
+                           pThis->iInstance, pFun->uPciFun, rc));
 
         rcStrict = PDMDevHlpPCIConfigWrite(pDevIns, pPciDev, VBOX_PCI_COMMAND, sizeof(uint16_t), uValue);
         Assert(rcStrict == VINF_SUCCESS); RT_NOREF(rcStrict);
@@ -3645,8 +3653,10 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
 
         /* Now write to the device. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsixCtrl);
-        if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
+        if (   RT_FAILURE(rc)
+            && !pFun->fGone)
+            LogRelMax(64, ("VFIO#%d.%u: Failed to update MSI-X control register in device (%Rrc)\n",
+                           pThis->iInstance, pFun->uPciFun, rc));
         PDMPciDevSetWord(pPciDev, offReg, u16MsixCtrl);
 
         /* Vectors held back by the function mask can go out now. */
@@ -3663,8 +3673,10 @@ static void pciVfioCfgEmulatedRegWrite(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCI
 
         /* Now write to the device. */
         int rc = pciVfioCfgSpaceWriteU16(pFun, offReg, u16MsiCtrl);
-        if (RT_FAILURE(rc))
-            LogRel(("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)\n", pThis->iInstance, pFun->uPciFun, rc));
+        if (   RT_FAILURE(rc)
+            && !pFun->fGone)
+            LogRelMax(64, ("VFIO#%d.%u: Failed to update MSI control register in device (%Rrc)\n",
+                           pThis->iInstance, pFun->uPciFun, rc));
         PDMPciDevSetWord(pPciDev, offReg, u16MsiCtrl);
     }
     else
@@ -4731,8 +4743,8 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
      *
      * The host refuses a reset while it is busy with the device itself, which it is
      * for as long as it waits for the device to be given back.  A reset of the bus
-     * is refused then as well, so it is not asked for.  The host resets the device
-     * when it is let go of.
+     * is refused then as well, so it is not asked for.  The device keeps its state
+     * then, apart from being disabled, as it does when no reset is to be had at all.
      */
     bool fBusReset = false;
     bool fHostBusy = false;
@@ -4767,8 +4779,8 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
                            "until the guest sets it up again\n", pThis->iInstance, rc));
     }
     if (fHostBusy)
-        LogRelMax(16, ("VFIO#%d: The device is not reset now, the host is busy with it and refuses.  The host resets it "
-                       "when it is let go of\n", pThis->iInstance));
+        LogRelMax(16, ("VFIO#%d: The device is not reset now, the host is busy with it and refuses.  It keeps its state "
+                       "apart from being disabled\n", pThis->iInstance));
 
     /*
      * Whatever the reset has done to the command register of a function, the guest
