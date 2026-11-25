@@ -381,7 +381,7 @@ check_log_quiet()
         grep -a -E "$re" "$log" | grep -a -v "$note" | cut -c1-200 | sed 's/^/    | /'
     fi
     grep -a "$note" "$log" | cut -c1-200 | head -n 2 | sed 's/^/    | /'
-    grep -a 'The device is not reset now' "$log" | cut -c1-200 | head -n 2 | sed 's/^/    | /'
+    grep -a -E 'The device is not reset now|refuses a reset' "$log" | cut -c1-200 | head -n 2 | sed 's/^/    | /'
 }
 
 # A function of the device of the host and the driver it has to be bound to.
@@ -806,6 +806,26 @@ phase_hotplug()
             stage "the layout of the device is stored for a start without it" FAILED
         fi
 
+        # A snapshot for which the VM keeps running while its state is saved
+        # is refused with the device in the slot.  It is the thread which
+        # saves and no EMT which finds that and has the VM told; a build of
+        # before the evening of 2026-11-25 held a lock of the device
+        # meanwhile, and a VM could stand still there.  Nothing of the
+        # snapshot must be left, and the VM runs on.
+        if VBM_TIMEOUT=120 run snapshot "$VM" take refused-live --live; then
+            stage "a live snapshot with the device in the slot is refused" FAILED "it was taken"
+        else
+            stage "a live snapshot with the device in the slot is refused" ok
+        fi
+        sleep 3
+        [ "$(vmstate)" = paused ] && run controlvm "$VM" resume
+        if vbm showvminfo "$VM" --machinereadable 2> /dev/null | grep -a -q '^SnapshotName'; then
+            stage "the VM has no snapshot after the live one was refused" FAILED
+        else
+            stage "the VM has no snapshot after the live one was refused" ok
+        fi
+        guest_goes_on "the VM runs on after the live snapshot was refused" 60
+
         serial_mark
         local t0
         t0=$(date +%s)
@@ -859,6 +879,12 @@ phase_hotplug()
         check_log_quiet
     fi
     end_phase
+    # Should there be a snapshot after all, the phases after this one are not
+    # to start from it.
+    if vbm showvminfo "$VM" --machinereadable 2> /dev/null | grep -a -q '^SnapshotName'; then
+        settle
+        VBM_TIMEOUT=300 run snapshot "$VM" delete refused-live
+    fi
 }
 
 # The host wants the device back while the guest uses it, as when it is
@@ -1965,7 +1991,7 @@ check_bus_resets()
 {
     local log="$VMDIR/Logs/VBox.log" n
     n=$(grep -a -c -E "The function can't be reset on its own \(" "$log" 2> /dev/null)
-    grep -a -E "can't be reset on its own \(|could not be reset|is not reset now" "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
+    grep -a -E "can't be reset on its own \(|could not be reset|is not reset now|refuses a reset" "$log" | cut -c1-200 | head -n 6 | sed 's/^/    | /'
     if [ "${n:-0}" -gt 0 ] && ! grep -a -q -E 'could not be reset|Failed to update command register|Failed to clear the command register' "$log"; then
         stage "the device was reset by a reset of its bus, and the log has no word of a reset which failed" ok "$n times a function had no reset of its own"
     else

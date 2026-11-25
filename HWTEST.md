@@ -56,8 +56,9 @@ was tried anywhere with one, with Thunderbolt or with an IOMMU of AMD.
 
 For the first steps on a machine there are scripts which need nobody
 to decide anything, see [hw/README.md](hw/README.md): they tell what
-the machine has, fetch a build, bind the card, and run two tests which
-write down what they find. The steps below are for a person, after the
+the machine has, fetch a build, bind the card, and run three tests
+which write down what they find; in the third the device leaves a guest
+whose driver has it and comes back. The steps below are for a person, after the
 scripts and with what the scripts have not got: Thunderbolt, a monitor
 to look at, Windows as the guest.
 
@@ -268,7 +269,11 @@ needed, further up, says what to expect of such a function.
    been seen working in the test without hardware.
 3. Taking a snapshot of the running VM and saving its state are refused
    while the device is in the VM, with a message which says so. The VM
-   keeps running.
+   keeps running. So it does at a snapshot for which the VM is not
+   paused (`VBoxManage snapshot <vm> take <name> --live`); with a build
+   of before the evening of 2026-11-25 and the device in the hot-plug
+   capable slot, a VM with one CPU could stand still at that. Note it
+   down if a VM does.
 
 ### C. Reset and power off
 

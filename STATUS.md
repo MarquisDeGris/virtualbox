@@ -1700,7 +1700,12 @@ acceleration, the same branch @ `cc3dc981`, 16 minutes, AMD EPYC 9V74)
 made the build which is fetched since,
 `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB: it has, besides, the
 lock of the slot let go of where a live state is refused, see the same
-section, and the testcase with its 59 tests passes in the run.
+section, and the testcase with its 59 tests passes in the run. **Run
+367** (`sim` with the parts runner, simhost and barhost, the same
+commit, 49 minutes, AMD EPYC 9V74) fetched it as a machine with real
+hardware does: the script gets the file which is listed, with its
+checksum, its `VBoxManage` runs, and the first test goes through its 15
+checks with that build. All 130 checks of the run pass.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -2724,7 +2729,15 @@ checked.
 
 **What the tests do not show**, as the readers say and as is so: no
 test looks at the log, so the changes to what is logged can be taken
-out with every test passing.
+out with every test passing. A write to a register which is passed
+through and which fails because the function goes in that moment is
+not made to happen by a test: the fake kernel tells a test of a write
+after it has taken it. The values the guest reads of registers which
+are passed through while a function is on its way out are read and not
+looked at, and the device of the tests has a config space of 256
+bytes, so nothing beyond that is read in that state. Where the host
+refuses a reset, the test passes whether the device has asked once or
+not at all.
 
 **Runs.** Run 358 (`scratch/red-evidence-19` @ `c365019f`, the new test
 without the change to the device, expected to fail): the check the test
@@ -2814,9 +2827,19 @@ Run 366 (`package` with 3D acceleration on that head of the 7.2 line
 with the backend, 16 minutes, AMD EPYC 9V74) is the build for a machine
 with real hardware which has both changes; it is published, and
 `hw/linux/fetch.sh` fetches it since, see "Machines with real
-hardware". The testcase passes in that run. The simulation on that
-head, which also fetches that build as a machine with real hardware
-does, is run 367 and was under way when this was written.
+hardware". The testcase passes in that run. Run 367 (`sim` with the
+parts runner, simhost and barhost, strict, the same head, 49 minutes,
+AMD EPYC 9V74) is the simulation on that head: all 130 checks pass, and
+it fetched that build as a machine with real hardware does, ran its
+`VBoxManage`, and had the first of the scripts go through its 15 checks
+with it.
+
+The simulation had no snapshot for which the VM keeps running: the
+one it asks for with the device in the VM has the VM paused first, and
+that is refused on an EMT. Its part with the device in the slot asks
+for a live one as well now, which has to be refused with nothing of it
+left and the VM running on. That step had not run when this was
+written.
 
 ### The issue with upstream, 2026-11-23
 
@@ -4227,5 +4250,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 364 | `pci-passthrough-hotplug-v1` @ `d85a8eed` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the change about a live state which is refused, and the texts: the 59 tests and the three random tests pass with the sanitizers, without a report |
 | 365 | `pci-passthrough-hotplug-7.1-kvm` @ `4220a8d5` | tests | passed | 13 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend: it builds and `tstDevPciVfio` passes with its 59 tests |
 | 366 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | package, built with 3D acceleration | passed | 16 minutes, AMD EPYC 9V74. The package `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB, of the head with both changes of the day: the testcase passes in the run with its 59 tests, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched |
+| 367 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the parts runner, simhost and barhost, strict | passed | 49 minutes, AMD EPYC 9V74. All 130 pass. The simulation on the head with both changes of the day, and the first run which fetches the package of run 366: the script gets the file which is listed, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
 
 Run numbers are those GitHub shows for the `build` workflow.
