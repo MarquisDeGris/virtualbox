@@ -1553,8 +1553,8 @@ static DECLCALLBACK(int) ioapicR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, u
      * entry, and it does not have that from the saved state.  So tell it now
      * about the entries which were loaded, or the remote IRR bit of such an
      * entry is never cleared after its first interrupt, which then is its
-     * last one: the guest cannot write the bit, and nothing but an EOI or a
-     * reset clears it.
+     * last one: the guest cannot write the bit, and it is an EOI or a reset
+     * which clears it.
      *
      * An entry which was saved with the bit set because of this stays that
      * way after the load.  It cannot be told here from one whose interrupt is

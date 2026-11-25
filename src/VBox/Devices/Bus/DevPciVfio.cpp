@@ -4742,8 +4742,9 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
      *
      * The host refuses a reset while it is busy with the device itself, which it is
      * for as long as it waits for the device to be given back.  A reset of the bus
-     * is refused then as well, so it is not asked for.  The device keeps its state
-     * then, apart from being disabled, as it does when no reset is to be had at all.
+     * is refused then as well, so it is not asked for.  What was not reset of the
+     * device keeps its state then, apart from being disabled, as it does when no
+     * reset is to be had at all.
      */
     bool fBusReset = false;
     bool fHostBusy = false;
@@ -4778,8 +4779,8 @@ static DECLCALLBACK(void) pciVfioReset(PPDMDEVINS pDevIns)
                            "until the guest sets it up again\n", pThis->iInstance, rc));
     }
     if (fHostBusy)
-        LogRelMax(16, ("VFIO#%d: The device is not reset now, the host is busy with it and refuses.  It keeps its state "
-                       "apart from being disabled\n", pThis->iInstance));
+        LogRelMax(16, ("VFIO#%d: The host is busy with the device and refuses a reset.  What was not reset of it keeps "
+                       "its state apart from being disabled\n", pThis->iInstance));
 
     /*
      * Whatever the reset has done to the command register of a function, the guest
