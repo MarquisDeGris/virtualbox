@@ -190,7 +190,7 @@ fi
 # The scripts for a machine with real hardware, one after the other, with the
 # device of this machine in the place of a graphics card.  HW_CMDLINE is for
 # the guest of the second one.
-hw_script() # <a|b> <what the stage calls it> <its result, under the directory of this machine in the results> <name of its log> [<VARIABLE=value>...]
+hw_script() # <a|b|c> <what the stage calls it> <its result, under the directory of this machine in the results> <name of its log> [<VARIABLE=value>...]
 {
     local t=$1 name=$2 res=$3 log=$4 rc kimg i=0
     shift 4
@@ -230,6 +230,9 @@ hw_scripts()
         hw_script b "the second script, with a VM which is given the legacy VGA ranges of the card," hw-out/test-b-vga.txt hw-test-b-vga \
                   HW_VGA=yes HW_CMDLINE=hwvgawrite=1
     fi
+    # The third one after those: its guest has the device taken out and put
+    # in again.
+    hw_script c "the third script for a machine with real hardware" hw-out/test-c.txt hw-test-c
     if [ -n "${SIM_HWBIN:-}" ] && [ -x "$SIM_HWBIN/VBoxManage" ]; then
         # The first script once more, with the build as it is published for
         # machines with real hardware and as the runner fetched it.
@@ -332,10 +335,10 @@ if [ -n "${SIM_HWTEST:-}" ]; then
         # What the first test of it found in the log of its VM, if it did.
         sed -n '/^---- the lines of it which tell/,$p' "$OUT/$WHERE/hw-out-all/test-a.txt" 2> /dev/null | cut -c1-240 | sed 's/^/    | /'
         if [ "$rc" = 0 ]; then
-            stage "the one script for all which takes root binds the device and has both tests go through their checks" ok \
-                  "$(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-a.txt" 2> /dev/null) and $(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-b.txt" 2> /dev/null) checks"
+            stage "the one script for all which takes root binds the device and has the three tests go through their checks" ok \
+                  "$(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-a.txt" 2> /dev/null), $(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-b.txt" 2> /dev/null) and $(grep -c ': ok' "$OUT/$WHERE/hw-out-all/test-c.txt" 2> /dev/null) checks"
         else
-            stage "the one script for all which takes root binds the device and has both tests go through their checks" FAILED \
+            stage "the one script for all which takes root binds the device and has the three tests go through their checks" FAILED \
                   "$(tail -n 1 "$OUT/$WHERE/hw-tests.log" | cut -c1-160)"
         fi
     fi

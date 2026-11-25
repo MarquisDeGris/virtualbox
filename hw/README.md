@@ -54,6 +54,7 @@ which can also be run by itself:
     sudo sh hw/linux/test-a.sh      # the first test: a VM without an operating system
     sudo sh hw/linux/test-b.sh      # the second: a small Linux guest with the driver of the device
     sudo HW_VGA=yes sh hw/linux/test-b.sh   # for a graphics card, see below
+    sudo sh hw/linux/test-c.sh      # the third: the device leaves that guest and comes back
 
 - The device is the first graphics card which is not the one the firmware
   shows its screen on, with all its functions. `HW_DEV=<address>` in front
@@ -96,13 +97,25 @@ which can also be run by itself:
   the card, which is what it takes for a card to show the guest from its
   start. The guest reads a register of the card through them. The result is
   `hw-out/test-b-vga.txt`.
+- `test-c.sh` has the guest of the second test, looks at what that test looks
+  at, and then does what this work is about, twice: the guest is asked for
+  the device and lets go of it, the device is out of the VM and stays with
+  `vfio-pci`, it is put in again, and the drivers of the guest take it
+  again. The guest tells on the serial port which driver has which function
+  whenever that changes, and for a graphics card how many connectors it has
+  and on how many of them something is; the script turns that into checks,
+  and the result has what the kernel of the guest said meanwhile. The device
+  stays where it is on the host all the while, so this is not a device on
+  Thunderbolt being pulled. `tests.sh` runs it last; `HW_SKIP_PLUG=yes` in
+  front of that command leaves it out.
 
 The workflow runs both tests in its simulation, with an emulated NVMe drive
 as the device, with a device which has four gigabytes of memory and a ROM,
 and with the graphics adapter an emulator has. The other scripts run there
 as well: the build is fetched as it is published and the first test passes
-with it, and a result is published to a repository made for the run. On
-hardware nothing here has run yet.
+with it, and a result is published to a repository made for the run. The
+third test is of 2026-11-25 and has run nowhere yet. On hardware nothing
+here has run yet.
 
 ## Where the machine runs Windows
 

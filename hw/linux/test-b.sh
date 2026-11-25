@@ -23,12 +23,22 @@
 # legacy VGA ranges of the card, which is what it takes for a card to show
 # the guest from its start (ExposeVga, see the top of DevPciVfio.cpp).  The
 # guest reads a register of the card through them.
+#
+#   sudo sh hw/linux/test-c.sh        writes hw-out/test-c.txt
+#
+# is this script with HW_PLUG=yes, the third test: after all of the above the
+# device leaves the guest and comes back, twice, see there.
 . "$(dirname "$0")/common.sh"
+me=test-b.sh
 RESULT="$out/test-b.txt"
 [ "${HW_VGA:-no}" = yes ] && RESULT="$out/test-b-vga.txt"
+if [ "${HW_PLUG:-no}" = yes ]; then
+    me=test-c.sh
+    RESULT="$out/test-c.txt"
+fi
 : > "$RESULT"
 
-test_begin test-b.sh
+test_begin "$me"
 
 # ---- The ROM of each function as the host has it, "<bytes> <md5>".  A
 # graphics card has its firmware there, and the driver in the guest is going
@@ -389,12 +399,131 @@ else
 fi
 log_check "with the guest running"
 
+# ---- The third test, hw/linux/test-c.sh: the device leaves the guest and
+# comes back, twice, while the guest runs and its drivers have the device.
+# The guest tells which devices it has behind bridges and which driver has
+# each whenever that changes, and again every few seconds.
+there_said() { said | sed -n -e 's/^HW: NOW //p' -e 's/^HW: STILL //p' | sed -n '$p'; }
+wait_there() # <the devices and their drivers, as the guest tells them> <seconds>
+{
+    local i=0 s
+    while [ "$i" -lt "$2" ]; do
+        s=$(there_said)
+        [ "${s%%;*}" = "$1" ] && return 0
+        [ "$(vmstate)" = running ] || return 1
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+nsaid=0
+if [ "${HW_PLUG:-no}" = yes ]; then
+    nsaid=$(said | grep -c .)
+    base=$(there_said)
+    rounds="1 2"
+    case "$base" in
+        ''|nothing\;*)
+            check "guest: tells which devices it has behind the port of the slot, and their drivers" FAILED "${base:-it tells nothing of them}"
+            rounds=
+            ;;
+        *)
+            check "guest: tells which devices it has behind the port of the slot, and their drivers" ok "$base"
+            ;;
+    esac
+    for round in $rounds; do
+        # Out: the guest is asked, as it is when somebody wants to pull a
+        # device, and is given two minutes to let go of it.
+        t0=$(date +%s)
+        what="round $round: the guest is asked for the device and lets go of it, and the device is out of the slot"
+        if VBM_TIMEOUT=240 run controlvm "$VM" unplugpci "$DEV" --timeout=120000 && wait_pcistate 'hotplug,absent,unused' 60; then
+            check "$what" ok "$(( $(date +%s) - t0 )) seconds"
+        else
+            check "$what" FAILED "VirtualBox tells '$(pcistate)': $(short 160 < "$work/last.out" | sed -n '1p')"
+            # Taken, then, so that what follows has something to tell.
+            VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$DEV" --timeout=3000 --force
+            wait_pcistate 'hotplug,absent,unused' 60
+        fi
+        if wait_there nothing 60; then
+            check "round $round: guest: the device is gone from it" ok
+        else
+            check "round $round: guest: the device is gone from it" FAILED "it tells: $(there_said)"
+        fi
+        for f in $FUNCS; do
+            [ "$(driver_of "$f")" = vfio-pci ] || check "round $round: $f is still with vfio-pci while it is out" FAILED "driver $(driver_of "$f")"
+        done
+        if [ "$(vmstate)" != running ]; then
+            check "round $round: the VM runs on without the device" FAILED "it is in state '$(vmstate)'"
+            break
+        fi
+        # In again: the drivers of the guest are given a while to take it.
+        t0=$(date +%s)
+        what="round $round: the device is put into the slot"
+        if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$DEV" && wait_pcistate 'hotplug,present,*' 60; then
+            check "$what" ok "VirtualBox tells '$(pcistate)'"
+        else
+            check "$what" FAILED "VirtualBox tells '$(pcistate)': $(short 160 < "$work/last.out" | sed -n '1p')"
+        fi
+        what="round $round: guest: has the device again, with the drivers which had it"
+        if wait_there "${base%%;*}" "${HW_PLUG_WAIT:-180}"; then
+            check "$what" ok "$(( $(date +%s) - t0 )) seconds after it was put in"
+        else
+            check "$what" FAILED "before: ${base%%;*}; now: $(there_said)"
+        fi
+        if [ "$display" = yes ]; then
+            # The connectors of the card and what is on them, which a driver
+            # takes a moment longer for.
+            i=0
+            while [ "$(there_said)" != "$base" ] && [ "$i" -lt 60 ] && [ "$(vmstate)" = running ]; do
+                sleep 1
+                i=$((i + 1))
+            done
+            cur=$(there_said)
+            what="round $round: guest: the card has its connectors again, and what was on them"
+            if [ "$cur" = "$base" ]; then
+                check "$what" ok "${base#*; }"
+            elif [ "${cur%%,*}" = "${base%%,*}" ]; then
+                check "$what" look "before: ${base#*; }; now: ${cur#*; }"
+            else
+                check "$what" FAILED "before: ${base#*; }; now: ${cur#*; }"
+            fi
+        fi
+        if [ "$(vmstate)" != running ]; then
+            check "round $round: the VM runs on with the device" FAILED "it is in state '$(vmstate)'"
+            break
+        fi
+    done
+    if [ -n "$rounds" ]; then
+        n0=$(said | grep -c '^HW: ALIVE')
+        sleep 15
+        n1=$(said | grep -c '^HW: ALIVE')
+        if [ "$n1" -gt "$n0" ] && [ "$(vmstate)" = running ]; then
+            check "the guest keeps running after the device left and came back" ok
+        else
+            check "the guest keeps running after the device left and came back" FAILED "the VM is in state '$(vmstate)', the guest said it was alive $n1 times"
+        fi
+        bad=$(said | sed -n "$((nsaid + 1)),\$p" | grep -i -E '^HW: k: .*(nobody cared|Disabling IRQ|timed? ?out|fail|error|BUG:|Oops|WARNING:|Call Trace)' | grep -c .)
+        if [ "${bad:-0}" = 0 ]; then
+            check "guest: its kernel tells of no trouble while the device left and came back" ok
+        else
+            check "guest: its kernel tells of no trouble while the device left and came back" look "$bad line(s) which may or may not matter, among those below"
+        fi
+        log_check "after the device left and came back"
+    fi
+fi
+
 if run controlvm "$VM" poweroff && wait_vmstate poweroff 60; then
     check "the VM is powered off" ok
 else
     check "the VM is powered off" FAILED "it is in state '$(vmstate)'"
 fi
 
-echo "---- what the guest said (at most 150 lines):" >> "$RESULT"
-said | grep -v '^HW: ALIVE' | short 200 | sed -n '1,150p' >> "$RESULT"
+if [ "$nsaid" -gt 0 ]; then
+    echo "---- what the guest said before the device left (at most 150 lines):" >> "$RESULT"
+    said | sed -n "1,${nsaid}p" | grep -v -E '^HW: (ALIVE|STILL)' | short 200 | sed -n '1,150p' >> "$RESULT"
+    echo "---- what the guest said from then on (at most 150 lines):" >> "$RESULT"
+    said | sed -n "$((nsaid + 1)),\$p" | grep -v -E '^HW: (ALIVE|STILL)' | short 200 | sed -n '1,150p' >> "$RESULT"
+else
+    echo "---- what the guest said (at most 150 lines):" >> "$RESULT"
+    said | grep -v -E '^HW: (ALIVE|STILL)' | short 200 | sed -n '1,150p' >> "$RESULT"
+fi
 test_end

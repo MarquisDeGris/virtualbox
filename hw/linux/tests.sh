@@ -14,6 +14,9 @@
 # For a graphics card the second test runs twice, the second time with a VM
 # which has no graphics adapter of its own and is given the legacy VGA ranges
 # of the card.  HW_SKIP_VGA=yes leaves that out.
+#
+# The third test, in which the device leaves the guest and comes back, is
+# the last.  HW_SKIP_PLUG=yes leaves it out.
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/common.sh"
 
@@ -53,6 +56,9 @@ if [ "$display" = yes ] && [ "${HW_SKIP_VGA:-no}" != yes ]; then
     echo
     echo "======== the second test, with the legacy VGA ranges of the card given to the VM: HW_VGA=yes hw/linux/test-b.sh"
     HW_VGA=yes sh "$here/test-b.sh" || failed="$failed test-b-vga"
+fi
+if [ "${HW_SKIP_PLUG:-no}" != yes ]; then
+    step "the third test" test-c.sh || failed="$failed test-c"
 fi
 
 give_back

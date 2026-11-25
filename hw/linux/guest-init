@@ -174,15 +174,66 @@ if [ -e /proc/asound/cards ]; then
 fi
 
 # What the kernel said meanwhile about the devices and their drivers, and
-# anything which sounds like trouble.
-dmesg | grep -i -E 'drm|amdgpu|radeon|nouveau|nvidia|i915|xe |snd_hda|hda[-_]|nvme|firmware|vgaarb|BAR [0-9]|pciehp|AER|DPC|nobody cared|Disabling IRQ|timed? ?out|fail|error' \
-    | sed -e 's/^\[ *[0-9.]*\] //' | cut -c1-180 | tail -n 80 | while read -r l; do say "k: $l"; done
+# anything which sounds like trouble.  It is taken out of the buffer of the
+# kernel, so that what comes later is told once.
+kpat='drm|amdgpu|radeon|nouveau|nvidia|i915|xe |snd_hda|hda[-_]|nvme|firmware|vgaarb|BAR [0-9]|pciehp|AER|DPC|nobody cared|Disabling IRQ|timed? ?out|fail|error|BUG:|Oops|WARNING:|Call Trace'
+ksay() # <at most so many lines>
+{
+    grep -i -E "$kpat" | sed -e 's/^\[ *[0-9.]*\] //' -e 's/^\(.\{0,180\}\).*/\1/' | tail -n "$1" | while read -r l; do say "k: $l"; done
+}
+dmesg -c | ksay 80
 
 say "READY"
 
+# From here on, once a second: which devices are behind bridges and which
+# driver has each, how many connectors the graphics cards among them have and
+# on how many of those something is.  It is told whenever it is not what was
+# told last ("NOW ..."), and once more with every sign of life ("STILL ..."),
+# as a line of the serial port can get lost in what the kernel writes there.
+# A device which leaves the VM and comes back shows here, and so does what
+# the kernel says about it; hw/linux/test-c.sh looks at both.
+there()
+{
+    local s= d drv c card dev nc=0 non=0
+    for d in /sys/bus/pci/devices/*; do
+        [ -e "$d/vendor" ] || continue
+        case "${d##*/}" in 0000:00:*) continue ;; esac
+        drv=none
+        [ -e "$d/driver" ] && drv=$(basename "$(readlink "$d/driver")")
+        s="$s ${d##*/}=${drv:-none}"
+    done
+    for c in /sys/class/drm/card*-*; do
+        [ -e "$c/status" ] || continue
+        card=${c##*/}
+        card=${card%%-*}
+        dev=$(basename "$(readlink "/sys/class/drm/$card/device" 2> /dev/null)" 2> /dev/null)
+        # Only the cards which are PCI devices behind a bridge.
+        case "$dev" in
+            0000:00:*) continue ;;
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:*) ;;
+            *) continue ;;
+        esac
+        nc=$((nc + 1))
+        [ "$(cat "$c/status" 2> /dev/null)" = connected ] && non=$((non + 1))
+    done
+    echo "${s:- nothing}; connectors $nc, connected $non"
+}
+last=
 n=0
+t=0
 while :; do
-    sleep 5
-    n=$((n + 1))
-    say "ALIVE $n"
+    dmesg -c | ksay 40
+    cur=$(there)
+    if [ "$cur" != "$last" ]; then
+        say "NOW$cur"
+        last=$cur
+    fi
+    sleep 1
+    t=$((t + 1))
+    if [ "$t" -ge 5 ]; then
+        t=0
+        n=$((n + 1))
+        say "ALIVE $n"
+        say "STILL$cur"
+    fi
 done
