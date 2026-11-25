@@ -732,8 +732,8 @@ jobs:
           if ! grep -q 'non-VDI' doc/manual/en_US/man_VBoxManage-modifymedium.xml 2> /dev/null; then
             echo "CLI: the help of modifymedium is as it was in this tree, which is not checked"
           else
-            # Here for the first time: tried.
-            kind=tried
+            # Passed in run 356.
+            kind=counts
             { vbm modifymedium --help; vbm help modifymedium; } > cli-help.log 2>&1 || true
             echo "+ VBoxManage modifymedium --help, VBoxManage help modifymedium -> $(grep -c '' cli-help.log) lines"
             grep -n -E 'non-V|ext[234]' cli-help.log | head -n 6 | cut -c1-200 | sed 's/^/    /'

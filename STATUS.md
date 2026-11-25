@@ -14,7 +14,7 @@ Updated: 2026-11-22
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
-| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
+| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -2738,6 +2738,21 @@ a boot entry, so it should not matter. Not done: the same in the
 graphical user interface, which the report asks for too and which is
 not built here.
 
+**Report 996, about the manual** (2026-11-25). Not a request, and as
+small as a change gets: the text about `VBoxManage modifymedium
+--compact` has "non-VID" where it means VDI, and names ext2 and ext3
+as the file systems the `zerofree` utility supports, which has
+supported ext4 as well for years. Two places in
+`doc/manual/en_US/man_VBoxManage-modifymedium.xml`, on
+`fix/doc-modifymedium-compact` @ `5476f2d7`, merge request #9 in the
+fork against `main`. The help which `VBoxManage` prints is made from
+that text, so the step `Command line checks` of the workflow looks at
+the help where a tree has the text corrected. **Run 356** (`tests`, 5
+minutes, AMD EPYC 7763): the branch builds, and the help of the
+`VBoxManage` which was built says "non-VDI" and "ext2, ext3 and ext4".
+The check counts since. That the utility supports ext4 is from what it
+says of itself; it was not tried here.
+
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
 Upstream ended its support for 7.1 with 7.1.18 in April 2026. The
@@ -3467,7 +3482,9 @@ harness since WP5, saved states since the fourth part of WP6.
    After a first result: a test with a guest which has a driver for the
    card, and a build with emulated 3D for the tests of that.
 4f. Requests from the tracker of upstream, see the section of that
-   name: 798 and the manual text for 674 and 904 are merge requests.
+   name: 798 and the manual text for 674 and 904 are merge requests,
+   and so are 944 (the setup of the firmware) and the report 996 about
+   the manual.
    What could follow, each small and to be tested without a graphics
    card: other requests about `VBoxManage` and about settings. The two
    large ones about 3D are not planned.
@@ -3937,5 +3954,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 353 | `pci-passthrough-hotplug-v1` @ `20438da2` | tests | passed | 10 minutes, AMD EPYC 7763. The same change of the testcase on the development line: it builds and `tstDevPciVfio` passes |
 | 354 | `pci-passthrough-hotplug-7.2-kvm` @ `05f1d33a` | tests | passed | 11 minutes, AMD EPYC 9V74. The same change of the testcase on the 7.2 line with the KVM backend, which has it by a merge of the 7.2 line: it builds and `tstDevPciVfio` passes |
 | 355 | `pci-passthrough-hotplug-v1` @ `20438da2` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the testcase waiting for the slot: the 57 tests and the three random tests in full length pass with the sanitizers, no report |
+| 356 | `fix/doc-modifymedium-compact` @ `5476f2d7` | tests | passed | 5 minutes, AMD EPYC 7763. The correction of the text about `modifymedium --compact` (report 996 of the upstream tracker): it builds, and the help of `VBoxManage` has the corrected text, which a new command line check looks at |
 
 Run numbers are those GitHub shows for the `build` workflow.
