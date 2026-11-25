@@ -4173,6 +4173,13 @@ static void pciVfioFunPlaceholdersDrop(PCVFIOPCIFUN pFun)
  * the guest loses its mappings of the BARs and finds nothing where the function
  * was from then on.
  *
+ * This takes the PCI lock, which an EMT holds while it is in an access of the
+ * guest to the config space.  Such an access can have got past the point where
+ * a function which is out of service is told from one which is in service, and
+ * be about to change the command register and with it the mappings of the BARs,
+ * which is what this does as well.  It waits until the access is done and goes
+ * by what the access left.
+ *
  * @returns VBox status code.
  * @param   pDevIns     The device instance.
  * @param   iPciFun     The function.
@@ -4181,8 +4188,10 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
 {
     PVFIOPCI pThis = PDMDEVINS_2_DATA(pDevIns, PVFIOPCI);
     AssertReturn(iPciFun < RT_ELEMENTS(pThis->aPciFuns), VERR_INVALID_PARAMETER);
-    PVFIOPCIFUN pFun    = &pThis->aPciFuns[iPciFun];
-    PPDMPCIDEV  pPciDev = pDevIns->apPciDevs[iPciFun];
+    PVFIOPCIFUN   pFun    = &pThis->aPciFuns[iPciFun];
+    PPDMPCIDEV    pPciDev = pDevIns->apPciDevs[iPciFun];
+    PCPDMPCIHLPR3 pPciHlp = (PCPDMPCIHLPR3)pPciDev->Int.s.pvPciBusPtrR3;
+    AssertPtrReturn(pPciHlp, VERR_INTERNAL_ERROR_3);
 
     /*
      * One EMT at a time, and not while another one puts a device into the slot or
@@ -4194,6 +4203,10 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
     /* Nothing to do if a device was put in again before this got its turn. */
     if (pFun->fGone)
     {
+        /* Not while another EMT is in a config space access of the guest, see above. */
+        int const rcLock = pPciHlp->pfnLock(pDevIns, VERR_IGNORED);
+        AssertRC(rcLock);
+
         /* The PCI bus removes the mappings when the decoding gets disabled.  The guest doesn't get to enable it again. */
         uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
         uint16_t const u16Cmd     = PDMPciDevGetCommand(pPciDev);
@@ -4205,6 +4218,9 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
 
         /* From here on the guest finds nothing where the function was. */
         ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
+
+        if (RT_SUCCESS(rcLock))
+            pPciHlp->pfnUnlock(pDevIns);
 
         /* Whatever the guest managed to write into the memory which took the place of the BARs is of no use to anybody. */
         pciVfioFunPlaceholdersDrop(pFun);
