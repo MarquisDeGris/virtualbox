@@ -7,7 +7,7 @@ Updated: 2026-11-22
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `d85a8eed`, 44 commits. The last five are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `2409b39e`, 46 commits. The last two are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -1697,7 +1697,7 @@ where a function goes away for the guest, see "A second reader for four
 later commits", and the testcase passes on that head in the same run.
 No run fetched it. **Run 366** (the same day, `package` with 3D
 acceleration, the same branch @ `cc3dc981`, 16 minutes, AMD EPYC 9V74)
-made the build which is fetched since,
+made the build which was fetched until the next day,
 `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB: it has, besides, the
 lock of the slot let go of where a live state is refused, see the same
 section, and the testcase with its 59 tests passes in the run. **Run
@@ -1705,7 +1705,13 @@ section, and the testcase with its 59 tests passes in the run. **Run
 commit, 49 minutes, AMD EPYC 9V74) fetched it as a machine with real
 hardware does: the script gets the file which is listed, with its
 checksum, its `VBoxManage` runs, and the first test goes through its 15
-checks with that build. All 130 checks of the run pass.
+checks with that build. All 130 checks of the run pass. **Run 378**
+(2026-11-26, `package` with 3D acceleration, the same branch @
+`b1136fa2`, 20 minutes, Intel Xeon 6975P-C) made the build which is
+fetched since, `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB: it
+has, besides, the two changes to Main of that day, see "Who waits for
+whom, in Main and in the root port". The testcase passes in the run.
+No run had fetched it when this was written.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -2826,8 +2832,8 @@ the KVM backend by themselves.
 Run 366 (`package` with 3D acceleration on that head of the 7.2 line
 with the backend, 16 minutes, AMD EPYC 9V74) is the build for a machine
 with real hardware which has both changes; it is published, and
-`hw/linux/fetch.sh` fetches it since, see "Machines with real
-hardware". The testcase passes in that run. Run 367 (`sim` with the
+`hw/linux/fetch.sh` fetched it until the build of run 378 took its
+place, see "Machines with real hardware". The testcase passes in that run. Run 367 (`sim` with the
 parts runner, simhost and barhost, strict, the same head, 49 minutes,
 AMD EPYC 9V74) is the simulation on that head: all 130 checks pass, and
 it fetched that build as a machine with real hardware does, ran its
@@ -2845,6 +2851,158 @@ has no snapshot afterwards and runs on, and all 114 checks of the run
 pass. The drive of the simulation uses MSI-X there, so no EMT has work
 of the device in that moment; what the run shows is the way through
 the VMM which the test has a stand-in for.
+
+### Who waits for whom, in Main and in the root port (2026-11-25)
+
+The two things the readers found on that day were of one kind:
+somebody waits for somebody else with a lock held, or goes without a
+lock where one is needed. The device had been gone through for that by
+then, by the third reader. Main and the root port had not, so a reader
+got them: every place on the way of `plugpci` and `unplugpci` which
+waits, with what is held there, and every function of the slot with
+its lock and its callers.
+
+**What was wrong, and is changed.** `Console::i_releaseVMCaller()`,
+which is code of upstream, counts down how many hold on to the VM, and
+powering the VM down waits for that count to reach zero. It gave up
+without counting where it could not become a caller of the Console
+object, and nobody can from the moment `Console::uninit()` starts. So
+whoever held on to the VM when the Console was uninitialised left the
+count up, the VM was never powered off, and the VM process stayed for
+good. `Console::unplugHostPCIDevice()` of this work holds on to the VM
+for as long as the guest is given to let go of a device, which made a
+moment of a minute: the frontend being told to end while a device is
+being taken out is enough. `VBoxHeadless` then tries to save the state
+of a running VM, which is refused with the device in the VM, and closes
+the session. The count goes down now whatever the state of the object.
+Another reader read that change before it went in and found nothing
+wrong in it. It does not cover a power-up which failed while somebody
+held on to the VM; that is upstream's as well, has nothing to do with a
+device, and was left.
+
+**What was found and left**, all in code of this work:
+
+- When the guest switches the slot off, disables the link or resets
+  the bus behind the port, the port tells the device with the PCI lock
+  held, and the device resets the device of the host there, which can
+  take a second or more with a reset of the bus. The PCI lock is the
+  lock of all devices of the VM, so the VM waits for its own doing. No
+  two threads wait for each other in it.
+- A device is taken out without `--force` when the guest lets go of
+  it, and that is told by the link of the slot being down. A guest
+  which disables the link or resets the bus behind the port while it is
+  asked has its device taken as well, without having switched the slot
+  off. The slot is one from which a device can go at any time, and the
+  guest was asked; it is not what the guest said, though.
+- A VM which was started paused and never ran: `plugpci` is refused
+  with a message about the state of the VM which does not fit, and
+  `unplugpci` goes through.
+- Two more commands for the same slot within the ten milliseconds
+  between two looks of one which waits can have that one take a device
+  which was put in after it was started.
+
+**What was found in order**, among other things: no lock of Main is
+held where `plugpci` or `unplugpci` wait; the VM cannot be destroyed
+while a thread of the API is in the device, as powering down waits for
+it, one piece of a quarter of a second at most; the port takes the PCI
+lock only, the device its own lock first and that one second, and
+nothing takes them the other way round; the registers of the slot
+change with the PCI lock held; the slot has no timers; and nothing a
+guest writes to the slot makes Main or the device wait without an end,
+or has a command tell of something which did not happen.
+
+**How it shows.** No testcase reaches Main, so the simulation has it.
+A new phase of its part with the drive (`intxslot`) has a guest which
+uses no MSI and the device in the hot-plug capable slot, which no
+phase had: the interrupt of the drive is INTx and goes through the
+port of the slot (the guest reads from the drive with it), and a live
+snapshot is refused with the VM running on, which with INTx is where
+a VM could stand still before the change of the same day. Such a
+guest is not told of its slot, as the port tells by MSI only (decision
+of 2026-11-12); the first run of the phase expected otherwise and had
+four checks fail for that (run 369), and the phase goes by the
+decision since: the command which asks the guest for the device says
+after the time it was given that the guest did not let go, and the
+device stays. That makes this guest the one which keeps a command
+waiting, and at the end of the phase the VM process is told to end
+while `unplugpci` waits for the guest. **Run 370** (`sim` with the
+part simhost, exploring, `pci-passthrough-hotplug-7.2-kvm` @
+`cc3dc981`, the head without the change to Main, 44 minutes, AMD EPYC
+7763): the VM process is still there 90 seconds later, the one check
+of 126 which fails.
+
+**Run 371** (`sim` with the part simhost, the head with the change to
+Main, `d9083189`, 37 minutes, Intel Xeon 6975P-C): the VM process ends
+within a second, with the VM powered off in order, and all 126 checks
+pass.
+
+**A second thing, behind the first.** No check of run 371 looked at
+what VirtualBox makes of the VM afterwards, and what the run showed by
+the way was that the settings of the VM stayed locked: every command
+which wanted the VM failed. The phase was given a second look for that,
+whether the service knows a minute later that the VM is off, and has
+the VM process told to end once more before, with nothing else going
+on. **Run 374** (the same part, exploring, the same head, 41 minutes,
+Intel Xeon 6975P-C): the VM process ends within a second both times,
+and both times the service does not know; 129 checks pass and these
+two fail. The service is not waiting for anything, as the places its
+threads are in show. So it has nothing to do with a device being taken
+out. What happens, read in the code of upstream: `Console::uninit()`
+powers the VM down, the VM tells of its last states on another thread,
+and the function which takes the last one, the VM being off, to the
+service gives up there, because nobody but the thread of `uninit()`
+can become a caller of an object which is being uninitialised. It is
+the same pattern as with the count above, at another place. The
+service is left with the state "stopping" for the machine, the session
+ends in good order right after, and for a session which ends that way
+the service leaves the state alone: a machine without a session in a
+state which says that it is busy, which takes no session until the
+service is started anew. `VBoxHeadless` gets there whenever it is told
+to end and cannot save the state of the VM, which with this work is so
+for every VM with a device of the host in it, and with a VM which is
+paused. `uninit()` does now what the callback could not: when there is
+no VM any more and the state is still "stopping", it tells the service
+that the VM is off, on its own thread. That is so too when it was not
+`uninit()` which powered the VM down but the guest, which was shutting
+down as the session got closed; the reader of the change added that
+case. A first version let the function get through for every thread
+and every state; the same reader found that this reaches to where a
+state save which failed is being undone, and that a VM process could
+come to stand there. It did not go to the branches.
+
+The reader of that change read both versions. Of the one which went in
+he says: nothing wrong in what it does. The call to the server is made
+by the thread which closes the session, with the lock of the session
+held, as the call a moment earlier which says "stopping" is; a setter
+of the server which waits for that session in that moment and the call
+would wait for each other, which was so before for the earlier call.
+The event for the state is fired from `uninit()` now, to whoever still
+listens; of the Console itself that is the display, which does nothing
+with it. And a session which is closed while a state save of a paused
+VM that failed is being undone still leaves the machine paused without
+a session, as before. These are left.
+
+**Runs with both changes.** Run 375 (`sim` with the part simhost, not
+strict, `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2`, 43 minutes,
+Intel Xeon 6975P-C): all 131 checks pass. The VM process ends within a
+second both times, and both times the service has the VM as powered off
+at once. Runs 372 and 376 (`tests` on the development line, `d8d44eb9`
+with the first change and `2409b39e` with both) and runs 373 and 377
+(the same on the 7.1 line with the KVM backend, `2c7878c5` and
+`6d552882`): they build with the changes to Main and the tests pass.
+Run 378 (`package` with 3D acceleration, `b1136fa2`, 20 minutes, Intel
+Xeon 6975P-C) is the build for a machine with real hardware which has
+both; it is published and the one which is fetched, see "Machines with
+real hardware".
+
+The heads are `pci-passthrough-hotplug-v1` @ `2409b39e` (46 commits),
+`-7.2` @ `4b6e5ddc`, `-7.2-kvm` @ `b1136fa2`, `-7.1` @ `fc72156b` and
+`-7.1-kvm` @ `6d552882`. Not run: the sanitizers on these heads, as the
+two changes are in Main, which the testcase does not reach, and the
+last simulation with the sanitizers in the whole build is older; the
+two lines without the KVM backend by themselves; the simulation on the
+development line and on the 7.1 line; and a run which fetches the build
+of run 378.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3787,6 +3945,14 @@ harness since WP5, saved states since the fourth part of WP6.
    for timers another EMT found expired. That is a change to the timer
    code and wants runs with guests of several CPUs on that backend; the
    branches for use have another backend, which does not go that way.
+7b. From the reading of Main and the root port of 2026-11-25, see "Who
+   waits for whom, in Main and in the root port": two changes to Main,
+   which is code of upstream, on all five branches, after which the VM
+   process ends and VirtualBox knows that the VM is off when a frontend
+   is told to end with a device of the host in the VM. Left, and listed
+   there: what the readers found and what was not changed. Not done: a
+   run which fetches the build of run 378, and the simulation with
+   these changes on the development line and on the 7.1 line.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -3940,6 +4106,14 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-25 | `pciVfioSaveCheck` lets go of the lock of the slot before the VM is told that its state cannot be saved; a test comes with it which fails without it | The thread which saves a live state waits for an EMT to do the telling, and an EMT with work of the device waits for that lock: found by the reader of the change before |
 | 2026-11-25 | A second new build for a machine with real hardware on one day | The one of run 362 has the PCI lock and not this; a build which stands still at a live snapshot is not one to hand out when the next is twelve minutes away |
 | 2026-11-25 | The simulation asks for a live snapshot with the device in the slot | The snapshot it had pauses the VM first and is refused on an EMT; the live one is refused by the thread which saves, which is where the VM could stand still |
+| 2026-11-25 | Main and the root port are read for who waits for whom, as the device was | Both things found on that day were of that kind, and neither Main nor the port had been read that way |
+| 2026-11-25 | `Console::i_releaseVMCaller()`, code of upstream, counts down also when the Console is being uninitialised | A command which takes a device out holds on to the VM for as long as the guest is given, and the VM process did not end when the frontend was told to end meanwhile (run 370). Changing how long the command holds on would only make the moment shorter |
+| 2026-11-25 | The simulation gets a phase with a guest which uses no MSI and the device in the slot; that such a guest is not told of the slot stays as decided on 2026-11-12 | INTx through the port of the slot had run nowhere. The guests this is for use MSI for the port; a port which tells with INTx as well would be new interrupt routing for a guest nobody has |
+| 2026-11-25 | Left as they are: the device being reset with the PCI lock held when the guest switches the slot off; a link which is down counting as the guest having let go; the message for a VM which was started paused | Each was looked at: the first costs the guest its own time, the second takes a device from a guest which was asked and whose slot can lose its device at any time, the third is a wrong word in a refusal |
+| 2026-11-26 | `Console::uninit()`, code of upstream, tells the server that the VM is off when the state was left at "stopping" | The service kept a machine without a session in a busy state, and nothing took the VM any more (runs 371 and 374). It is where `VBoxHeadless` ends up whenever it is told to end with a device of the host in the VM |
+| 2026-11-26 | That change is made in `uninit()` and not in the function which sets the state | A first version let that function through for every thread and every state while the object is being uninitialised. Its reader found that this reaches the undoing of a state save which failed, where a VM process could come to stand. The narrow one does one thing on one thread |
+| 2026-11-26 | Left as they are, both older than this work and in code of upstream: the call to the server from the thread which closes the session can meet a setter of the server which waits for that session; and a session which is closed while a state save of a paused VM that failed is being undone leaves the machine paused without a session | The first needs settings of the VM changed in the moment its session closes, and the call which says "stopping" has the same; the second is what was there before, and the first version of the change made it worse |
+| 2026-11-26 | A new build for a machine with real hardware, of the head with the two changes to Main | With the one before it, telling the frontend to end leaves a VM with a device which VirtualBox takes for busy; whoever tries the build on hardware ends a VM that way sooner or later |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4255,8 +4429,18 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 363 | `scratch/red-evidence-20` @ `5a8518a8` | tests, testcase expected to fail | failed as intended | 11 minutes, AMD EPYC 7763. The test for a live state which is refused while an EMT has work of the device, against the device which holds the lock of its slot while the VM is told: the one check it is about fails, nothing else does |
 | 364 | `pci-passthrough-hotplug-v1` @ `d85a8eed` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The head of the development line with the change about a live state which is refused, and the texts: the 59 tests and the three random tests pass with the sanitizers, without a report |
 | 365 | `pci-passthrough-hotplug-7.1-kvm` @ `4220a8d5` | tests | passed | 13 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend: it builds and `tstDevPciVfio` passes with its 59 tests |
-| 366 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | package, built with 3D acceleration | passed | 16 minutes, AMD EPYC 9V74. The package `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB, of the head with both changes of the day: the testcase passes in the run with its 59 tests, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched |
+| 366 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | package, built with 3D acceleration | passed | 16 minutes, AMD EPYC 9V74. The package `vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst`, 155 MB, of the head with both changes of the day: the testcase passes in the run with its 59 tests, the release workflow published the package, and `hw/builds.txt` had it as the build which is fetched until the one of run 378 |
 | 367 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the parts runner, simhost and barhost, strict | passed | 49 minutes, AMD EPYC 9V74. All 130 pass. The simulation on the head with both changes of the day, and the first run which fetches the package of run 366: the script gets the file which is listed, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
 | 368 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the part simhost, not strict | passed | 39 minutes, AMD EPYC 7763. All 114 pass. The first run in which the part with the device in the slot asks for a snapshot for which the VM is not paused: it is refused, nothing of it is left, and the VM runs on |
+| 369 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the part simhost, exploring | passed (4 checks of the simulation fail) | 47 minutes, Intel Xeon 6975P-C. 122 pass. The first run of the phase with a guest which uses no MSI and the device in the hot-plug capable slot: the guest reads from the drive with INTx through the port, and a live snapshot is refused. The four are the phase expecting the guest to let go of the device when asked, which a guest without MSI is not told; the phase was wrong, see "Who waits for whom, in Main and in the root port" |
+| 370 | `pci-passthrough-hotplug-7.2-kvm` @ `cc3dc981` | sim with the part simhost, exploring | passed (1 check of the simulation fails) | 44 minutes, AMD EPYC 7763. 125 pass. The phase as it is since, on the head without the change to Main: the VM process, told to end while a command waits for the guest to let go of a device, is still there 90 seconds later. That one is the check which fails, and what the change to Main is for |
+| 371 | `pci-passthrough-hotplug-7.2-kvm` @ `d9083189` | sim with the part simhost, not strict | passed | 37 minutes, Intel Xeon 6975P-C. All 126 pass. The head with the change to Main: the VM process ends within a second, with the VM powered off in order. What the run also shows and no check looked at: the service takes the VM for one with a session afterwards, see the same section |
+| 372 | `pci-passthrough-hotplug-v1` @ `d8d44eb9` | tests | passed | 10 minutes, AMD EPYC 7763. The development line with the change to Main: it builds and the tests pass |
+| 373 | `pci-passthrough-hotplug-7.1-kvm` @ `2c7878c5` | tests | passed | 21 minutes, AMD EPYC 9V45. The same on the 7.1 line with the KVM backend |
+| 374 | `pci-passthrough-hotplug-7.2-kvm` @ `d9083189` | sim with the part simhost, exploring | passed (2 checks of the simulation fail) | 41 minutes, Intel Xeon 6975P-C. 129 pass. The VM process is told to end twice, with nothing else going on and while a device is being taken out: it ends within a second both times, and both times the service does not know a minute later that the VM is off, which are the two checks. It is waiting for nothing; the state of the machine was left at "stopping". What the second change to Main is for |
+| 375 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the part simhost, not strict | passed | 43 minutes, Intel Xeon 6975P-C. All 131 pass. The head with both changes to Main: the VM process ends within a second when it is told to, with nothing else going on and while a device is being taken out, and the service knows at once that the VM is off |
+| 376 | `pci-passthrough-hotplug-v1` @ `2409b39e` | tests | passed | 9 minutes, Intel Xeon 6975P-C. The development line with both changes to Main: it builds and the tests pass |
+| 377 | `pci-passthrough-hotplug-7.1-kvm` @ `6d552882` | tests | passed | 15 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend |
+| 378 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | package, built with 3D acceleration | passed | 20 minutes, Intel Xeon 6975P-C. The package `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the two changes to Main: the testcase passes in the run, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched. No run has fetched it yet |
 
 Run numbers are those GitHub shows for the `build` workflow.

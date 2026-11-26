@@ -64,7 +64,7 @@ which can also be run by itself:
   The build it fetches has 3D acceleration for VMs, which takes a graphics
   card with a Vulkan driver on the host for a VM that has it switched on;
   the tests here do not switch it on. It is the build of the commit
-  `cc3dc981`, the head of its branch on 2026-11-25. There is a build
+  `b1136fa2`, the head of its branch on 2026-11-26. There is a build
   without 3D acceleration as well:
   `HW_BUILD=60-ubuntu sh hw/linux/fetch.sh`, see `hw/builds.txt`. That one
   is older and lacks three changes to the device. One is of 2026-11-24:
@@ -76,7 +76,11 @@ which can also be run by itself:
   the guest to its configuration space which is under way. The third is of
   that day too: a snapshot of a running VM is refused while the device is in
   the slot, and with the older build a VM with one CPU can stand still at
-  that moment where it is only to say no.
+  that moment where it is only to say no. It also lacks two changes of
+  2026-11-26 which are not in the device: when the program which runs the
+  VM is told to end while the device is in the VM, with the older build
+  that program may not end, or VirtualBox may take the VM for a busy one
+  afterwards until its service is started anew.
 - `bind.sh` refuses the card the firmware shows its screen on. A card the
   desktop of the host uses does not take being taken from its driver well;
   no monitor on the card and nothing of the host using it is the safe way.
