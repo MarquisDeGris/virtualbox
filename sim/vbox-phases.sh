@@ -1528,6 +1528,83 @@ phase_intx()
 }
 
 
+# The VM process is told to end, as a frontend is when its user logs out or a
+# service is stopped: it tries to save the state of a running VM, and where
+# that is refused, as it is with a device of the host in the VM, it closes the
+# session, which powers the VM down.  The process is to end, and VirtualBox is
+# to know afterwards that the VM is off.  With "unplug" a command which takes
+# the device out is waiting for the guest in that moment.
+frontend_told_to_end() # <plain|unplug>
+{
+    local pid i=0 st= what
+    case "$1" in
+        unplug) what="while a device is being taken out" ;;
+        *)      what="with a device of the host in the VM" ;;
+    esac
+    pid=$(pgrep -f "VBoxHeadless.*--comment $VM " | head -n 1)
+    if [ -z "$pid" ]; then
+        stage "the VM process ends when it is told to $what" skipped "no process of the VM was found"
+        return 1
+    fi
+    if [ "$1" = unplug ]; then
+        ( VBM_TIMEOUT=120 vbm controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000 > "$SIM_WORK/unplug-bg.out" 2>&1 ) &
+        sleep 5
+    fi
+    echo "+ kill -TERM $pid (the VM process)"
+    kill -TERM "$pid"
+    while kill -0 "$pid" 2> /dev/null && [ "$i" -lt 90 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2> /dev/null; then
+        stage "the VM process ends when it is told to $what" FAILED "it is still there after $i s"
+        kill -KILL "$pid"
+    else
+        stage "the VM process ends when it is told to $what" ok "$i s"
+    fi
+    if [ "$1" = unplug ]; then
+        wait
+        head -n 4 "$SIM_WORK/unplug-bg.out" 2> /dev/null | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
+    fi
+    # What VirtualBox makes of it: a minute for the VM to be off for it.
+    i=0
+    while [ "$i" -lt 60 ]; do
+        st=$(VBM_TIMEOUT=20 vbm showvminfo "$VM" --machinereadable 2> /dev/null | sed -n 's/^VMState="\(.*\)"$/\1/p')
+        case "$st" in poweroff|aborted) break ;; esac
+        sleep 2
+        i=$((i + 2))
+    done
+    case "$st" in
+        poweroff|aborted)
+            stage "VirtualBox knows that the VM is off after its process was told to end $what" ok "$st, after $i s"
+            return 0
+            ;;
+    esac
+    stage "VirtualBox knows that the VM is off after its process was told to end $what" FAILED "it tells '${st:-nothing}'"
+    echo "    ---- what there is of VirtualBox:"
+    pgrep -a -f 'VBox(SVC|Headless|XPCOMIPCD|Manage)' | sed -e 's/^\(.\{0,160\}\).*/    | \1/'
+    echo "    ---- showvminfo, 20 seconds given:"
+    VBM_TIMEOUT=20 vbm showvminfo "$VM" --machinereadable 2>&1 | grep -a -i -E '^VMState|^Session|error' | head -n 6 | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
+    if command -v gdb > /dev/null 2>&1; then
+        echo "    ---- where the threads of VBoxSVC are:"
+        timeout -k 5 90 gdb -batch -p "$(pgrep -x VBoxSVC | head -n 1)" -ex "thread apply all bt 14" 2>&1 \
+            | grep -a -E '^Thread |^#[0-9]+ ' | sed -e 's/^\(.\{0,170\}\).*/    | \1/' | head -n 220
+    else
+        echo "    ---- no gdb here"
+    fi
+    # The service is ended, so that what follows has one which knows.
+    pkill -x VBoxSVC 2> /dev/null
+    i=0
+    while pgrep -x VBoxSVC > /dev/null 2>&1 && [ "$i" -lt 20 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    pkill -KILL -x VBoxSVC 2> /dev/null
+    sleep 2
+    echo "    the service was ended; the VM is in state '$(vmstate)' for the new one"
+    return 1
+}
+
 # The same guest, which uses neither MSI nor MSI-X, with the device in the
 # hot-plug capable slot.  The interrupt of the drive is INTx and goes through
 # the port of the slot, and the port has no MSI for telling the guest of its
@@ -1605,37 +1682,16 @@ phase_intxslot()
         fi
         check_log_quiet
 
-        # Last, as the VM is gone after it: the frontend is told to end while
-        # a device is being taken out.  It tries to save the state, which is
-        # refused with the device in the VM, and closes the session, which
-        # powers the VM down.  The method of Main which takes the device out
-        # holds on to the VM for as long as the guest is given, and until late
-        # on 2026-11-25 what waits for the VM to be let go of could wait for
-        # good then: the VM process did not end.
-        local pid i=0
-        what="the VM process ends when it is told to while a device is being taken out"
-        pid=$(pgrep -f "VBoxHeadless.*--comment $VM " | head -n 1)
-        if [ -z "$pid" ]; then
-            stage "$what" skipped "no process of the VM was found"
-        else
-            ( VBM_TIMEOUT=120 vbm controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000 > "$SIM_WORK/unplug-bg.out" 2>&1 ) &
-            sleep 5
-            echo "+ kill -TERM $pid (the VM process), with unplugpci waiting for the guest"
-            kill -TERM "$pid"
-            while kill -0 "$pid" 2> /dev/null && [ "$i" -lt 90 ]; do
-                sleep 1
-                i=$((i + 1))
-            done
-            if kill -0 "$pid" 2> /dev/null; then
-                stage "$what" FAILED "it is still there after $i s"
-                kill -KILL "$pid"
-            else
-                stage "$what" ok "$i s"
-            fi
-            wait
-            head -n 4 "$SIM_WORK/unplug-bg.out" 2> /dev/null | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
-            sleep 3
-            echo "    the VM is in state '$(vmstate)' after that"
+        # Last, as the VM is gone after each: the VM process is told to end,
+        # once with nothing else going on and once while a device is being
+        # taken out.  The method of Main which takes the device out holds on
+        # to the VM for as long as the guest is given, and until late on
+        # 2026-11-25 what waits for the VM to be let go of could wait for good
+        # then: the VM process did not end.
+        frontend_told_to_end plain
+        if boot "the guest boots once more with the device in the slot"; then
+            guest_reads 1 "guest: reads from the drive after that start"
+            frontend_told_to_end unplug
         fi
     fi
     end_phase
