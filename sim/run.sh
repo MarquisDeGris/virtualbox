@@ -466,6 +466,14 @@ runner_phases="plain emptyslot nat import"
 if grep -q -s 'firmwaresetup' "$WS/src/VBox/Frontends/VBoxManage/VBoxManageModifyNvram.cpp"; then
     runner_phases="$runner_phases fwsetup"
 fi
+# The frontend told to end with the VM paused, as the last phase: in a tree
+# without the two changes to Main for it, told by its source, the service of
+# VirtualBox has to be started anew after it, and what goes wrong is told and
+# not counted.
+runner_phases="$runner_phases endpaused"
+main_ends=no
+grep -q -s 'callback could not do is done here' "$WS/src/VBox/Main/src-client/ConsoleImpl.cpp" && main_ends=yes
+echo "the tree has the changes to Main for a VM process which is told to end: $main_ends"
 # A build with the sanitizers (SIM_SANITIZED is yes): what they find in a
 # program of VirtualBox goes to files, one for each process, and the program
 # ends where the address sanitizer finds something.  Memory which is not
@@ -494,7 +502,7 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     boot_wait=600
 fi
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
-         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
+         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_MAIN_ENDS=$main_ends SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
          ${san_asan:+ASAN_OPTIONS="$san_asan"} ${san_ubsan:+UBSAN_OPTIONS="$san_ubsan"} ${san_asan:+SIM_PATIENCE=3} \
          ${san_asan:+LD_LIBRARY_PATH="$BIN"} \
     timeout -k 30 3000 bash "$SIM/vbox-phases.sh" $runner_phases

@@ -47,6 +47,9 @@ VM_T0=$(date +%s)
 # What the guest says on its serial port when it has booted and while it runs.
 UP_RE='GUEST: UP'
 ALIVE_RE='GUEST: ALIVE'
+# Whether the tree has the two changes to Main which let a VM process end and
+# have the service know of it, see main_stage.
+MAIN_ENDS=${SIM_MAIN_ENDS:-yes}
 
 # A host address nothing is at, and a layout as an NVMe drive has it, for the
 # VM which is started without a device where there is none to be had.
@@ -1528,17 +1531,52 @@ phase_intx()
 }
 
 
+# A check of what the two changes to Main of 2026-11-25 and -26 are for.  A
+# tree without them (MAIN_ENDS is no, told by its source in run.sh) is run all
+# the same: what goes wrong there is told and not counted.
+main_stage() # <what> <ok|FAILED|skipped> [<note>]
+{
+    if [ "$MAIN_ENDS" = no ] && [ "$2" = FAILED ]; then
+        stage "$1" skipped "a tree without the change to Main for it: ${3:-}"
+    else
+        stage "$1" "$2" "${3:-}"
+    fi
+}
+
+# Where those threads of a process are which are in the Console or in the
+# session, for a process which does not end.
+console_threads() # <pid>
+{
+    if ! command -v gdb > /dev/null 2>&1; then
+        echo "    ---- no gdb here"
+        return 0
+    fi
+    echo "    ---- the threads of process $1 which are in the Console or in the session:"
+    timeout -k 5 120 gdb -batch -p "$1" -ex "thread apply all bt 16" 2>&1 \
+        | grep -a -E '^Thread |^#[0-9]+ ' \
+        | awk '/^Thread / { if (blk ~ /Console[:][:]|Session[:][:]/) printf "%s", blk; blk = "" }
+               { blk = blk "    | " substr($0, 1, 170) "\n" }
+               END { if (blk ~ /Console[:][:]|Session[:][:]/) printf "%s", blk }' \
+        | head -n 120
+}
+
 # The VM process is told to end, as a frontend is when its user logs out or a
 # service is stopped: it tries to save the state of a running VM, and where
 # that is refused, as it is with a device of the host in the VM, it closes the
 # session, which powers the VM down.  The process is to end, and VirtualBox is
 # to know afterwards that the VM is off.  With "unplug" a command which takes
 # the device out is waiting for the guest in that moment.
-frontend_told_to_end() # <plain|unplug>
+# With "paused" and "dump" there is no device of the host in the VM, see
+# phase_endpaused.
+frontend_told_to_end() # <plain|unplug|paused|dump>
 {
-    local pid i=0 st= what
+    local pid i=0 st= what core= log a b tell=main_stage
+    DUMP_HIT=
+    log=$VMDIR/Logs/VBox.log
     case "$1" in
         unplug) what="while a device is being taken out" ;;
+        paused) what="with the VM paused" ;;
+        dump)   what="with the VM paused and its memory being written to a file" ;;
         *)      what="with a device of the host in the VM" ;;
     esac
     pid=$(pgrep -f "VBoxHeadless.*--comment $VM " | head -n 1)
@@ -1550,6 +1588,26 @@ frontend_told_to_end() # <plain|unplug>
         ( VBM_TIMEOUT=120 vbm controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000 > "$SIM_WORK/unplug-bg.out" 2>&1 ) &
         sleep 5
     fi
+    if [ "$1" = dump ]; then
+        # Somebody who holds on to the VM for a while: the memory of the guest
+        # is written to a file through the API.  The VM process is told to end
+        # as soon as the file is there.
+        core=$SIM_WORK/guest-core
+        rm -f "$core"
+        ( VBM_TIMEOUT=180 vbm debugvm "$VM" dumpvmcore --filename="$core" > "$SIM_WORK/dump-bg.out" 2>&1 ) &
+        while [ ! -e "$core" ] && [ "$i" -lt 1500 ]; do
+            sleep 0.02
+            i=$((i + 1))
+        done
+        if [ ! -e "$core" ]; then
+            wait
+            DUMP_HIT=yes
+            stage "the VM process ends when it is told to $what" skipped "no file was written"
+            head -n 4 "$SIM_WORK/dump-bg.out" 2> /dev/null | awk '{ print "    | " substr($0, 1, 200) }'
+            return 1
+        fi
+        i=0
+    fi
     echo "+ kill -TERM $pid (the VM process)"
     kill -TERM "$pid"
     while kill -0 "$pid" 2> /dev/null && [ "$i" -lt 90 ]; do
@@ -1557,14 +1615,41 @@ frontend_told_to_end() # <plain|unplug>
         i=$((i + 1))
     done
     if kill -0 "$pid" 2> /dev/null; then
-        stage "the VM process ends when it is told to $what" FAILED "it is still there after $i s"
+        main_stage "the VM process ends when it is told to $what" FAILED "it is still there after $i s"
+        console_threads "$pid"
         kill -KILL "$pid"
+        DUMP_HIT=yes
+    elif [ "$1" = dump ]; then
+        # Whether the memory was still being written when the session got
+        # closed is in the log of the VM: the line of the Console about
+        # powering the VM down from its uninit() comes before the line about
+        # the file then.  Only such a round tells something.
+        a=$(grep -a -n -m 1 'A request to power off the VM has been issued.*InUninit=1' "$log" 2> /dev/null | awk -F: '{ print $1 }')
+        b=$(grep -a -n -m 1 'Successfully wrote guest core dump' "$log" 2> /dev/null | awk -F: '{ print $1 }')
+        if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then
+            DUMP_HIT=yes
+            stage "the VM process ends when it is told to $what" ok "$i s; the file was still being written when the session got closed"
+        else
+            DUMP_HIT=no
+            tell=:
+            echo "    the file was written before the session got closed (lines ${a:-none} and ${b:-none} of the log of the VM): this round tells nothing"
+        fi
     else
         stage "the VM process ends when it is told to $what" ok "$i s"
+    fi
+    if [ "$1" = dump ] || [ "$1" = paused ]; then
+        grep -a -E 'A request to power off the VM has been issued|guest core dump|Machine state changed to' "$log" 2> /dev/null \
+            | tail -n 8 | awk '{ print "    | " substr($0, 1, 200) }'
     fi
     if [ "$1" = unplug ]; then
         wait
         head -n 4 "$SIM_WORK/unplug-bg.out" 2> /dev/null | sed -e 's/^\(.\{0,200\}\).*/    | \1/'
+    fi
+    if [ "$1" = dump ]; then
+        wait
+        head -n 4 "$SIM_WORK/dump-bg.out" 2> /dev/null | awk '{ print "    | " substr($0, 1, 200) }'
+        ls -s "$core" 2> /dev/null | awk '{ print "    | the file has " $1 " blocks" }'
+        rm -f "$core"
     fi
     # What VirtualBox makes of it: a minute for the VM to be off for it.
     i=0
@@ -1576,11 +1661,11 @@ frontend_told_to_end() # <plain|unplug>
     done
     case "$st" in
         poweroff|aborted)
-            stage "VirtualBox knows that the VM is off after its process was told to end $what" ok "$st, after $i s"
+            $tell "VirtualBox knows that the VM is off after its process was told to end $what" ok "$st, after $i s"
             return 0
             ;;
     esac
-    stage "VirtualBox knows that the VM is off after its process was told to end $what" FAILED "it tells '${st:-nothing}'"
+    $tell "VirtualBox knows that the VM is off after its process was told to end $what" FAILED "it tells '${st:-nothing}'"
     echo "    ---- what there is of VirtualBox:"
     pgrep -a -f 'VBox(SVC|Headless|XPCOMIPCD|Manage)' | sed -e 's/^\(.\{0,160\}\).*/    | \1/'
     echo "    ---- showvminfo, 20 seconds given:"
@@ -2341,6 +2426,50 @@ phase_fwsetup()
 }
 
 
+# The frontend is told to end with nothing of the passthrough device in the
+# VM.  The VM is paused, for which VBoxHeadless tries nothing: it closes the
+# session, and the Console powers the VM down from its uninit().  Twice: by
+# itself, and while somebody else holds on to the VM, which writing the memory
+# of the guest to a file does for as long as it takes.  Both went wrong in
+# the code this work began with (STATUS.md, "Who waits for whom"): the
+# service kept the VM as "stopping" for good, and the VM process did not end.
+# With the file it is a matter of the moment, so a round in which the file was
+# written before the session got closed tells nothing and there is another.
+phase_endpaused()
+{
+    PHASE=endpaused
+    local round=0
+    reset_vm
+    if boot "the guest boots, for its VM to be paused"; then
+        run controlvm "$VM" pause
+        if wait_state paused 30; then
+            frontend_told_to_end paused
+        else
+            stage "the VM process ends when it is told to with the VM paused" skipped "the VM is in state '$(vmstate)' and not paused"
+        fi
+    fi
+    keep_logs -paused
+    DUMP_HIT=
+    while [ "$round" -lt 3 ] && [ "$DUMP_HIT" != yes ]; do
+        round=$((round + 1))
+        reset_vm
+        boot "the guest boots once more, for the memory of its VM to be written (round $round)" || break
+        run controlvm "$VM" pause
+        if ! wait_state paused 30; then
+            echo "    the VM is in state '$(vmstate)' and not paused"
+            break
+        fi
+        frontend_told_to_end dump
+        keep_logs "-dump$round"
+    done
+    if [ "$DUMP_HIT" != yes ]; then
+        stage "the VM process ends when it is told to with the VM paused and its memory being written to a file" skipped \
+              "in $round rounds the file was never still being written when the session got closed"
+    fi
+    end_phase
+}
+
+
 # win-phases.sh takes the functions above and has phases of its own.
 [ -n "${SIM_LIB_ONLY:-}" ] && return 0
 
@@ -2363,6 +2492,7 @@ if setup; then
             startempty)  phase_startempty ;;
             intx)        phase_intx ;;
             intxslot)    phase_intxslot ;;
+            endpaused)   phase_endpaused ;;
             mfpassthrough) phase_mfpassthrough ;;
             mfhotplug)     phase_mfhotplug ;;
             mfstartempty)  phase_mfstartempty ;;
