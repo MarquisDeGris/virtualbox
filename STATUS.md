@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-22
+Updated: 2026-11-26
 
 ## Where things are
 
@@ -15,6 +15,7 @@ Updated: 2026-11-22
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
 | Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
+| Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -3006,8 +3007,120 @@ The heads are `pci-passthrough-hotplug-v1` @ `2409b39e` (46 commits),
 two changes are in Main, which the testcase does not reach, and the
 last simulation with the sanitizers in the whole build is older; the
 two lines without the KVM backend by themselves; the simulation on the
-development line and on the 7.1 line. Run 379 fetched the build of run
+7.1 line (the development line had it with run 381, see below). Run 379
+fetched the build of run
 378 and used it, see "Machines with real hardware".
+
+**The same with upstream's code alone (2026-11-26).** Whether to tell
+upstream of the two things in Main had been left to who this work is
+for, and the answer of 2026-11-26 was yes. Until then both had been seen
+with a device of the host in the VM only; that they are upstream's was
+read, not shown. The part of the simulation on the runner has a phase
+for it since, the last one (`endpaused`): a VM with nothing of this work
+in it is paused and its process is told to end. `VBoxHeadless` tries
+nothing for a paused VM and closes the session, so the Console powers
+the VM down from its `uninit()`. Once by itself, and once while the
+memory of the guest is being written to a file through the API
+(`debugvm dumpvmcore`), which holds on to the VM for as long as it
+writes. With the file it is a matter of the moment, so the log of the VM
+is read for whether the file was still being written when the session
+got closed; a round in which it was not tells nothing, and there are
+three. A tree without the two changes, told by its source, runs the
+phase all the same, and what goes wrong there is told as skipped and not
+counted.
+
+**Run 380** (`sim` with the part runner, exploring, `main` @ `b6bea721`,
+which is upstream's without any change, 10 minutes, AMD EPYC 7763; the
+engine is KVM there): both show. With the VM paused the process ends
+within two seconds; the log of the VM has no line about the VM being
+off and, where it would be, the failed attempt of the function which
+sets the state to become a caller of the Console; and `VBoxManage
+showvminfo` fails from then on for the 90 seconds the service was given
+(`LockMachine`, `NS_ERROR_FAILURE`, which is the server refusing a
+session for a machine in a busy state). A service started anew has the
+VM as powered off. With the file being written, in the first round: the
+VM process is still there 90 seconds later, its main thread in
+`Console::i_powerDown()` under `Console::uninit()`, and the log has the
+failed attempt of `i_releaseVMCaller()` right after the line about the
+file.
+
+**Run 381** (`sim` with the parts runner and simhost, not strict as the
+first run with the new phase, `pci-passthrough-hotplug-v1` @
+`2409b39e`, 44 minutes, Intel Xeon 6975P-C): all 137 checks pass and
+none is skipped. In the new phase the process ends within two seconds
+both times, the second time with the file still being written when the
+session got closed (it was done 0.4 seconds after), the log of the VM
+has its line about the VM being off, and the service has the VM as
+powered off at once. It is the first simulation of the development
+line with the two changes as well: the part with the drive passes
+there, 98 checks, with the phase of the guest without MSI in which the
+frontend is told to end with the device in the VM and while it is
+being taken out.
+
+Upstream was told on 2026-11-26: issue 1009 of its
+tracker, https://github.com/VirtualBox/virtualbox/issues/1009, in the
+form for bugs: what goes wrong and where in the source, the commands
+which show it, what run 380 has of it (the lines of the logs, the stack
+of the process which stays), the two commits, and what run 381 has
+with them. It says what was not tried: other hosts than Linux, other
+frontends, and the released lines, whose code is the same in these
+places.
+
+### Two things read in the interrupt code of upstream (2026-11-26)
+
+The readers of 2026-11-25 had left two suspicions about code of upstream
+which is outside the passthrough device. Whether to spend time on them
+was a question to who this work is for, and the answer of 2026-11-26 was
+yes: look into them, and tell upstream if they hold. Both hold as facts
+of the source of `main` (b6bea721). Neither was tried in a VM. Both came
+with virtual interrupt delivery on 2026-08-25 (472003b54f, 66f002734f,
+92ac7a1f6e of upstream) and are in `main` only: the 7.2 and 7.1 lines
+have none of that code, so the lines with the KVM backend, which are
+the ones for the target, are not affected.
+
+- **After a saved state is loaded, the EOI of a level-triggered
+  interrupt does not get to the I/O APIC**, with VT-x and virtual
+  interrupt delivery. The EOI exit bitmap is built from a copy of the
+  redirection table which the APIC keeps, the copy is written only when
+  the guest writes an entry, it is not in the saved state, and loading
+  the table does not tell the APIC. The bitmaps start as zero and are
+  written anew only when the copy changes. So after a load the EOI is
+  virtualized without an exit, the remote IRR bit of the entry stays
+  set, and the pin delivers one interrupt and no more. It is the same
+  gap which `f563e7f8e7` of this work closed for the KVM backend of
+  `main` on 2026-11-19, where it was seen with a Windows guest and the
+  power button; that commit left the other backends alone on purpose.
+  Trying it takes an Intel host which offers virtual interrupt delivery
+  to VirtualBox. The runners of
+  GitHub run VirtualBox with KVM as its engine (run 380), so the
+  simulation cannot.
+- **The I/O APIC stores an entry which it computed before it released
+  its lock.** `ioapicSetRedirTableEntry` reads the entry, computes the
+  new one with the bits a guest cannot write taken over, releases the
+  lock to tell the APIC (which gathers all EMTs when something of
+  the route changed), takes the lock again and stores what it computed.
+  An EOI on another EMT in between clears the remote IRR bit, and the
+  store sets it again: the pin is dead from then on. It takes a guest
+  which writes a level-triggered entry while the interrupt of that entry
+  is in service on another CPU. Linux does both under one lock, so it is
+  probably rare; nothing here tried to hit it.
+
+Neither is a way for a guest to do anything to a host: a guest loses
+interrupts of its own. Nothing was changed for them in the branches.
+The development line is as `main` is in both; a change there would be
+one to the I/O APIC and the APIC with no test which reaches it, for a
+host this work has none of. Upstream was told: issue 1008 of its
+tracker, https://github.com/VirtualBox/virtualbox/issues/1008, filed
+on 2026-11-26 in the form for bugs, saying in its first paragraph that
+both are from reading and neither was tried. Before it was filed
+somebody who had not been told what was suspected was given the source
+and the two questions, what the EOI exit bitmaps are made of after a
+load and whether every value the function stores is still valid when
+it stores it, and came to the same two answers. That reader added that
+the pin comes back with a reset of the I/O APIC or a write to its EOI
+register, that an interrupt delivered in the window is delivered twice,
+and that only the xAPIC mode of the guest was traced; the issue says
+so.
 
 ### The issue with upstream, 2026-11-23
 
@@ -3050,6 +3163,21 @@ the issue was filed: nothing was found (183 commits on this branch,
 368 on the code branches, the names of the branches, the texts of the
 merge requests and releases, the profile). Nobody else has written
 there so far.
+
+Since 2026-11-26 there are two more issues from this side, both in the
+form for bugs and both after a yes of who this work is for: 1008,
+https://github.com/VirtualBox/virtualbox/issues/1008, with two things
+read in the interrupt code of `main` (see "Two things read in the
+interrupt code of upstream"), and 1009,
+https://github.com/VirtualBox/virtualbox/issues/1009, with the two
+defects of Main which let a VM process stay and a machine keep the
+state "stopping" (see "Who waits for whom, in Main and in the root
+port"). The text of each was searched for names before it was filed,
+and all the fork has in public on the same day, before and after:
+nothing was found (215 commits on this branch, 404 on the code
+branches, the names of the branches, the texts of the merge requests
+and releases, the profile). The three issues are looked at whenever the
+work is taken up, and whoever answers there is answered there.
 
 ### Requests from the tracker of upstream, from 2026-11-22
 
@@ -3955,9 +4083,11 @@ harness since WP5, saved states since the fourth part of WP6.
    which is code of upstream, on all five branches, after which the VM
    process ends and VirtualBox knows that the VM is off when a frontend
    is told to end with a device of the host in the VM. Left, and listed
-   there: what the readers found and what was not changed. Not done: the
-   simulation with these changes on the development line and on the 7.1
-   line.
+   there: what the readers found and what was not changed. The
+   simulation with these changes ran on the development line (run 381),
+   and both things were shown with upstream's code alone (run 380) and
+   told to upstream (issue 1009). Not done: the simulation with these
+   changes on the 7.1 line.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4119,6 +4249,10 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-26 | That change is made in `uninit()` and not in the function which sets the state | A first version let that function through for every thread and every state while the object is being uninitialised. Its reader found that this reaches the undoing of a state save which failed, where a VM process could come to stand. The narrow one does one thing on one thread |
 | 2026-11-26 | Left as they are, both older than this work and in code of upstream: the call to the server from the thread which closes the session can meet a setter of the server which waits for that session; and a session which is closed while a state save of a paused VM that failed is being undone leaves the machine paused without a session | The first needs settings of the VM changed in the moment its session closes, and the call which says "stopping" has the same; the second is what was there before, and the first version of the change made it worse |
 | 2026-11-26 | A new build for a machine with real hardware, of the head with the two changes to Main | With the one before it, telling the frontend to end leaves a VM with a device which VirtualBox takes for busy; whoever tries the build on hardware ends a VM that way sooner or later |
+| 2026-11-26 | Upstream is told of the two defects in Main in an issue of its own (1009), and only after they were shown with its code alone | Who this work is for said yes. Seen with a device of the host in the VM they could be taken for something of this work; the phase `endpaused` has them with a paused VM and nothing else, and run 380 with `main` as it is |
+| 2026-11-26 | The two suspicions about the interrupt code of upstream were looked into, and upstream is told of them (issue 1008) as read and not tried | Who this work is for said yes to both. Both hold by reading, somebody who was not told what was suspected came to the same answers, and there is no host here to try the first one on |
+| 2026-11-26 | Nothing is changed in the branches for those two | They are in `main` only; the lines for the target do not have the code. A change to the I/O APIC and the APIC of the development line would have no test which reaches it |
+| 2026-11-26 | The phase `endpaused` runs in every simulation with the part on the runner, and a tree without the two changes to Main has what goes wrong told as skipped | It costs two or three starts of the guest. The branches for requests of the upstream tracker are `main` with one change each and do not have the two changes; their runs are not to fail for what is upstream's |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4448,5 +4582,7 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 377 | `pci-passthrough-hotplug-7.1-kvm` @ `6d552882` | tests | passed | 15 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend |
 | 378 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | package, built with 3D acceleration | passed | 20 minutes, Intel Xeon 6975P-C. The package `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the two changes to Main: the testcase passes in the run, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched. Run 379 fetched it |
 | 379 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the parts runner and barhost, strict | passed | 29 minutes, AMD EPYC 9V74. All 51 pass. The first run which fetches the package of run 378: the script gets the file which is listed, its VBoxManage runs, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
+| 380 | `main` @ `b6bea721` | sim with the part runner, exploring | passed | 10 minutes, AMD EPYC 7763. Upstream's code without any change, with the new phase `endpaused`: 23 checks pass and 2 are told as skipped, which are the two things in Main. With the VM paused and its process told to end, `showvminfo` fails afterwards until the service is started anew; with the memory of the guest being written to a file in that moment, the VM process is still there after 90 seconds, its main thread in `Console::i_powerDown()` |
+| 381 | `pci-passthrough-hotplug-v1` @ `2409b39e` | sim with the parts runner and simhost | passed | 44 minutes, Intel Xeon 6975P-C. All 137 pass, none skipped. The same phase with the two changes to Main: the process ends within two seconds both times and the service has the VM as powered off at once. The first simulation of the development line with the two changes |
 
 Run numbers are those GitHub shows for the `build` workflow.
