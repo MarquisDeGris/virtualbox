@@ -3006,8 +3006,9 @@ The heads are `pci-passthrough-hotplug-v1` @ `2409b39e` (46 commits),
 `-7.1-kvm` @ `6d552882`. Not run: the sanitizers on these heads, as the
 two changes are in Main, which the testcase does not reach, and the
 last simulation with the sanitizers in the whole build is older; the
-two lines without the KVM backend by themselves; the simulation on the
-7.1 line (the development line had it with run 381, see below). Run 379
+two lines without the KVM backend by themselves. The simulation ran on
+the development line and on the 7.1 line afterwards (runs 381 and 382,
+see below and the list of runs). Run 379
 fetched the build of run
 378 and used it, see "Machines with real hardware".
 
@@ -4086,8 +4087,8 @@ harness since WP5, saved states since the fourth part of WP6.
    there: what the readers found and what was not changed. The
    simulation with these changes ran on the development line (run 381),
    and both things were shown with upstream's code alone (run 380) and
-   told to upstream (issue 1009). Not done: the simulation with these
-   changes on the 7.1 line.
+   told to upstream (issue 1009). The simulation ran with these changes
+   on the 7.1 line as well (run 382).
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4584,5 +4585,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 379 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the parts runner and barhost, strict | passed | 29 minutes, AMD EPYC 9V74. All 51 pass. The first run which fetches the package of run 378: the script gets the file which is listed, its VBoxManage runs, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
 | 380 | `main` @ `b6bea721` | sim with the part runner, exploring | passed | 10 minutes, AMD EPYC 7763. Upstream's code without any change, with the new phase `endpaused`: 23 checks pass and 2 are told as skipped, which are the two things in Main. With the VM paused and its process told to end, `showvminfo` fails afterwards until the service is started anew; with the memory of the guest being written to a file in that moment, the VM process is still there after 90 seconds, its main thread in `Console::i_powerDown()` |
 | 381 | `pci-passthrough-hotplug-v1` @ `2409b39e` | sim with the parts runner and simhost | passed | 44 minutes, Intel Xeon 6975P-C. All 137 pass, none skipped. The same phase with the two changes to Main: the process ends within two seconds both times and the service has the VM as powered off at once. The first simulation of the development line with the two changes |
+| 382 | `pci-passthrough-hotplug-7.1-kvm` @ `6d552882` | sim with the parts runner and simhost | passed | 46 minutes, AMD EPYC 7763. All 137 pass, none skipped. The first simulation of the 7.1 line with the two changes to Main, and the first time the phase `endpaused` runs with the KVM backend of Cyberus Technology: the process ends within two seconds both times, the second time with the file still being written when the session got closed, and the service has the VM as powered off at once. In the part with the drive the frontend is told to end with the device in the VM and while it is being taken out, and both end in order |
 
 Run numbers are those GitHub shows for the `build` workflow.
