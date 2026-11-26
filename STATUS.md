@@ -1711,7 +1711,12 @@ checks with that build. All 130 checks of the run pass. **Run 378**
 fetched since, `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB: it
 has, besides, the two changes to Main of that day, see "Who waits for
 whom, in Main and in the root port". The testcase passes in the run.
-No run had fetched it when this was written.
+**Run 379** (the same day, `sim` with the parts runner and barhost,
+strict, the same commit, 29 minutes, AMD EPYC 9V74) fetched it as a
+machine with real hardware does: the script gets the file which is
+listed, with its checksum, its `VBoxManage` runs, and the first test
+goes through its 15 checks with that build. All 51 checks of the run
+pass.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -3001,8 +3006,8 @@ The heads are `pci-passthrough-hotplug-v1` @ `2409b39e` (46 commits),
 two changes are in Main, which the testcase does not reach, and the
 last simulation with the sanitizers in the whole build is older; the
 two lines without the KVM backend by themselves; the simulation on the
-development line and on the 7.1 line; and a run which fetches the build
-of run 378.
+development line and on the 7.1 line. Run 379 fetched the build of run
+378 and used it, see "Machines with real hardware".
 
 ### The issue with upstream, 2026-11-23
 
@@ -3950,9 +3955,9 @@ harness since WP5, saved states since the fourth part of WP6.
    which is code of upstream, on all five branches, after which the VM
    process ends and VirtualBox knows that the VM is off when a frontend
    is told to end with a device of the host in the VM. Left, and listed
-   there: what the readers found and what was not changed. Not done: a
-   run which fetches the build of run 378, and the simulation with
-   these changes on the development line and on the 7.1 line.
+   there: what the readers found and what was not changed. Not done: the
+   simulation with these changes on the development line and on the 7.1
+   line.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4441,6 +4446,7 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 375 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the part simhost, not strict | passed | 43 minutes, Intel Xeon 6975P-C. All 131 pass. The head with both changes to Main: the VM process ends within a second when it is told to, with nothing else going on and while a device is being taken out, and the service knows at once that the VM is off |
 | 376 | `pci-passthrough-hotplug-v1` @ `2409b39e` | tests | passed | 9 minutes, Intel Xeon 6975P-C. The development line with both changes to Main: it builds and the tests pass |
 | 377 | `pci-passthrough-hotplug-7.1-kvm` @ `6d552882` | tests | passed | 15 minutes, Intel Xeon 6975P-C. The same on the 7.1 line with the KVM backend |
-| 378 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | package, built with 3D acceleration | passed | 20 minutes, Intel Xeon 6975P-C. The package `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the two changes to Main: the testcase passes in the run, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched. No run has fetched it yet |
+| 378 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | package, built with 3D acceleration | passed | 20 minutes, Intel Xeon 6975P-C. The package `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB, of the head with the two changes to Main: the testcase passes in the run, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched. Run 379 fetched it |
+| 379 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the parts runner and barhost, strict | passed | 29 minutes, AMD EPYC 9V74. All 51 pass. The first run which fetches the package of run 378: the script gets the file which is listed, its VBoxManage runs, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
 
 Run numbers are those GitHub shows for the `build` workflow.
