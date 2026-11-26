@@ -879,6 +879,24 @@ void Console::uninit()
         Assert(mpUVM == NULL);
     }
 
+    /*
+     * A VM which is powered down tells of its last state on a thread of its
+     * own, and i_vmstateChangeCallback() takes that to i_setMachineState(),
+     * which gives up for a thread that cannot become a caller of this object,
+     * as none but this one can since this function was entered.  The state
+     * stayed Stopping then, here and on the server, be it this function which
+     * powered the VM down or somebody who was at it when this function came.
+     * The session ends right after, in good order, and for a session which
+     * ends that way the server leaves the state of the machine alone: a
+     * machine with no session in a state which says that it is busy, which
+     * takes no session until the server is started anew.  So what the
+     * callback could not do is done here.  Nobody else is powering the VM
+     * down any more at this point, they were waited for.
+     */
+    if (   mpUVM == NULL
+        && mMachineState == MachineState_Stopping)
+        i_setMachineState(MachineState_PoweredOff);
+
     if (mVMZeroCallersSem != NIL_RTSEMEVENT)
     {
         RTSemEventDestroy(mVMZeroCallersSem);
