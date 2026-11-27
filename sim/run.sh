@@ -412,6 +412,9 @@ make_guest_disk guest-quiet "console=ttyS0,115200 quiet loglevel=3 mitigations=o
 # A guest which does not use MSI or MSI-X: its drivers get the INTx interrupts
 # of their devices (the phase "intx").
 make_guest_disk guest-nomsi "console=ttyS0,115200 quiet loglevel=3 mitigations=off rdinit=/init panic=30 pci=nomsi"
+# A guest which is told not to use the clock of the KVM paravirtualization
+# interface (the phase "devtime").
+make_guest_disk guest-noclock "console=ttyS0,115200 ignore_loglevel rdinit=/init panic=30 pciehp.dyndbg=+p no-kvmclock"
 # A guest which looks at the graphics adapter of its VM and writes to its
 # screen (the phase "gfx3d").  The serial port stays the console the script
 # of the guest talks on.
@@ -516,7 +519,7 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     boot_wait=600
 fi
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
-         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_MAIN_ENDS=$main_ends SIM_TIMER_DEADLINE=$timer_deadline SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
+         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" GUEST_RAW_NOCLOCK="$WORK/guest-noclock.raw" SIM_WHERE=runner SIM_MAIN_ENDS=$main_ends SIM_TIMER_DEADLINE=$timer_deadline SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
          ${san_asan:+ASAN_OPTIONS="$san_asan"} ${san_ubsan:+UBSAN_OPTIONS="$san_ubsan"} ${san_asan:+SIM_PATIENCE=3} \
          ${san_asan:+LD_LIBRARY_PATH="$BIN"} \
     timeout -k 30 3000 bash "$SIM/vbox-phases.sh" $runner_phases

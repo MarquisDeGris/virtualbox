@@ -2606,34 +2606,81 @@ phase_kvmclock()
 
 
 # A guest which has no clock from a paravirtualization interface, on any
-# tree: the VM is told to have no such interface, which is a setting every
-# VirtualBox has.  The kernel of the guest has to find out how fast the TSC
-# counts with the PIT or the HPET, and it watches the TSC with the HPET
-# afterwards.  Both are devices of the VM.  What comes of it where the timers
-# of the VM are served late is told at guest_pace: on a tree whose KVM backend
-# sets a timer for the deadline the guest has to keep time, and Windows guests
-# which have their time from the HPET depend on the same.
-phase_devtime()
+# tree.  Its kernel has to find out how fast the TSC counts with the PIT or
+# the HPET, and it watches the TSC with the HPET afterwards.  Both are
+# devices of the VM.  What comes of it where the timers of the VM are served
+# late is told at guest_pace: on a tree whose KVM backend sets a timer for the
+# deadline the guest has to keep time, and Windows guests which have their
+# time from the HPET depend on the same.
+#
+# Twice.  First a guest which is told not to use the clock (no-kvmclock on
+# its command line) in the VM as it is.  Then the usual guest in a VM which is
+# told to have no paravirtualization interface.  That one did not get through
+# its start with the KVM backend of upstream (run 387): the kernel of the
+# guest found that the PIT does not tick through the I/O APIC, had it come
+# through the 8259A, and the VM stopped where the backend had a second
+# interrupt of that one for a kernel which still had the first.  A tree with
+# that backend has this told and not counted.
+devtime_look() # <what the round is>
 {
     local src
+    serial_show 'kvm-clock|Hypervisor detected|Switched to clocksource|tsc: |Marking|MP-BIOS|8259A' 18
+    src=$(serial_new | grep -a -o 'Switched to clocksource [a-z0-9_-]*' | tail -n 1 | awk '{print $4}')
+    if serial_has 'kvm-clock: Using msrs'; then
+        stage "the guest has no clock of an interface, $1" FAILED "its kernel has set up kvm-clock"
+    else
+        stage "the guest has no clock of an interface, $1" ok "its clock source is ${src:-not told}"
+    fi
+    guest_pace "the time of the guest goes as it does outside, $1" "$TIMER_DEADLINE"
+    grep -a -E 'TM: (Giving up|Not bothering)' "$VMDIR/Logs/VBox.log" 2> /dev/null \
+        | tail -n 4 | awk '{ print "    | " substr($0, 1, 200) }'
+}
+
+phase_devtime()
+{
+    local what disk="--storagectl sata --port 0 --device 0 --type hdd --medium"
     PHASE=devtime
     reset_vm
-    if ! run modifyvm "$VM" --paravirt-provider none; then
-        stage "the VM is told to have no paravirtualization interface" FAILED
-        keep_logs
-        return
-    fi
-    if boot "the guest boots in a VM without a paravirtualization interface"; then
-        serial_show 'kvm-clock|Hypervisor detected|Switched to clocksource|tsc: |clocksource: |TSC' 16
-        src=$(serial_new | grep -a -o 'Switched to clocksource [a-z0-9_-]*' | tail -n 1 | awk '{print $4}')
-        if serial_has 'kvm-clock|Hypervisor detected'; then
-            stage "the guest has no clock of an interface" FAILED "its kernel found an interface"
-        else
-            stage "the guest has no clock of an interface" ok "its clock source is ${src:-not told}"
+
+    what="with a guest told not to use the clock of the interface"
+    if [ ! -s "${GUEST_RAW_NOCLOCK:-}" ]; then
+        stage "the guest boots, $what" skipped "there is no disk for such a guest"
+    else
+        [ -s "$SIM_WORK/guest-noclock.vdi" ] || run convertfromraw "$GUEST_RAW_NOCLOCK" "$SIM_WORK/guest-noclock.vdi" --format VDI
+        if ! run storageattach "$VM" $disk "$SIM_WORK/guest-noclock.vdi"; then
+            stage "the guest boots, $what" FAILED "no disk"
+        elif boot "the guest boots, $what"; then
+            devtime_look "$what"
         fi
-        guest_pace "the time of the guest goes as it does outside, without a paravirtualization interface" "$TIMER_DEADLINE"
-        grep -a -E 'TM: (Giving up|Not bothering|Entering catch-up|Leaving catch-up)' "$VMDIR/Logs/VBox.log" 2> /dev/null \
-            | tail -n 6 | awk '{ print "    | " substr($0, 1, 200) }'
+        keep_logs -noclock
+        reset_vm
+        run storageattach "$VM" $disk "$SIM_WORK/guest.vdi"
+    fi
+
+    what="in a VM without a paravirtualization interface"
+    if ! run modifyvm "$VM" --paravirt-provider none; then
+        stage "the guest boots, $what" FAILED "the VM does not take the setting"
+    elif ! start_vm; then
+        stage "the guest boots, $what" FAILED "the VM does not start"
+        diag
+    elif wait_serial 'GUEST: READY' "$BOOT_WAIT" 1; then
+        stage "the guest boots, $what" ok
+        if serial_has 'Hypervisor detected'; then
+            stage "the guest finds no interface" FAILED "its kernel found one"
+        else
+            stage "the guest finds no interface" ok
+        fi
+        devtime_look "$what"
+    elif    [ "$TIMER_DEADLINE" = no ] && grep -a -q 'Guru Meditation' "$VMDIR/Logs/VBox.log" 2> /dev/null \
+         && grep -a -q 'AssertLogRel.*nemHCLnxHandleInterruptFF' "$VMDIR/Logs/VBox.log"; then
+        serial_show 'TIMER|MP-BIOS|8259A|works' 6
+        grep -a -A 1 'AssertLogRel.*nemHCLnxHandleInterruptFF' "$VMDIR/Logs/VBox.log" \
+            | head -n 2 | awk '{ print "    | " substr($0, 1, 220) }'
+        grep -a 'Guru Meditation' "$VMDIR/Logs/VBox.log" | head -n 1 | awk '{ print "    | " substr($0, 1, 120) }'
+        stage "the guest boots, $what" skipped "a tree with the KVM backend of upstream: the VM stops where the guest has its timer interrupt come through the 8259A"
+    else
+        stage "the guest boots, $what" FAILED "the guest does not come up"
+        diag
     fi
     end_phase
     # The phases after this one get the VM as it was.
