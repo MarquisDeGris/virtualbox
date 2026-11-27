@@ -7,7 +7,7 @@ Updated: 2026-11-27
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `2409b39e`, 46 commits. The last two are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `5732c720`, 48 commits. The last two are of 2026-11-27: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -3144,6 +3144,233 @@ register, that an interrupt delivered in the window is delivered twice,
 and that only the xAPIC mode of the guest was traced; the issue says
 so.
 
+### A graphics card with its legacy VGA ranges in the slot (2026-11-27)
+
+What this work is for is a graphics card which comes and goes, and a
+card which is to show a guest from its start has its legacy VGA ranges
+given to the VM (`ExposeVga`): the I/O ports 0x3b0 to 0x3bb and 0x3c0 to
+0x3df and the memory at 0xa0000. The two had not been together in any
+test. The testcase had the ranges with a device which stays for the
+life of the VM (`tstVga`) and the slot with devices which have no such
+ranges; the simulation had the second script for a machine with real
+hardware with these ranges (`HW_VGA=yes`, since run 294) and the third,
+in which the device leaves the guest and comes back, without them. It
+was on the list of what is open as "test-c with `HW_VGA`".
+
+**What the code does**, read on 2026-11-27 (`DevPciVfio.cpp` @
+`2409b39e`): the ranges are made once, when the VM is built, also in a
+VM which starts without the device when the configuration asks for them
+and what a VM with the device told has them; they are the VM's until it
+ends. Every access through them goes through the device file with the
+check every other access has: a function which is out of service reads
+as all ones and takes no write. When a device is put into the slot the
+kernel is asked where its legacy VGA region is, and a device without
+one is refused as another kind of device. Nothing was found wrong in
+that.
+
+**What was found on the way**, by holding the stand-in for the kernel
+of the testcase against the source of the kernel (Linux 7.0,
+`drivers/vfio/pci/vfio_pci_core.c`): the kernel has the legacy VGA
+region of a VGA device only when it was built with
+`CONFIG_VFIO_PCI_VGA` and its module `vfio-pci` was not loaded with
+`disable_vga`, and where it has none it does not answer with a region
+of no size, as it does for a BAR which is not there and as the stand-in
+did. It refuses the question with EINVAL. The device, upstream's code
+in this, took that for a failure of the question: a VM with `ExposeVga`
+on such a host did not start, which is right, and said "Getting
+information for region 8 of opened VFIO device failed with 22", which
+tells nobody what to do; a card put into the slot of a VM with these
+ranges was refused with the same words. Nothing unsafe: no VM got
+ranges in either case.
+
+**What was changed.**
+
+- The device asks about this region with a function of its own, which
+  gives the refusal back as a region that is not there
+  (`pciVfioQueryVgaRegionInfo`). The VM does not start and says that
+  the kernel of the host has no legacy VGA ranges to give for the
+  device and what it takes to have them; a card for the slot is refused
+  as another kind of device, the legacy VGA ranges being what differs,
+  and the log has a line which names the option of the kernel and the
+  parameter. Which VM gets ranges and which device is taken is as
+  before. The
+  stand-in for the kernel refuses as the kernel does, and `tstVga` has
+  a device for which the kernel has no such ranges, with `ExposeVga`
+  (the VM does not start and names `CONFIG_VFIO_PCI_VGA`) and without
+  (it is passed through).
+- A new test of the testcase, `tstSlotVga`: a VGA device with
+  `ExposeVga` in the slot. While the slot is empty the VM still has the
+  ports, a read through either range of them and from the video memory
+  finds nothing, and a write and a fill get neither to the device nor
+  to what stands in for it, whether the device was taken out
+  from under the guest, with the slot switched off, or pulled from the
+  host; when it is back the guest reaches it there again. A device the
+  kernel has no such ranges for is refused, in a VM which was started
+  with the device and in one which was started without. That one has
+  the ranges with nothing behind them until the device is put in.
+- The third script for a machine with real hardware takes `HW_VGA=yes`
+  (`hw-out/test-c-vga.txt`): the guest tells every few seconds what a
+  register of the card reads as through the legacy ports, and the
+  script has two checks more in each round, that nothing answers there
+  while the card is out and that the register of the card is read again
+  when it is back. `hw/linux/tests.sh` runs it for a graphics card
+  after the third test, and the simulation has it in its part with the
+  VGA adapter (`vgahost`).
+- The script of the checklist has a line for a VGA device which tells
+  whether the kernel gives its legacy VGA ranges away, and the
+  inventory tells `CONFIG_VFIO_PCI_VGA` and the parameter of `vfio-pci`.
+  INSTALL.md (V4) and HWTEST.md name the kernel option.
+
+**What was found and left.**
+
+- The ranges answer while the guest has the slot switched off and the
+  device is still in the VM, and for a device which was put in before
+  the guest has switched the slot on: the device is reset and disabled
+  then and the guest reaches neither its configuration space nor its
+  BARs, but
+  an access to a legacy port or to the memory at 0xa0000 goes to the
+  kernel for the card as at any other time, and the kernel has its VGA
+  arbiter hand these ranges to the card for each access without
+  looking at what the guest has switched off (`vfio_pci_vga_rw`). A
+  card in a slot without power would not answer. It is the guest's own
+  card all the while; nothing was changed.
+- A VM which is started without its card has the ranges only if what
+  the last start with the card told has them. With `ExposeVga` set
+  after that start, a start without the card has none, and a card
+  which is put in then is passed through without them until the VM is
+  started with the card. The log tells nothing of it.
+
+**What the setting costs a host**, read on the same day in the source
+of the kernel (`vfio_pci_vga_rw` in `drivers/vfio/pci/vfio_pci_rdwr.c`
+and `drivers/pci/vgaarb.c`, Linux 7.0) and not tried: every access of
+the guest to these ranges has the kernel hand them to the card of the
+VM through its VGA arbiter. A card of the host which still answers at
+the legacy ranges loses them then, and where no bridge can do that for
+it, as for a card on the root bus, the kernel switches the memory and
+I/O decoding of that card off; nothing switches them on again by
+itself. The usual graphics drivers say that their card can do without
+the legacy ranges when the arbiter asks them, which it does when it is
+first used with more than one card, and such a card is left alone. A
+card with the frame buffer of the firmware only is not: a guest with
+these ranges can make the screen of such a host stand still. That is
+the kernel's doing, `ExposeVga` is off unless somebody sets it, and a
+guest whose driver takes the card needs it only to be seen before that.
+INSTALL.md says so under its list for the VM and names what keeps it
+away for good: `vfio-pci` loaded with
+`disable_vga=1`, with which a VM that has `ExposeVga` does not start
+and, since the change above, says why. The simulation shows nothing of
+this: its machine which stands in for a host has one graphics adapter,
+the one which is passed through.
+
+**Read by somebody else before it went in.** The two commits for the
+tree (the device with the stand-in for the kernel and `tstVga`, and the
+new test) were given to a reader who had not written them, with the
+source of the kernel and the question what is wrong in them, before
+they went to a branch. The reader found nothing which stops them and
+five things to do better, which were done: the first version asked the
+kernel twice, once to see the refusal and once more through the old
+function, and asks once now; the offset of the region was set to zero
+for a device which is refused, and is left alone now; the check of the
+empty slot could not tell a port of the VM which answers with all ones
+from a port nobody has, so the stand-in for the VMM tells now whether
+somebody has a port, and the check also looks at whether anybody asked
+what stands in for the device; two of the values the test gives the
+device to tell were the same. The second reading of what came of it
+found the new line of the log naming two reasons for a refusal where
+the kernel has three, the third being a function which is no VGA
+device; the line names all three now. The reader also said what the
+test does not hold the device to, which is the first point of what was
+left, above.
+
+**Runs.** Run 390 (`tests`, `pci-passthrough-hotplug-v1` @ `5732c720`,
+9 minutes, AMD EPYC 9V74): the tree builds and the testcase passes with
+its 60 tests and three random ones, the two about these ranges among
+them. Run 391 (`tests`, `pci-passthrough-hotplug-7.1-kvm` @ `903f9a65`,
+12 minutes, AMD EPYC 9V74): the same on the 7.1 line with the KVM
+backend. Run 392 (`sim` with the part vgahost, exploring,
+`pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e`, 24 minutes, AMD EPYC
+9V74): all 62 checks pass, and the testcase passes on that line as
+well. The third script with `HW_VGA=yes` goes through its 37 checks at
+the first try. The guest reads 0x67 from the miscellaneous output
+register of the VGA adapter through the legacy ports, 0xff in both
+rounds while the adapter is out of the VM, and 0x67 again when it is
+back; its driver has the adapter again two and three seconds after it
+was put in, with its connector and the monitor on it. The script of the
+checklist tells there that the kernel gives the legacy VGA ranges of
+the adapter away, and the inventory has the parameter of `vfio-pci` as
+N; the configuration of the kernel cannot be read in that machine.
+Run 393 (`sanitize`, the development line at the same commit, 12
+minutes, Intel Xeon Platinum 8573C): the testcase passes with the
+sanitizers and the random tests in full length, and they have no
+report.
+
+The heads are `pci-passthrough-hotplug-v1` @ `5732c720` (48 commits),
+`-7.2` @ `4db97a70`, `-7.2-kvm` @ `c5e9ca0e`, `-7.1` @ `8a025eb9` and
+`-7.1-kvm` @ `903f9a65`. Not run: `hw/linux/tests.sh` with a graphics
+card, which is where that script takes the variants with `HW_VGA=yes`;
+the simulation runs it with the device of four gigabytes, which is no
+graphics card. Not tried: a kernel which does not give the ranges away.
+What the device says then is from the testcase, whose stand-in for the
+kernel refuses as the source of the kernel does. The build which is
+published for machines with real hardware is of `b1136fa2`, the head
+before these two commits, and the scripts run with it.
+
+### A drive which Windows does not start after an error the host takes for fatal (run 389, 2026-11-27)
+
+Not understood yet; what is known, and what is being done.
+
+**What run 389 showed.** In the part with Windows and the device of an
+NVMe controller and an audio controller, whose functions have no reset
+of their own (`hdawinhost`), everything passes up to the last step: the
+port in front of the device reports an error which the kernel of the
+host takes for fatal, VirtualBox takes the device out of service in
+the same second, Windows finds both functions gone and runs on, the
+host has the device, and `plugpci` puts it back. Windows then has the
+controller of the drive with problem 10, which is a device it could
+not start, and reads nothing from the drive; the VM runs on and shuts
+down when told. The step before it, the same with an error which is
+not fatal, passes in that part, and the fatal one passes in the same
+run in the other two parts with Windows and in the two with the Linux
+guest. This part had run once before, in run 336 on 2026-11-24, and
+passed there.
+
+**What differs in the logs.** When VirtualBox opens the device for
+`plugpci` after the fatal error, the kernel of the host says "vfio-pci
+0000:01:00.0: enabling device (0000 -> 0002)" in run 389 and in none
+of the runs and parts in which the step passes: the command register
+of the function was empty when it was opened. The kernel resets the
+bus behind the port for a fatal error, right after it has told the
+drivers, and a reset of the bus empties the configuration of what is
+behind it, the BAR registers with the command register.
+
+**A reading of it, not shown yet.** The kernel does not write the
+configuration back after that reset (`pcie_do_recovery` in
+`drivers/pci/pcie/err.c`, Linux 7.0); a driver does that when it is
+told of the reset, and `vfio-pci` has no function for that. What
+`vfio-pci` does is write the configuration it kept from when the
+device was opened once, when its user lets go of the device. VirtualBox
+lets go the moment it is told of the error. If that is before the
+kernel's reset, the reset undoes it and nothing writes the registers
+again; if it is after, the device is as it was. Which comes first is a
+matter of microseconds in the machine which stands in for a host. On a
+real host the reset takes its time, and letting go at once may well
+lose there as a rule. Why this one part and not the others is not
+answered by that; its device is the one which cannot be reset by the
+function, and the kernel's driver takes other ways with such a device
+when it is let go of.
+
+**What is being done.** Both phases about an error of the device, with
+the Linux guest and with Windows, read the BAR registers of every
+function from the host before the error and again before the device is
+put back, and have a check that they are the same (meta `038e565`).
+Run 394 is the part again, on the head of the line. What VirtualBox
+could do, should the reading hold, is two things: tell a device which
+has lost its memory addresses when it is to be put into a VM, and say
+so and what gets it back, where today the guest gets a device which is
+dead; and keep hold of a device for a moment after an error before
+letting go, with the guest cut off from it at once as now. Both are
+changes to the device and want a reader.
+
 ### The issue with upstream, 2026-11-23
 
 The work is made known to upstream since 2026-11-23: issue 999 in the
@@ -3476,9 +3703,14 @@ the runs, and the guru meditation as the second thing which came up
 when it was tried; it says what was not tried (more than one CPU, a
 guest other than Linux, a host which is not a virtual machine itself).
 The Linux sources were looked up for it (`timer_irq_works()`, and
-`kvm_vcpu_ioctl_interrupt()` for the EEXIST). Not done yet: the phase
-on a tree with the backend of Cyberus Technology, where both guests
-have to keep time.
+`kvm_vcpu_ioctl_interrupt()` for the EEXIST).
+
+**Run 389** (2026-11-27, `allsim`, `pci-passthrough-hotplug-7.2-kvm` @
+`b1136fa2`, Intel Xeon 6975P-C) had the phase on a tree with the
+backend of Cyberus Technology, where both guests have to keep time,
+and they do: the guest told not to use the clock of the interface and
+the guest in a VM without an interface both take the HPET as their
+clock source, and 11 seconds of the guest take 10. No VM stops there.
 
 **The tracker was read up to issue 1011 on 2026-11-27.** New since
 1004: a Linux guest with kernel 7.3 and the Guest Additions which
@@ -4268,6 +4500,17 @@ harness since WP5, saved states since the fourth part of WP6.
    told to upstream (issue 1009). The simulation ran with these changes
    on the 7.1 line as well (run 382), and with the sanitizers on the
    7.2 line (run 383).
+7c. From run 389 of 2026-11-27, see "A drive which Windows does not
+   start after an error the host takes for fatal": after such an error
+   the device of a drive and an audio controller came back to Windows
+   as a device it could not start, once, and the kernel of the host
+   found the command register of the function empty when the device
+   was opened again. Open: whether the device loses its memory
+   addresses on the host when VirtualBox lets go of it before the
+   kernel has reset the bus; the simulation has a check for it since,
+   and run 394 is the part again. Depending on it: the device tells a
+   function which has lost its addresses and refuses it with a message,
+   and holds on to a device for a moment after an error.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4440,6 +4683,12 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | Upstream is told of the timers of its KVM backend: issue 1012 | The user said yes to it on 2026-11-27. As with issue 1009 it was shown with upstream's code alone first (runs 387 and 388) |
 | 2026-11-27 | The guru meditation of a VM without a paravirtualization interface is told in issue 1012 as a second thing, not as an issue of its own | It came up when the first thing was tried on upstream's code, the report would not be true to what was tried without it, and the late timers are what brings a guest there. The yes was for this report; an issue of its own would want another one |
 | 2026-11-27 | A phase of the simulation for a guest without a clock from an interface, on every tree (`devtime`) | On the branches for use it is a check that such a guest keeps time, which Windows guests with their time from the HPET depend on as well; on a tree with the backend of upstream it tells the numbers |
+| 2026-11-27 | The open point "test-c with `HW_VGA`" is done as a test of the testcase and as a variant of the third script, and the device was read for it first | A card which shows a guest from its start and a card which comes and goes are both what this work is for, and nothing had run them together. See "A graphics card with its legacy VGA ranges in the slot" |
+| 2026-11-27 | The device takes the kernel's refusal to tell of the legacy VGA region as "there is none" and says what the kernel lacks | The VM was refused before as well, with a message about region 8 and error 22. On a host built without `CONFIG_VFIO_PCI_VGA`, or with `disable_vga` set on purpose, that message costs somebody an afternoon. Which VM gets the ranges is unchanged; a second reader read it twice |
+| 2026-11-27 | The legacy VGA ranges go on answering for a card which is in the VM while the guest has its slot switched off; left as it is | They follow whether the function is in service and nothing else, as upstream wrote them. It is the VM's own card and the guest gains nothing it does not have with the slot on. Holding them to the state of the link would be a change to every access through them for something no guest was seen to do |
+| 2026-11-27 | INSTALL.md says to leave `ExposeVga` off where it is not needed, and names `disable_vga=1` for a host on which no VM is to have these ranges | With the ranges the guest has the kernel of the host arbitrate VGA between the cards with every access, and a card of the host without a driver which gives up the legacy ranges gets its decoding switched off. Read in the kernel, not tried; the target has to know it before it sets the option |
+| 2026-11-27 | `hw/linux/tests.sh` runs the third script once more with `HW_VGA=yes` for a graphics card | The second script has had that variant since run 294, and the card leaving is what the work is about. `HW_SKIP_VGA=yes` leaves both variants out |
+| 2026-11-27 | No new build for machines with real hardware for the change to the device | It changes a message which shows only on a host whose kernel does not give the ranges away. The scripts run with the build which is published; the next build which is made for another reason has it |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4466,7 +4715,7 @@ The requirements are in PLAN.md, section 4.
 | S4 | "The host takes the device back ...", "Hot-plug slot: the device is detached", "... interrupts of a device which was taken out", and after every operation of the random test of the slot: nothing of an absent device mapped into the guest or answering, the device file closed, no file descriptor more than before. The mapping of the guest memory is not removed with the device: it stays for the life of the VM (S11) and for the next device, while the device is taken out of the address space when it is let go of |
 | S5 | The tests with a device which stops answering on every guest access path; the random tests; "INTx: raised while the guest changes the interrupt setup" for the one wait an EMT has, which is bounded |
 | S6 | "Host address which is not a PCI address" |
-| S7 | "I/O port BAR, device which stops answering", "Legacy VGA ranges ...", "Trapped BAR accesses do not need the mapping of the BAR", the removal tests |
+| S7 | "I/O port BAR, device which stops answering", "Legacy VGA ranges ...", "Hot-plug slot: a graphics device with its legacy VGA ranges" (nothing answers at these ranges while the slot is empty, and nothing takes what is written), "Trapped BAR accesses do not need the mapping of the BAR", the removal tests |
 | S8 | "Saved state is refused", "Hot-plug slot: saved states which are refused" |
 | S9 | Review; part 1 of the hardware test says what the user of the VM needs |
 | S10 | Runs 217 and 218; no compiler warning in a file this work changes |
@@ -4778,5 +5027,10 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 386 | `scratch/kvm-clock-7.2-kvm` @ `aba26798` | sim with the part runner, exploring | passed | 17 minutes, Intel Xeon 6975P-C. The same commit on the head of the 7.2 line with the KVM backend of Cyberus Technology: all 51 pass, none skipped. Without the clock the guest takes the TSC and keeps time, 10 seconds of it in 9 |
 | 387 | `main` @ `b6bea721` | sim with the part runner, exploring | passed (1 check of the simulation fails) | 10 minutes, AMD EPYC 7763. Upstream's code without any change, with the new phase `devtime` and a VM which is told to have no paravirtualization interface: 23 pass, 2 are the things of Main told as skipped. The guest does not get through its start: its kernel finds the timer not ticking through the I/O APIC, and the VM stops with a guru meditation in the KVM backend of upstream, `VERR_NEM_IPE_5` |
 | 388 | `main` @ `b6bea721` | sim with the part runner, exploring | passed | 15 minutes, Intel Xeon 6975P-C. The same code with the phase as it is now: 25 pass, none fails, 4 skipped. A guest with `no-kvmclock` takes the HPET as its clock source and 10 seconds of it take 91; the VM without an interface stops with the same guru meditation, told as skipped on such a tree. What issue 1012 tells upstream |
+| 389 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | allsim, not strict | passed (2 checks of the simulation fail) | 177 minutes, Intel Xeon 6975P-C. 700 pass, 4 are left out with their reasons as before. The parts with the Linux guest and the parts with Windows in one run: the first with Windows since the changes of 25 and 26 November to the device and to Main, and the first of the phase `devtime` on a line for use, where a guest told not to use the clock of the interface and a guest in a VM without an interface both take the HPET and keep time, 11 seconds of the guest in 10. The two which fail are in the part with Windows and the device of a drive and an audio controller (`hdawinhost`): after the error which the kernel of the host takes for fatal the device is put back and Windows cannot start the drive (problem 10). The same step passes in the other two parts with Windows and in the two with the Linux guest. See "A drive which Windows does not start after an error the host takes for fatal" |
+| 390 | `pci-passthrough-hotplug-v1` @ `5732c720` | tests | passed | 9 minutes, AMD EPYC 9V74. The development line with the two commits about the legacy VGA ranges of a graphics card: it builds, and the testcase passes with its 60 tests, the device for which the kernel has no such ranges (`tstVga`) and the graphics device with them in the slot (`tstSlotVga`) among them |
+| 391 | `pci-passthrough-hotplug-7.1-kvm` @ `903f9a65` | tests | passed | 12 minutes, AMD EPYC 9V74. The same two commits on the 7.1 line with the KVM backend: it builds and the testcase passes |
+| 392 | `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e` | sim with the part vgahost, exploring | passed | 24 minutes, AMD EPYC 9V74. All 62 pass. The first run of the third script for a machine with real hardware with `HW_VGA=yes`: 37 checks. The guest reads 0x67 from a register of the VGA adapter through the legacy ports, 0xff while the adapter is out of the VM, and 0x67 again when it is back, in both rounds. The checklist and the inventory tell that the kernel gives these ranges away. The testcase passes on this line too |
+| 393 | `pci-passthrough-hotplug-v1` @ `5732c720` | sanitize | passed | 12 minutes, Intel Xeon Platinum 8573C. The same head with the sanitizers and the random tests in full length (20000 device models, 2000000 and 100000 operations): the testcase passes, the two tests about the legacy VGA ranges among its 60, and the sanitizers have no report |
 
 Run numbers are those GitHub shows for the `build` workflow.
