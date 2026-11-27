@@ -7,7 +7,7 @@ Updated: 2026-11-27
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `5732c720`, 48 commits. The last two are of 2026-11-27: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `dd03eb1c`, 49 commits. The last one is of 2026-11-27: a device which has lost its addresses on the host, as a reset of its bus can leave it, is refused when it is opened, with words for what gets them back, see "A drive which Windows does not start after an error the host takes for fatal". The two before it are of the same day: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -3346,7 +3346,9 @@ is not among those a run of the simulation has by default.
 
 ### A drive which Windows does not start after an error the host takes for fatal (run 389, 2026-11-27)
 
-Not understood yet; what is known, and what is being done.
+What it comes to is shown in the simulation, and that this is what
+happened in run 389 is a reading still; what is known, what was done
+about it and what is left.
 
 **What run 389 showed.** In the part with Windows and the device of an
 NVMe controller and an audio controller, whose functions have no reset
@@ -3413,13 +3415,162 @@ addresses back that way. One which was let go of before the reset is
 opened later with empty registers, which are then what `vfio-pci` takes
 for right.
 
-What VirtualBox
-could do, should the reading hold, is two things: tell a device which
-has lost its memory addresses when it is to be put into a VM, and say
-so and what gets it back, where today the guest gets a device which is
-dead; and keep hold of a device for a moment after an error before
-letting go, with the guest cut off from it at once as now. Both are
-changes to the device and want a reader.
+**The reset by hand (run 397, the same day).** What the reading comes
+to can be made to happen without waiting for it: a phase of its own,
+`lostaddr`, in the parts with an error of the device (meta `ba2db8b`).
+The guest lets go of the device, so that nobody has it, and the port in
+front of the device is made to reset its bus with nobody told, by the
+bit of its bridge control register which does that, which is what the
+kernel does itself about an error it takes for fatal. Once with the
+device asleep, which is where the kernel puts a device nobody uses, and
+once with the device kept awake, which is what the kernel keeps it as
+while it deals with an error. Run 397 (`sim` with the part errhost,
+exploring, `pci-passthrough-hotplug-v1` @ `5732c720`, 25 minutes, AMD
+EPYC 7763, 84 checks pass, none fails, 3 are left out):
+
+- Asleep: the BAR registers are empty after the reset, and the device
+  has its addresses again when it is woken up. `plugpci` takes it and
+  the guest reads from the drive.
+- Awake: the BAR registers are empty after the reset and stay empty
+  when the device has fallen asleep and is opened again. The kernel of
+  the host says "vfio-pci 0000:01:00.0: enabling device (0000 ->
+  0002)" then, the line of run 389. `plugpci` takes the device, with
+  a build of before the change below, and the guest finds a controller
+  it cannot start ("nvme nvme0: Device not ready; aborting
+  initialisation, CSTS=0x0", "probe failed"), which is what Windows
+  had in run 389. The VM runs on, and the device can be taken out.
+- Removing the device on the host and scanning the bus (`echo 1 >
+  .../remove`, `echo 1 > /sys/bus/pci/rescan`) gives it its addresses
+  again, and after it was bound to `vfio-pci` again `plugpci` takes it
+  and the guest reads from the drive.
+
+So a device which is awake and which nobody has when its bus is reset
+is left without its addresses, the kernel hands it out all the same,
+and a guest gets a dead device. That VirtualBox let go of the device
+before the kernel's reset in run 389 is still a reading: the order of
+the two was not seen there. Its outcome is this one, line by line.
+
+**The device tells such a device (the same day, commit `dd03eb1c` on the
+development line, on all five branches).** A device is looked at when
+it is opened, for a VM which starts with it and for the slot it is put
+into (`pciVfioFunCheckHostAddresses()`): if it has BARs and none of
+its BAR registers has an address, it is refused with
+`VERR_IO_NOT_READY` and a message which says what has the host set it
+up again: writing 1 to the file `remove` of the device, which the
+message names, the same for its other functions, then 1 to
+`/sys/bus/pci/rescan`, and binding the device to `vfio-pci` again.
+`VBoxManage controlvm plugpci` says it in its own words, and a VM
+which is to start with such a device does not start and says it. What
+is read is what the kernel answers for a BAR register of a device
+which was opened and not written to: the address the device itself has
+there (`vfio_config_init()` and `vfio_bar_fixup()` in
+`vfio_pci_config.c`, Linux 7.0). One address is enough for a device to
+be taken; an address of 4 GiB and more is in the next register, which
+is read for a 64-bit BAR.
+
+Three things keep this from refusing a device which is in order, and
+the first was found only when the change was read against the source
+of the kernel, after it was written:
+
+- A virtual function (SR-IOV) has no addresses in its BAR registers at
+  any time, they are with the function it belongs to, and the kernel
+  shows its registers as they are. So the check is done only for a
+  device the host shows as an ordinary function: sysfs has its config
+  space and no function it belongs to (`pciVfioIsOrdinaryFunction()`).
+  Where sysfs tells nothing, nothing is checked.
+- Only on an x86 host, where no memory of a device is at the address
+  zero.
+- A setting of the function, `SkipHostAddressCheck`, switches the
+  check off, for a device which is like that at all times and works.
+  None is known to be passed through; one with the Enhanced Allocation
+  capability would be, which the kernel does not show to who has the
+  device, and one all of whose BARs the kernel has at fixed places.
+
+The testcase has two tests more, 62 now: a VM started with such a
+device in twelve variants (BARs of each kind, one address left, a
+virtual function, a device sysfs tells nothing of, the setting, the
+legacy interface with the device known by its address), and the slot
+(taken out on request and after an error, refused twice and taken once
+set up again, a VM started without the device, and a device of two
+functions one of which is like that). The BAR registers of all device
+models have addresses now, and the stand-in for the kernel has what
+sysfs tells of a function.
+
+A reader who had not written the change read it twice. The first
+time: nothing wrong in the device and in Main; half of the new test
+for the slot never ran, by a variable used twice, and the place in
+sysfs which Main's way of configuring the device leads to was not
+tested; the message did not say that the device has to be bound again
+nor which file to write to, and there was no way to switch the check
+off. All of that was changed. The second time: the changes are right,
+and three small things, of which two were changed (a setting with a
+value which is none fails the start of the VM as the other settings
+do, and the test covers the device configured by its address).
+
+Found and left: when a VM is refused its start for this, the mappings
+of the BARs made before the check are not taken back by the device,
+as with the other failures at that place, which is how upstream's
+code has it; the process of the VM ends then. The message is about
+one function, the first which is found; the others of a device which
+was reset are like it, and the message says to remove them as well.
+
+**Runs.** Run 398 (`tests`, `scratch/lostaddr` @ `dd03eb1c`, which
+is the commit before it went to the branches, 10 minutes, Intel Xeon
+6975P-C): the testcase passes with its 62 tests and three random ones.
+Run 400 (`sanitize`, `pci-passthrough-hotplug-v1` @ `dd03eb1c`, 10
+minutes, AMD EPYC 9V74): the same with the sanitizers and the random
+tests in full length, no report. Run 399 (`sim` with the parts errhost
+and mferrhost, exploring, the same head, 25 minutes, AMD EPYC 9V45,
+137 checks pass, none fails, 2 are left out as before): the phase with
+a build which tells such a device, with the device of one function and
+with the one of two. After the reset with the device awake `plugpci`
+refuses the device and says what to do, the release log names the file
+to write to (`/sys/bus/pci/devices/0000:01:00.0/remove`), the slot
+stays empty and the VM runs on. After the device was removed, found
+anew and bound again, `plugpci` takes it and the guest reads from the
+drive, from both drives with the device of two functions. This run is
+also what has the device configured by its address with the interface
+VirtualBox uses by default, which is how Main configures it and which
+the testcase cannot do: its stand-in for the kernel has no directories
+to list.
+Run 402 (`sim` with the part errhost, exploring,
+`pci-passthrough-hotplug-7.2-kvm` @ `a349b046`, 21 minutes, Intel Xeon
+6975P-C, all 92 checks pass): the same on the 7.2 line with the KVM
+backend, where it also builds the change and runs the testcase.
+Run 403 (`tests`, `pci-passthrough-hotplug-7.1-kvm` @ `1259a688`, 13
+minutes, AMD EPYC 9V74): the testcase passes on the 7.1 line with the
+KVM backend. Run 401 was that run started with the wrong branch to
+reuse a build of, and ended in its first minute; nothing of the code.
+
+The heads are `pci-passthrough-hotplug-v1` @ `dd03eb1c` (49 commits),
+`-7.2` @ `eed48f76`, `-7.2-kvm` @ `a349b046`, `-7.1` @ `f0ad59f4` and
+`-7.1-kvm` @ `1259a688`. The checklist script tells such a device as
+well (`tools/pci-passthrough-check.sh`: as missing if the device is
+awake, as to be checked if it sleeps, since a sleeping device can get
+its addresses back when it is opened), and INSTALL.md has it in
+section 6 (meta `df0f1ca`).
+
+**What is left.**
+
+- A device can still get into that state: it is told now, and cured
+  by hand, with root on the host. Keeping hold of a device for a
+  moment after an error, with the guest cut off from it at once as
+  now, would have `vfio-pci` put back what the device had, since it
+  does that when the device is let go of, and that would then be after
+  the kernel's reset. It changes how a device is let go of, which the
+  host waits for in other cases, and wants an answer to what is done
+  when the host asks for the device in that moment and when the device
+  is to go into the VM again at once. Next, item 7d.
+- That run 389 was this is a reading: the order of the reset and of
+  letting go was not seen there.
+- None of it was seen on real hardware. There a reset of the bus takes
+  a second and more, and what is written to a device right after it
+  may not arrive, so a device may well be in this state after every
+  error the host takes for fatal.
+- A host which is not x86, and a device sysfs tells nothing of, are not
+  looked at.
+- The build for machines with real hardware which is published
+  (`vbox-b1136fa26e96-3d`) is without the change. The next one has it.
 
 ### The issue with upstream, 2026-11-23
 
@@ -4560,15 +4711,26 @@ harness since WP5, saved states since the fourth part of WP6.
    kernel has reset the bus; the simulation has a check for it since,
    in both phases with an error. Run 394, the part again, passes with
    the addresses in place, so the case which fails has not been seen
-   with the check yet: once in three runs of the part so far. What can
-   be done without waiting for it: have the machine which stands in
-   for a host reset the bus by hand while nobody has the device, which
-   is what the reading comes to, and see what a guest gets then; and
-   have the device tell a function whose BAR registers are empty when
-   it is opened and refuse it with a message which says what gets the
-   addresses back. The test stand-in for the kernel has BAR registers
-   without addresses and needs them first. After that: holding on to a
-   device for a moment after an error before letting go of it.
+   with the check yet: once in three runs of the part so far. Done the
+   same day, without waiting for it: the machine which stands in for a
+   host resets the bus by hand while nobody has the device, which is
+   what the reading comes to, and a device which is awake then is left
+   without its addresses and is dead to a guest (run 397); and the
+   device tells a function none of whose BAR registers has an address
+   when it opens it, and refuses it with a message which says what
+   gets the addresses back, on all five branches (run 399).
+7d. Left of 7c: holding on to a device for a moment after an error the
+   host reports before letting go of it, with the guest cut off from
+   it at once as now, so that the kernel's reset comes while the
+   device is still open and what the device had is put back when it is
+   let go of. To be answered first: how long (the kernel tells nobody
+   when its reset is done; it takes a second and more on real
+   hardware), what is done when the host asks for the device in that
+   time, which it waits for, and when the device is to go into the VM
+   again at once, since the kernel lets a device be opened once. The
+   stand-in for the kernel in the testcase would have to reset a
+   device behind the back of who has it and put back what it had when
+   it is let go of. A change to the device which wants a reader.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4748,6 +4910,13 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | `hw/linux/tests.sh` runs the third script once more with `HW_VGA=yes` for a graphics card | The second script has had that variant since run 294, and the card leaving is what the work is about. `HW_SKIP_VGA=yes` leaves both variants out |
 | 2026-11-27 | No new build for machines with real hardware for the change to the device | It changes a message which shows only on a host whose kernel does not give the ranges away. The scripts run with the build which is published; the next build which is made for another reason has it |
 | 2026-11-27 | Upstream is told what a VM with `ExposeVga` says on a host whose kernel gives no legacy VGA ranges away: issue 1013 | The user's answer of 2026-11-27: tell it if it can be shown, and not if it comes of the setup here. It was shown with upstream's code alone (run 396, a part of the simulation of its own, `vganohost`), and it follows from what the kernel answers, not from the machine being an emulated one |
+| 2026-11-27 | The bus of the device is reset by hand in the simulation with nobody having the device, asleep and awake (the phase `lostaddr`, in the parts errhost and mferrhost) | What run 389 is read as came once in three runs and cannot be waited for. The reset by hand is what the kernel does itself about an error, and it shows what becomes of the device and what a guest gets (run 397) |
+| 2026-11-27 | The device refuses a function none of whose BAR registers has an address, at the start of a VM and at the slot, and says what has the host set the device up again | A guest got a dead device without a word from anybody (run 397). The device can tell when it opens the device of the host, and the host can cure it |
+| 2026-11-27 | That is done only for a device sysfs shows as an ordinary function and only on an x86 host, and a setting of the function switches it off (`SkipHostAddressCheck`) | A virtual function (SR-IOV) has no addresses in its BAR registers at any time and would have been refused: found when the change was read against the source of the kernel, before it was pushed. Refusing a device which works is worse than taking one which does not |
+| 2026-11-27 | The status for it is `VERR_IO_NOT_READY`, and Main has words of its own for it | `plugpci` gets a status from the device and no message, and this status comes from nowhere else on that way |
+| 2026-11-27 | Keeping hold of a device for a moment after an error, which would keep it out of that state, is not done with this change | It changes how a device is let go of, which the host waits for in other cases. The state is told now and cured by hand; this is the next step (Next 7d) |
+| 2026-11-27 | The checklist script tells a device whose BAR registers are empty: as missing if it is awake, as to be checked if it sleeps | A sleeping device gets its addresses back when it is opened if it had them when it fell asleep (run 397), so from outside it cannot be told which it is |
+| 2026-11-27 | The commit went to a branch of its own first (`scratch/lostaddr`), was built and tested there, and then to the five branches | It touches the device, Main and a header, and could not be built on this machine. The branch is left where it is |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -5094,5 +5263,12 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 394 | `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e` | winsim with the parts runner, win and hdawinhost, exploring | passed | 34 minutes, Intel Xeon Platinum 8573C. All 147 pass, 1 is left out as before. The part of run 389 which had two checks fail, again, on the head with the two commits about the legacy VGA ranges and with the new check of the memory addresses of the device on the host: after the error which is fatal the BAR registers of both functions are what they were, and Windows starts the drive and reads from it. The failure of run 389 did not come again |
 | 395 | `pci-passthrough-hotplug-v1` @ `5732c720` | sim with the part vganohost, exploring | passed | 18 minutes, Intel Xeon 6975P-C. 50 pass, 2 are told as skipped on this tree as before (the two about the time of a guest without the clock, for the KVM backend of upstream). The first run of the part: the graphics card in a machine whose kernel is told not to give legacy VGA ranges away. A VM with `ExposeVga` does not start and says what the kernel lacks, naming the option and the parameter |
 | 396 | `main` @ `b6bea721` | sim with the part vganohost, exploring | passed | 16 minutes, Intel Xeon 6975P-C. Upstream's code without any change: 34 pass, 5 are told as skipped (the two things of Main, the two about the time of the guest, and this one). The VM does not start either and says "Getting information for region 8 of opened VFIO device failed with 22 (VERR_INVALID_PARAMETER)". What issue 1013 tells upstream |
+| 397 | `pci-passthrough-hotplug-v1` @ `5732c720` | sim with the part errhost, exploring | passed | 25 minutes, AMD EPYC 7763. 84 pass, 3 are told as skipped (the two about the time of a guest as before, and one of the new phase, which this build has nothing for). The first run of the phase `lostaddr`: the bus of the device is reset by hand while nobody has the device. Asleep, the device has its addresses again when it is woken up, and the guest reads from the drive. Awake, its BAR registers stay empty, the kernel says "enabling device (0000 -> 0002)" when the device is opened, `plugpci` takes it and the guest cannot start it ("Device not ready; aborting initialisation"). Removed and found anew on the host, it has its addresses and the guest reads from the drive |
+| 398 | `scratch/lostaddr` @ `dd03eb1c` | tests | passed | 10 minutes, Intel Xeon 6975P-C. The commit which has the device refuse a function without addresses, before it went to the branches: it builds, and the testcase passes with its 62 tests and three random ones, the two new ones among them |
+| 399 | `pci-passthrough-hotplug-v1` @ `dd03eb1c` | sim with the parts errhost and mferrhost, exploring | passed | 25 minutes, AMD EPYC 9V45. 137 pass, 2 are told as skipped as before (the two about the time of a guest). The phase `lostaddr` with a build which tells such a device, with the device of one function and of two: after the reset with the device awake `plugpci` refuses the device and says what to do, the release log names the file to write to, the slot stays empty and the VM runs on; removed, found anew and bound again, the device is taken and the guest reads from the drive, or from both |
+| 400 | `pci-passthrough-hotplug-v1` @ `dd03eb1c` | sanitize | passed | 10 minutes, AMD EPYC 9V74. The same head with the sanitizers and the random tests in full length: 62 tests and three random ones, no report |
+| 401 | `pci-passthrough-hotplug-7.1-kvm` @ `1259a688` | tests | **failed** | 1 minute. Not the code: the run was started with `main` as the branch whose build is reused, which is for the development line, and the step which marks the files that differ from it gave up on the name of a file. Started again as run 403 with `VBox-7.1` |
+| 402 | `pci-passthrough-hotplug-7.2-kvm` @ `a349b046` | sim with the part errhost, exploring | passed | 21 minutes, Intel Xeon 6975P-C. All 92 pass. The change on the 7.2 line with the KVM backend: it builds, the testcase passes with its 62 tests, and the phase `lostaddr` goes as in run 399: the device without addresses is refused with the words, set up again on the host and taken, and the guest reads from the drive |
+| 403 | `pci-passthrough-hotplug-7.1-kvm` @ `1259a688` | tests | passed | 13 minutes, AMD EPYC 9V74. The change on the 7.1 line with the KVM backend: it builds and the testcase passes with its 62 tests and three random ones |
 
 Run numbers are those GitHub shows for the `build` workflow.
