@@ -50,6 +50,9 @@ ALIVE_RE='GUEST: ALIVE'
 # Whether the tree has the two changes to Main which let a VM process end and
 # have the service know of it, see main_stage.
 MAIN_ENDS=${SIM_MAIN_ENDS:-yes}
+# Whether the KVM backend of the tree enters the guest with the deadline of
+# the next timer of the VM, see guest_pace.
+TIMER_DEADLINE=${SIM_TIMER_DEADLINE:-yes}
 
 # A host address nothing is at, and a layout as an NVMe drive has it, for the
 # VM which is started without a device where there is none to be had.
@@ -2443,14 +2446,62 @@ clock_left_out() # whether the VM says that it does not offer the clock
     grep -a -q 'GIM: KVM: Not offering the paravirtualized clock' "$VMDIR/Logs/VBox.log" 2> /dev/null
 }
 
+alive_up() # the uptime the guest told with its last "ALIVE", in whole seconds
+{
+    serial_new | grep -a 'GUEST: ALIVE ' | tail -n 1 \
+        | awk '{ for (i = 1; i <= NF; i++) if (index($i, "up=") == 1) { split(substr($i, 4), a, "."); print a[1] } }'
+}
+
+# How the time of the guest goes.  The guest tells its uptime with every
+# "ALIVE", ten seconds apart by its own clock; two of them are waited for and
+# the time between them is taken here as well.  A guest with the clock of the
+# interface has its time from the processor.  A guest without it which cannot
+# find out how fast the TSC counts has its time from the HPET, which is a
+# device of the VM, and that time falls behind where the timers of the VM are
+# served late.  The KVM backend of upstream enters the guest without the
+# deadline of the next timer, so they are served by a tick of 10 ms there and
+# such a guest is slow; with a backend which sets a timer for the deadline it
+# has to keep time.
+guest_pace() # <what> <whether a slow guest counts: yes|no>
+{
+    local t1 t2 u1 u2 real guest
+    serial_mark
+    if ! wait_serial "$ALIVE_RE" 240; then
+        stage "$1" FAILED "nothing from the guest in 240 seconds"
+        diag
+        return 1
+    fi
+    t1=$(date +%s)
+    u1=$(alive_up)
+    serial_mark
+    if ! wait_serial "$ALIVE_RE" 240; then
+        stage "$1" FAILED "nothing more from the guest in 240 seconds"
+        diag
+        return 1
+    fi
+    t2=$(date +%s)
+    u2=$(alive_up)
+    real=$((t2 - t1))
+    guest=$(( ${u2:-0} - ${u1:-0} ))
+    if [ "$guest" -le 0 ]; then
+        stage "$1" FAILED "the uptime the guest tells does not go on: ${u1:-?}, then ${u2:-?}"
+    elif [ "$real" -le $(( 2 * guest + 3 )) ]; then
+        stage "$1" ok "$guest s of the guest in $real s"
+    elif [ "$2" = yes ]; then
+        stage "$1" FAILED "$guest s of the guest took $real s"
+    else
+        stage "$1" skipped "a tree whose KVM backend enters the guest without the deadline of the next timer: $guest s of the guest took $real s"
+    fi
+}
+
 # The state of the guest which runs is saved and loaded by a VM which is
 # configured the other way.  The guest goes on with what it has, and the VM
 # says that the state is unlike its configuration.
-clock_state_round() # <the extra data key> <its value for the load, or nothing> <offered|did not offer> <suffix for the logs> <what>
+clock_state_round() # <the extra data key> <its value for the load, or nothing> <offered|did not offer> <suffix for the logs> <whether a slow guest counts> <what>
 {
     VBM_TIMEOUT=300 run controlvm "$VM" savestate
     if [ $? -ne 0 ] || ! wait_state saved 60; then
-        stage "$5" FAILED "the state is not saved, the VM is in state '$(vmstate)'"
+        stage "$6" FAILED "the state is not saved, the VM is in state '$(vmstate)'"
         diag
         return 1
     fi
@@ -2460,22 +2511,22 @@ clock_state_round() # <the extra data key> <its value for the load, or nothing> 
         run setextradata "$VM" "$1"
     fi
     if ! start_vm; then
-        stage "$5" FAILED "the VM does not start"
+        stage "$6" FAILED "the VM does not start"
         diag
-    elif ! wait_serial "$ALIVE_RE" 120; then
-        stage "$5" FAILED "nothing from the guest"
+    elif ! wait_serial "$ALIVE_RE" 240; then
+        stage "$6" FAILED "nothing from the guest"
         diag
     elif serial_has "$UP_RE"; then
-        stage "$5" FAILED "the guest booted anew"
+        stage "$6" FAILED "the guest booted anew"
     elif ! grep -a -q "GIM: KVM: The saved state is of a VM which $3 the paravirtualized clock" "$VMDIR/Logs/VBox.log"; then
-        stage "$5" FAILED "the VM does not say that the state is of a VM which $3 the clock"
+        stage "$6" FAILED "the VM does not say that the state is of a VM which $3 the clock"
     elif [ "$3" = offered ] && ! clock_left_out; then
-        stage "$5" FAILED "the VM which loaded the state was not configured without the clock"
+        stage "$6" FAILED "the VM which loaded the state was not configured without the clock"
     elif [ "$3" != offered ] && [ "$(clock_in_log)" -ne 0 ]; then
-        stage "$5" FAILED "the VM has set the clock up for a guest which has none"
+        stage "$6" FAILED "the VM has set the clock up for a guest which has none"
     else
-        stage "$5" ok "the VM has set the clock up $(clock_in_log) times for the state"
-        guest_goes_on "that guest keeps running"
+        stage "$6" ok "the VM has set the clock up $(clock_in_log) times for the state"
+        guest_pace "the time of the guest of that state goes as it does outside" "$5"
     fi
     keep_logs "$4"
 }
@@ -2494,8 +2545,9 @@ kvmclock_rounds() # <the extra data key>
     else
         stage "$what" FAILED "the VM has set it up $n times"
     fi
+    guest_pace "the time of the guest goes as it does outside, with the clock" yes
     keep_logs -offered
-    clock_state_round "$1" 0 "offered" -loaded-with \
+    clock_state_round "$1" 0 "offered" -loaded-with yes \
         "a state which was saved with the clock is loaded where the clock is not offered, and the guest goes on"
     reset_vm
 
@@ -2503,7 +2555,7 @@ kvmclock_rounds() # <the extra data key>
     run setextradata "$VM" "$1" 0
     if boot "the guest boots where the clock is not offered"; then
         n=$(clock_in_log)
-        serial_show 'kvm-clock|Hypervisor detected|Switched to clocksource' 6
+        serial_show 'kvm-clock|Hypervisor detected|Switched to clocksource|tsc: ' 10
         src=$(serial_new | grep -a -o 'Switched to clocksource [a-z0-9_-]*' | tail -n 1 | awk '{print $4}')
         what="the guest does without the clock which is not offered"
         if serial_has 'kvm-clock'; then
@@ -2520,9 +2572,9 @@ kvmclock_rounds() # <the extra data key>
         else
             stage "the guest finds the interface without the clock" FAILED
         fi
-        guest_goes_on "the guest keeps running without the clock"
+        guest_pace "the time of the guest goes as it does outside, without the clock" "$TIMER_DEADLINE"
         keep_logs -without
-        clock_state_round "$1" "" "did not offer" -loaded-without \
+        clock_state_round "$1" "" "did not offer" -loaded-without "$TIMER_DEADLINE" \
             "a state which was saved without the clock is loaded where the clock is offered, and the guest goes on"
     fi
     reset_vm

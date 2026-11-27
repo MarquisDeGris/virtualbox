@@ -471,6 +471,12 @@ fi
 if grep -q -s 'GIM/KVM/Clock' "$WS/src/VBox/VMM/VMMR3/GIMR3Kvm.cpp"; then
     runner_phases="$runner_phases kvmclock"
 fi
+# The KVM backend of upstream enters the guest without the deadline of the
+# next timer of the VM; the one of Cyberus Technology sets a timer for it.  A
+# guest which has its time from a device of the VM tells the two apart.
+timer_deadline=no
+grep -q -s 'timer_settime' "$WS/src/VBox/VMM/VMMR3/target-x86/NEMR3Native-linux-x86.cpp" "$WS/src/VBox/VMM/VMMR3/NEMR3Native-linux.cpp" && timer_deadline=yes
+echo "the KVM backend of the tree enters the guest with the deadline of the next timer: $timer_deadline"
 # The frontend told to end with the VM paused, as the last phase: in a tree
 # without the two changes to Main for it, told by its source, the service of
 # VirtualBox has to be started anew after it, and what goes wrong is told and
@@ -507,7 +513,7 @@ if [ "${SIM_SANITIZED:-no}" = yes ]; then
     boot_wait=600
 fi
 sudo env VBOX_BIN="$BIN" SIM_WORK=/tmp/sim-runner SIM_OUT="$OUT/runner" SIM_STAGES="$STAGES" \
-         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_MAIN_ENDS=$main_ends SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
+         GUEST_RAW="$WORK/guest.raw" GUEST_RAW_3D="$GUEST_RAW_3D" SIM_WHERE=runner SIM_MAIN_ENDS=$main_ends SIM_TIMER_DEADLINE=$timer_deadline SIM_BOOT_WAIT=$boot_wait SIM_HTTP_MD5="$HTTP_MD5" \
          ${san_asan:+ASAN_OPTIONS="$san_asan"} ${san_ubsan:+UBSAN_OPTIONS="$san_ubsan"} ${san_asan:+SIM_PATIENCE=3} \
          ${san_asan:+LD_LIBRARY_PATH="$BIN"} \
     timeout -k 30 3000 bash "$SIM/vbox-phases.sh" $runner_phases
