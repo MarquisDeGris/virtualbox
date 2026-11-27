@@ -14,7 +14,7 @@ Updated: 2026-11-27
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
-| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
+| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): `feat/gim-kvm-clock-option` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
 | Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
@@ -3226,7 +3226,7 @@ is for VMs without a card of their own.
 | 944 | a way into the setup of the UEFI firmware which does not take a key hit in time | done, merge request [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `VBoxManage modifynvram <vm> firmwaresetup`, see below |
 | 810 | strings of one's own in the DMI table of type 11, for handing a guest its name or a key | looked at on 2026-11-24, not taken up. Two such strings can be set today, by reading the code and not tried: the values `DmiOEMVBoxVer` and `DmiOEMVBoxRev` of the firmware device. More of them, or longer ones than 255 characters, take a DMI table larger than the 768 bytes it has, which reaches into the BIOS |
 | 881, 936 (reported as bugs) | the size of a screen does not follow the window with the Guest Additions in a guest with Wayland | looked at on 2026-11-24, not taken up: it takes a guest with a desktop and the Guest Additions, which the simulation does not have |
-| 580 | the KVM interface for a guest without its clock | not looked into |
+| 580 | the KVM interface for a guest without its clock | done, merge request [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): a configuration value, `VBoxInternal/GIM/KVM/Clock`, see below. The manual says to leave the clock offered on a Linux host with KVM, for what the checks showed of the KVM backend of upstream |
 
 The tracker also has 20 open bugs about 3D. Nearly all need a graphics
 card and a certain host to be seen, which the runners do not have.
@@ -3336,6 +3336,108 @@ minutes, AMD EPYC 7763): the branch builds, and the help of the
 `VBoxManage` which was built says "non-VDI" and "ext2, ext3 and ext4".
 The check counts since. That the utility supports ext4 is from what it
 says of itself; it was not tried here.
+
+**Request 580** (`feat/gim-kvm-clock-option` @ `dfb8faa1`, two commits
+on `main`, 2026-11-27). A Linux guest takes `kvm-clock` when the KVM
+paravirtualization interface offers it, and where that clock does
+worse than the TSC the way around it was the kernel parameter
+`no-kvmclock` in every such guest. The request asks for a way to have
+the interface without the clock from the host. The KVM provider reads
+a configuration value now, `/GIM/KVM/Clock`, true by default: with
+false the two feature bits of the clock are left out of the CPUID leaf
+of the interface, and the rest is offered as before. It is set as
+extra data of the VM (`VBoxInternal/GIM/KVM/Clock`); the API is as it
+was. The MSRs of the clock stay, for the guest of a saved state: a
+state brings along what its guest was offered, the VM goes on with
+that, and the log says where it differs from the configuration. Manual
+and changelog say so.
+
+The change was read by a second reader before it was pushed, with the
+code and not with what the author thought of it. Nothing in the code
+had to be put right. What came of the reading: the line in the log
+when a state is loaded, the manual saying that the setting is for a
+start from powered off and for the KVM interface only, and a paragraph
+about what else the clock does. A guest which sets the clock up has
+the VM switch to letting it read the TSC of the host; without the
+clock a VM with more than one CPU which runs with the hypervisor of
+VirtualBox emulates every read of the TSC. That is so for a guest with
+`no-kvmclock` as well, and the manual says it now. Read in passing and
+not changed: the KVM backend of upstream hands the CPUID leaves to the
+kernel before a saved state is loaded and not again after it.
+
+The check for it is a phase of the simulation on the runner,
+`kvmclock`, for a tree which has the value. What the guest does about
+its clock its kernel tells on the serial port, and what the VM did for
+the clock is in the log of the VM. A VM without the value: the guest
+sets the clock up. Its state is saved and loaded with the value 0: the
+guest goes on, and the log says that the state is of a VM which
+offered the clock. A start with the value 0: the guest boots, finds
+the KVM interface, says nothing of the clock, and the VM has set up
+none. The state of that guest is loaded with the value taken back: the
+guest goes on without a clock, and the log says so. A start with the
+value taken back: the guest sets the clock up again.
+
+**Run 384** (2026-11-27, `sim` with the part on the runner, for
+finding out, the first commit `e9f4b6c8`, 15 minutes, Intel Xeon
+6975P-C). It builds. Ten of the twelve checks of the new phase pass,
+all of the above. The two which fail are about the guest without the
+clock running on: it reports itself every ten seconds by its own
+clock, and did not within 45. Its kernel had not been able to
+calibrate the TSC against the PIT or the HPET and took the HPET as its
+clock source, and the log of the VM which loaded its state has the
+clock of the timers 60 seconds behind.
+
+**What that is.** Not the setting: the KVM backend of upstream. It
+enters the guest without the deadline of the next timer of the VM
+(`NEMR3RunGC` in `NEMR3Native-linux-x86.cpp` does not use what
+`TMTimerPollGIP` returns), so a timer of a device which expires while
+the guest runs or idles is served when the tick of TM comes by, every
+10 milliseconds. The PIT, the HPET and the ACPI timer go by the clock
+of the VM which does not pass a timer that has not been served, so
+their time falls behind. A guest with `kvm-clock` has its time from
+the processor and takes no notice, which is why no run had shown it.
+The KVM backend of Cyberus Technology, which the branches for use
+have, sets a timer for the deadline. Item 7a under "Next" is about a
+part of the same.
+
+The phase takes the time of the guest since: the time between two
+reports of the guest, by its own clock and outside, with and without
+the clock and after each saved state. A slow guest counts on a tree
+whose backend sets a timer for the deadline, told by its source, and
+is told as skipped with the numbers on a tree whose backend does not.
+
+**Run 385** (the same branch and commit, 20 minutes, Intel Xeon
+Platinum 8573C): 34 pass, none fails, 4 are skipped: the two things of
+Main, and the two about the time. With the clock 10 seconds of the
+guest take 11; without it 91, and 90 after a saved state. This time
+the kernel of the guest calibrated the TSC with the HPET, and its
+watchdog marked the TSC unstable against the HPET a second later.
+
+**Run 386** (`scratch/kvm-clock-7.2-kvm` @ `aba26798`, the same commit
+on the head of the 7.2 line with the KVM backend of Cyberus
+Technology, 17 minutes, Intel Xeon 6975P-C): all 51 pass, none is
+skipped. Without the clock the guest calibrates the TSC with the HPET,
+takes the TSC as its clock source, and 10 seconds of it take 9
+outside, 11 take 9 after a saved state.
+
+The second commit (`dfb8faa1`) is a paragraph of the manual, which
+says to leave the clock offered for a VM which runs with KVM on a
+Linux host, and why. It is text; no run was made for it.
+
+Not shown by a run: a host with the hypervisor of VirtualBox itself,
+a guest with more than one CPU, a guest other than Linux, and a guest
+started with `no-kvmclock` next to it. Not done: a setting in the API
+or the user interface; a change to the KVM backend of upstream for its
+timers; telling upstream of them, which is on the list of questions
+for the user (see the decisions).
+
+**The tracker was read up to issue 1011 on 2026-11-27.** New since
+1004: a Linux guest with kernel 7.3 and the Guest Additions which
+hangs, on a Windows host with Hyper-V (1005); a crash of the user
+interface on a Windows host (1006); a request for a VMXNET3 network
+adapter (1007); a Windows guest which is slow after an update of
+Windows, on a Windows host (1010); a desktop guest with VMSVGA (1011).
+None of them is small and can be tried here.
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -4068,7 +4170,8 @@ harness since WP5, saved states since the fourth part of WP6.
 4f. Requests from the tracker of upstream, see the section of that
    name: 798 and the manual text for 674 and 904 are merge requests,
    and so are 944 (the setup of the firmware) and the report 996 about
-   the manual.
+   the manual, and since 2026-11-27 request 580 (the KVM interface
+   without its clock).
    What could follow, each small and to be tested without a graphics
    card: other requests about `VBoxManage` and about settings. The two
    large ones about 3D are not planned.
@@ -4100,6 +4203,10 @@ harness since WP5, saved states since the fourth part of WP6.
    for timers another EMT found expired. That is a change to the timer
    code and wants runs with guests of several CPUs on that backend; the
    branches for use have another backend, which does not go that way.
+   Seen on 2026-11-27 with request 580: that backend does not enter the
+   guest with the deadline of the next timer at all, so the tick is what
+   serves every timer of a device there. See "Request 580" under
+   "Requests from the tracker of upstream".
 7b. From the reading of Main and the root port of 2026-11-25, see "Who
    waits for whom, in Main and in the root port": two changes to Main,
    which is code of upstream, on all five branches, after which the VM
@@ -4276,6 +4383,10 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-26 | The two suspicions about the interrupt code of upstream were looked into, and upstream is told of them (issue 1008) as read and not tried | Who this work is for said yes to both. Both hold by reading, somebody who was not told what was suspected came to the same answers, and there is no host here to try the first one on |
 | 2026-11-26 | Nothing is changed in the branches for those two | They are in `main` only; the lines for the target do not have the code. A change to the I/O APIC and the APIC of the development line would have no test which reaches it |
 | 2026-11-26 | The phase `endpaused` runs in every simulation with the part on the runner, and a tree without the two changes to Main has what goes wrong told as skipped | It costs two or three starts of the guest. The branches for requests of the upstream tracker are `main` with one change each and do not have the two changes; their runs are not to fail for what is upstream's |
+| 2026-11-27 | A run of VMs with the sanitizers on the head of the 7.2 line with the KVM backend (run 383) | The changes of 25 and 26 November to the locks of the device and to Main had run with the sanitizers in the testcase only, and those to Main in none |
+| 2026-11-27 | Request 580 is taken up as a configuration value of the VMM which is set as extra data, not as a setting of the API | It is the smallest thing which does what is asked, it is where VirtualBox has its settings of this kind, and the simulation can check it. An attribute of the API reaches into Main, the settings file and the frontends |
+| 2026-11-27 | The manual says to leave the clock offered for a VM which runs with KVM on a Linux host, and the checks of the time of the guest are told as skipped on a tree with the KVM backend of upstream | Runs 384 and 385: the guest without the clock runs several times too slow there, for what that backend does with the timers; run 386 has the same commit keeping time with the other backend. The backend of upstream is not changed with this request |
+| 2026-11-27 | Upstream is not told of the timers of its KVM backend for now | The yes of 2026-11-26 was for two named things. Whether this goes to the tracker as well is on the list of questions for the user |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4609,5 +4720,8 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 381 | `pci-passthrough-hotplug-v1` @ `2409b39e` | sim with the parts runner and simhost | passed | 44 minutes, Intel Xeon 6975P-C. All 137 pass, none skipped. The same phase with the two changes to Main: the process ends within two seconds both times and the service has the VM as powered off at once. The first simulation of the development line with the two changes |
 | 382 | `pci-passthrough-hotplug-7.1-kvm` @ `6d552882` | sim with the parts runner and simhost | passed | 46 minutes, AMD EPYC 7763. All 137 pass, none skipped. The first simulation of the 7.1 line with the two changes to Main, and the first time the phase `endpaused` runs with the KVM backend of Cyberus Technology: the process ends within two seconds both times, the second time with the file still being written when the session got closed, and the service has the VM as powered off at once. In the part with the drive the frontend is told to end with the device in the VM and while it is being taken out, and both end in order |
 | 383 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the parts runner, simhost and mfhost, the whole tree built with the sanitizers, exploring | passed | 60 minutes, Intel Xeon 6975P-C. All 212 pass, none skipped, and the sanitizers wrote nothing, no file in any part. The first VMs with the sanitizers on the head which has the PCI lock where a function goes away for the guest, the lock of the slot let go of before a live state is refused, and the two changes to Main: the VM process told to end with the VM paused, with its memory being written to a file, with a device of the host in the VM and while one is being taken out |
+| 384 | `feat/gim-kvm-clock-option` @ `e9f4b6c8` | sim with the part runner, exploring | passed (2 checks of the simulation fail) | 15 minutes, Intel Xeon 6975P-C. Request 580 of the upstream tracker, the KVM paravirtualization interface without its clock: it builds, 33 pass, 2 are the things of Main told as skipped. The guest sets the clock up where it is offered and not where it is not, and a saved state goes on either way. The two which fail: the guest without the clock runs with its time too slow, for what the KVM backend of upstream does with the timers of a VM. See "Request 580" |
+| 385 | `feat/gim-kvm-clock-option` @ `e9f4b6c8` | sim with the part runner, exploring | passed | 20 minutes, Intel Xeon Platinum 8573C. 34 pass, none fails, 4 skipped: the two things of Main and the two about the time of the guest, which the phase takes now. With the clock 10 seconds of the guest take 11, without it 91 |
+| 386 | `scratch/kvm-clock-7.2-kvm` @ `aba26798` | sim with the part runner, exploring | passed | 17 minutes, Intel Xeon 6975P-C. The same commit on the head of the 7.2 line with the KVM backend of Cyberus Technology: all 51 pass, none skipped. Without the clock the guest takes the TSC and keeps time, 10 seconds of it in 9 |
 
 Run numbers are those GitHub shows for the `build` workflow.
