@@ -15,7 +15,7 @@ Updated: 2026-11-27
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
 | Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): `feat/gim-kvm-clock-option` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
-| Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26. [1012](https://github.com/VirtualBox/virtualbox/issues/1012): the timers of the KVM backend of `main`, which make a Linux guest without `kvm-clock` slow, shown with `main` as it is, since 2026-11-27 |
+| Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26. [1012](https://github.com/VirtualBox/virtualbox/issues/1012): the timers of the KVM backend of `main`, which make a Linux guest without `kvm-clock` slow, shown with `main` as it is, since 2026-11-27. [1013](https://github.com/VirtualBox/virtualbox/issues/1013): what a VM with `ExposeVga` says on a host whose kernel gives no legacy VGA ranges away, shown with `main` as it is, since 2026-11-27 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -3309,11 +3309,40 @@ The heads are `pci-passthrough-hotplug-v1` @ `5732c720` (48 commits),
 `-7.1-kvm` @ `903f9a65`. Not run: `hw/linux/tests.sh` with a graphics
 card, which is where that script takes the variants with `HW_VGA=yes`;
 the simulation runs it with the device of four gigabytes, which is no
-graphics card. Not tried: a kernel which does not give the ranges away.
-What the device says then is from the testcase, whose stand-in for the
-kernel refuses as the source of the kernel does. The build which is
+graphics card. The build which is
 published for machines with real hardware is of `b1136fa2`, the head
 before these two commits, and the scripts run with it.
+
+**With a kernel which gives no ranges away, and told to upstream
+(issue 1013).** What the device says to such a kernel had been tried
+with the stand-in for the kernel only. Whether upstream is to be told
+of the message was a question to who this work is for, and the answer
+of 2026-11-27 was: if it can be shown, and not if it comes of the
+setup here. So the simulation has a part for it, `vganohost` (meta
+`ddd28ba`): the graphics card of `vgahost` in a machine where `vfio-pci`
+is loaded with `disable_vga=1`, which is a parameter the kernel has for
+this and one way to such a host, the other being a kernel built without
+`CONFIG_VFIO_PCI_VGA`. Its one phase, `vganone`, gives a VM the card by
+extra data, as the top of `DevPciVfio.cpp` says, with `ExposeVga`, and
+starts it. **Run 396** (`sim` with that part, exploring, `main` @
+`b6bea721`, the code of upstream without any change, 16 minutes, Intel
+Xeon 6975P-C): the VM does not start and says "Getting information for
+region 8 of opened VFIO device failed with 22
+(VERR_INVALID_PARAMETER)". **Run 395** (the same on
+`pci-passthrough-hotplug-v1` @ `5732c720`, 18 minutes, Intel Xeon
+6975P-C): the VM does not start and says "The kernel of the host has
+no legacy VGA ranges of the device which could be exposed to the
+guest, as ExposeVga asks for. It was built without CONFIG_VFIO_PCI_VGA,
+or its module vfio-pci has the parameter disable_vga set". The script
+of the checklist has its line for that host: `vfio-pci` was told not to
+give the ranges away. Nothing of this depends on the machine being an
+emulated one; it follows from what the kernel answers. Upstream was
+told the same day, in the form for bugs, as a small thing about a
+message: https://github.com/VirtualBox/virtualbox/issues/1013, with the
+commands, the lines of the log, both runs and the commit, and with
+what was not tried, which is a kernel built without the option and a
+real graphics card. The tracker had nothing about it before. The part
+is not among those a run of the simulation has by default.
 
 ### A drive which Windows does not start after an error the host takes for fatal (run 389, 2026-11-27)
 
@@ -4718,6 +4747,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | INSTALL.md says to leave `ExposeVga` off where it is not needed, and names `disable_vga=1` for a host on which no VM is to have these ranges | With the ranges the guest has the kernel of the host arbitrate VGA between the cards with every access, and a card of the host without a driver which gives up the legacy ranges gets its decoding switched off. Read in the kernel, not tried; the target has to know it before it sets the option |
 | 2026-11-27 | `hw/linux/tests.sh` runs the third script once more with `HW_VGA=yes` for a graphics card | The second script has had that variant since run 294, and the card leaving is what the work is about. `HW_SKIP_VGA=yes` leaves both variants out |
 | 2026-11-27 | No new build for machines with real hardware for the change to the device | It changes a message which shows only on a host whose kernel does not give the ranges away. The scripts run with the build which is published; the next build which is made for another reason has it |
+| 2026-11-27 | Upstream is told what a VM with `ExposeVga` says on a host whose kernel gives no legacy VGA ranges away: issue 1013 | The user's answer of 2026-11-27: tell it if it can be shown, and not if it comes of the setup here. It was shown with upstream's code alone (run 396, a part of the simulation of its own, `vganohost`), and it follows from what the kernel answers, not from the machine being an emulated one |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -5062,5 +5092,7 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 392 | `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e` | sim with the part vgahost, exploring | passed | 24 minutes, AMD EPYC 9V74. All 62 pass. The first run of the third script for a machine with real hardware with `HW_VGA=yes`: 37 checks. The guest reads 0x67 from a register of the VGA adapter through the legacy ports, 0xff while the adapter is out of the VM, and 0x67 again when it is back, in both rounds. The checklist and the inventory tell that the kernel gives these ranges away. The testcase passes on this line too |
 | 393 | `pci-passthrough-hotplug-v1` @ `5732c720` | sanitize | passed | 12 minutes, Intel Xeon Platinum 8573C. The same head with the sanitizers and the random tests in full length (20000 device models, 2000000 and 100000 operations): the testcase passes, the two tests about the legacy VGA ranges among its 60, and the sanitizers have no report |
 | 394 | `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e` | winsim with the parts runner, win and hdawinhost, exploring | passed | 34 minutes, Intel Xeon Platinum 8573C. All 147 pass, 1 is left out as before. The part of run 389 which had two checks fail, again, on the head with the two commits about the legacy VGA ranges and with the new check of the memory addresses of the device on the host: after the error which is fatal the BAR registers of both functions are what they were, and Windows starts the drive and reads from it. The failure of run 389 did not come again |
+| 395 | `pci-passthrough-hotplug-v1` @ `5732c720` | sim with the part vganohost, exploring | passed | 18 minutes, Intel Xeon 6975P-C. 50 pass, 2 are told as skipped on this tree as before (the two about the time of a guest without the clock, for the KVM backend of upstream). The first run of the part: the graphics card in a machine whose kernel is told not to give legacy VGA ranges away. A VM with `ExposeVga` does not start and says what the kernel lacks, naming the option and the parameter |
+| 396 | `main` @ `b6bea721` | sim with the part vganohost, exploring | passed | 16 minutes, Intel Xeon 6975P-C. Upstream's code without any change: 34 pass, 5 are told as skipped (the two things of Main, the two about the time of the guest, and this one). The VM does not start either and says "Getting information for region 8 of opened VFIO device failed with 22 (VERR_INVALID_PARAMETER)". What issue 1013 tells upstream |
 
 Run numbers are those GitHub shows for the `build` workflow.
