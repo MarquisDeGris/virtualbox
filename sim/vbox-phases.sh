@@ -2605,6 +2605,43 @@ phase_kvmclock()
 }
 
 
+# A guest which has no clock from a paravirtualization interface, on any
+# tree: the VM is told to have no such interface, which is a setting every
+# VirtualBox has.  The kernel of the guest has to find out how fast the TSC
+# counts with the PIT or the HPET, and it watches the TSC with the HPET
+# afterwards.  Both are devices of the VM.  What comes of it where the timers
+# of the VM are served late is told at guest_pace: on a tree whose KVM backend
+# sets a timer for the deadline the guest has to keep time, and Windows guests
+# which have their time from the HPET depend on the same.
+phase_devtime()
+{
+    local src
+    PHASE=devtime
+    reset_vm
+    if ! run modifyvm "$VM" --paravirt-provider none; then
+        stage "the VM is told to have no paravirtualization interface" FAILED
+        keep_logs
+        return
+    fi
+    if boot "the guest boots in a VM without a paravirtualization interface"; then
+        serial_show 'kvm-clock|Hypervisor detected|Switched to clocksource|tsc: |clocksource: |TSC' 16
+        src=$(serial_new | grep -a -o 'Switched to clocksource [a-z0-9_-]*' | tail -n 1 | awk '{print $4}')
+        if serial_has 'kvm-clock|Hypervisor detected'; then
+            stage "the guest has no clock of an interface" FAILED "its kernel found an interface"
+        else
+            stage "the guest has no clock of an interface" ok "its clock source is ${src:-not told}"
+        fi
+        guest_pace "the time of the guest goes as it does outside, without a paravirtualization interface" "$TIMER_DEADLINE"
+        grep -a -E 'TM: (Giving up|Not bothering|Entering catch-up|Leaving catch-up)' "$VMDIR/Logs/VBox.log" 2> /dev/null \
+            | tail -n 6 | awk '{ print "    | " substr($0, 1, 200) }'
+    fi
+    end_phase
+    # The phases after this one get the VM as it was.
+    reset_vm
+    run modifyvm "$VM" --paravirt-provider default
+}
+
+
 # The frontend is told to end with nothing of the passthrough device in the
 # VM.  The VM is paused, for which VBoxHeadless tries nothing: it closes the
 # session, and the Console powers the VM down from its uninit().  Twice: by
@@ -2672,6 +2709,7 @@ if setup; then
             startempty)  phase_startempty ;;
             intx)        phase_intx ;;
             intxslot)    phase_intxslot ;;
+            devtime)     phase_devtime ;;
             endpaused)   phase_endpaused ;;
             mfpassthrough) phase_mfpassthrough ;;
             mfhotplug)     phase_mfhotplug ;;

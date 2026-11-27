@@ -477,6 +477,9 @@ fi
 timer_deadline=no
 grep -q -s 'timer_settime' "$WS/src/VBox/VMM/VMMR3/target-x86/NEMR3Native-linux-x86.cpp" "$WS/src/VBox/VMM/VMMR3/NEMR3Native-linux.cpp" && timer_deadline=yes
 echo "the KVM backend of the tree enters the guest with the deadline of the next timer: $timer_deadline"
+# A guest without a clock from a paravirtualization interface, on every tree:
+# its time comes from the devices of the VM, see phase_devtime.
+runner_phases="$runner_phases devtime"
 # The frontend told to end with the VM paused, as the last phase: in a tree
 # without the two changes to Main for it, told by its source, the service of
 # VirtualBox has to be started anew after it, and what goes wrong is told and
