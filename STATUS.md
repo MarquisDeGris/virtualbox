@@ -1,6 +1,6 @@
 # Status
 
-Updated: 2026-11-26
+Updated: 2026-11-27
 
 ## Where things are
 
@@ -2237,6 +2237,27 @@ sanitizers as well (409 to 521 seconds in five earlier runs).
 Not done this way: Windows with the device of two functions and with
 the one whose second function is an audio controller.
 
+**The changes of 25 and 26 November in a VM, with the sanitizers** (run
+383, 2026-11-27, `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2`, the
+parts on the runner, with the drive and with the device of two
+functions, for finding out; 60 minutes, Intel Xeon 6975P-C). Since run
+323 the device takes the PCI lock where a function goes away for the
+guest and lets go of the lock of its slot before it tells the VM that
+a live state is refused, and Main has its two changes for a VM process
+which is told to end. The testcase had run with the sanitizers for the
+first two (runs 359 and 364); a VM had not, and no testcase reaches
+Main. All 212 checks pass, 43 on the runner, 98 with the drive and 71
+with the device of two functions, none left out, and the sanitizers
+wrote nothing in any part, no file at all, with the one kind of
+finding of run 305 let pass as before. What ran that way, among the
+rest: the VM process told to end with the VM paused, by itself and
+with the memory of the guest being written to a file (the session got
+closed while the file was still being written, in the first round),
+with a device of the host in the VM, and while a device is being taken
+out; a snapshot of the running VM refused, with the VM running on; the
+device taken out with the guest asked and by force, with one function
+and with two; and the reset of the bus behind the port.
+
 ### An error of the device, in the simulation (2026-11-24)
 
 What VirtualBox does when the host reports an error of a device it has
@@ -4088,7 +4109,8 @@ harness since WP5, saved states since the fourth part of WP6.
    simulation with these changes ran on the development line (run 381),
    and both things were shown with upstream's code alone (run 380) and
    told to upstream (issue 1009). The simulation ran with these changes
-   on the 7.1 line as well (run 382).
+   on the 7.1 line as well (run 382), and with the sanitizers on the
+   7.2 line (run 383).
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4586,5 +4608,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 380 | `main` @ `b6bea721` | sim with the part runner, exploring | passed | 10 minutes, AMD EPYC 7763. Upstream's code without any change, with the new phase `endpaused`: 23 checks pass and 2 are told as skipped, which are the two things in Main. With the VM paused and its process told to end, `showvminfo` fails afterwards until the service is started anew; with the memory of the guest being written to a file in that moment, the VM process is still there after 90 seconds, its main thread in `Console::i_powerDown()` |
 | 381 | `pci-passthrough-hotplug-v1` @ `2409b39e` | sim with the parts runner and simhost | passed | 44 minutes, Intel Xeon 6975P-C. All 137 pass, none skipped. The same phase with the two changes to Main: the process ends within two seconds both times and the service has the VM as powered off at once. The first simulation of the development line with the two changes |
 | 382 | `pci-passthrough-hotplug-7.1-kvm` @ `6d552882` | sim with the parts runner and simhost | passed | 46 minutes, AMD EPYC 7763. All 137 pass, none skipped. The first simulation of the 7.1 line with the two changes to Main, and the first time the phase `endpaused` runs with the KVM backend of Cyberus Technology: the process ends within two seconds both times, the second time with the file still being written when the session got closed, and the service has the VM as powered off at once. In the part with the drive the frontend is told to end with the device in the VM and while it is being taken out, and both end in order |
+| 383 | `pci-passthrough-hotplug-7.2-kvm` @ `b1136fa2` | sim with the parts runner, simhost and mfhost, the whole tree built with the sanitizers, exploring | passed | 60 minutes, Intel Xeon 6975P-C. All 212 pass, none skipped, and the sanitizers wrote nothing, no file in any part. The first VMs with the sanitizers on the head which has the PCI lock where a function goes away for the guest, the lock of the slot let go of before a live state is refused, and the two changes to Main: the VM process told to end with the VM paused, with its memory being written to a file, with a device of the host in the VM and while one is being taken out |
 
 Run numbers are those GitHub shows for the `build` workflow.
