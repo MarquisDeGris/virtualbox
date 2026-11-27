@@ -1004,12 +1004,50 @@ host_bars_check() # <what they were> <the moment, as the stage is to call it>
     fi
 }
 
+# A build which holds on to a device after an error the host reported of it
+# lets go of the device in its own time, and that is when the host puts back
+# what the device had before its bus was reset.  No device goes into the slot
+# before, so this waits for it.  A message of the build tells whether it is
+# one which does that.
+hold_knows()
+{
+    grep -a -q 'is held on to for a moment' "$VBOX_BIN/VBoxDD.so" 2> /dev/null
+}
+hold_lines()
+{
+    local n
+    n=$(grep -a -c 'which was held on to is let go of' "$VMDIR/Logs/VBox.log" 2> /dev/null)
+    echo "${n:-0}"
+}
+hold_wait() # <what hold_lines told before the error> <the moment, as the stage is to call it>
+{
+    local want i=0 n
+    if ! hold_knows; then
+        stage "VirtualBox holds on to the device for a moment and lets go of it then $2" skipped "this build lets go of a device at once"
+        return 0
+    fi
+    want=$(echo $HOSTFUNCS | wc -w)
+    while [ "$i" -lt 60 ]; do
+        n=$(( $(hold_lines) - ${1:-0} ))
+        [ "$n" -ge "$want" ] && break
+        sleep 1
+        i=$((i + 1))
+    done
+    grep -a 'held on to' "$VMDIR/Logs/VBox.log" | tail -n $((want * 2)) | awk '{ print "    | " substr($0, 1, 200) }'
+    if [ "$n" -ge "$want" ]; then
+        stage "VirtualBox holds on to the device for a moment and lets go of it then $2" ok
+    else
+        stage "VirtualBox holds on to the device for a moment and lets go of it then $2" FAILED "the log of the VM tells of $n function(s) let go of, of $want, after $i s"
+    fi
+}
+
 # One error of the device, as the host tells of it, with the device in the
 # slot and the guest using it.
 host_error_round() # <round> <what the error is called> <status>
 {
-    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 n1 want i=0 bars
+    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 n1 want i=0 bars h0
     n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
+    h0=$(hold_lines)
     want=$(echo $HOSTFUNCS | wc -w)
     bars=$(host_bars)
     serial_mark
@@ -1065,6 +1103,7 @@ host_error_round() # <round> <what the error is called> <status>
     guest_goes_on "the VM runs on after the error ($what)" 150
     $HE_STATE hotplug,absent,unused
     port_says "after the error which is $what"
+    hold_wait "$h0" "after the error ($what)"
     # The device is what it was to the host, or is made that again.
     [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
     if ! bind_dev; then

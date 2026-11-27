@@ -1286,8 +1286,9 @@ frozen_note()
 # vbox-phases.sh, where the same is done with the Linux guest.
 win_host_error_round() # <what the error is called> <status>
 {
-    local what=$1 status=$2 log="$VMDIR/Logs/VBox.log" n0 i=0 bars
+    local what=$1 status=$2 log="$VMDIR/Logs/VBox.log" n0 i=0 bars h0
     n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
+    h0=$(hold_lines)
     bars=$(host_bars)
     serial_mark
     dmesg -C 2> /dev/null
@@ -1318,6 +1319,7 @@ win_host_error_round() # <what the error is called> <status>
         return 1
     fi
     check_pcistate hotplug,absent,unused
+    hold_wait "$h0" "after the error ($what)"
     [ -e "/sys/bus/pci/devices/$HOSTADDR" ] || echo 1 > /sys/bus/pci/rescan
     if ! bind_dev; then
         stage "host: has the device after the error ($what)" FAILED
