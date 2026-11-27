@@ -466,6 +466,11 @@ runner_phases="plain emptyslot nat import"
 if grep -q -s 'firmwaresetup' "$WS/src/VBox/Frontends/VBoxManage/VBoxManageModifyNvram.cpp"; then
     runner_phases="$runner_phases fwsetup"
 fi
+# A tree which has the configuration value for the KVM paravirtualization
+# interface without its clock.
+if grep -q -s 'GIM/KVM/Clock' "$WS/src/VBox/VMM/VMMR3/GIMR3Kvm.cpp"; then
+    runner_phases="$runner_phases kvmclock"
+fi
 # The frontend told to end with the VM paused, as the last phase: in a tree
 # without the two changes to Main for it, told by its source, the service of
 # VirtualBox has to be started anew after it, and what goes wrong is told and

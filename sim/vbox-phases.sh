@@ -2426,6 +2426,133 @@ phase_fwsetup()
 }
 
 
+# The KVM paravirtualization interface without its clock: the configuration
+# value /GIM/KVM/Clock, set as extra data of the VM.  Nothing of the
+# passthrough work is in this.  It is here for the value, which a branch has
+# or has not.  What the guest does about its clock its kernel tells on the
+# serial port, and what the VM did for that clock is in the log of the VM.
+clock_in_log() # how often the VM has set up the clock of the interface
+{
+    local n
+    n=$(grep -a -c 'GIM: KVM: VCPU.*Enabled system-time struct' "$VMDIR/Logs/VBox.log" 2> /dev/null)
+    echo "${n:-0}"
+}
+
+clock_left_out() # whether the VM says that it does not offer the clock
+{
+    grep -a -q 'GIM: KVM: Not offering the paravirtualized clock' "$VMDIR/Logs/VBox.log" 2> /dev/null
+}
+
+# The state of the guest which runs is saved and loaded by a VM which is
+# configured the other way.  The guest goes on with what it has, and the VM
+# says that the state is unlike its configuration.
+clock_state_round() # <the extra data key> <its value for the load, or nothing> <offered|did not offer> <suffix for the logs> <what>
+{
+    VBM_TIMEOUT=300 run controlvm "$VM" savestate
+    if [ $? -ne 0 ] || ! wait_state saved 60; then
+        stage "$5" FAILED "the state is not saved, the VM is in state '$(vmstate)'"
+        diag
+        return 1
+    fi
+    if [ -n "$2" ]; then
+        run setextradata "$VM" "$1" "$2"
+    else
+        run setextradata "$VM" "$1"
+    fi
+    if ! start_vm; then
+        stage "$5" FAILED "the VM does not start"
+        diag
+    elif ! wait_serial "$ALIVE_RE" 120; then
+        stage "$5" FAILED "nothing from the guest"
+        diag
+    elif serial_has "$UP_RE"; then
+        stage "$5" FAILED "the guest booted anew"
+    elif ! grep -a -q "GIM: KVM: The saved state is of a VM which $3 the paravirtualized clock" "$VMDIR/Logs/VBox.log"; then
+        stage "$5" FAILED "the VM does not say that the state is of a VM which $3 the clock"
+    elif [ "$3" = offered ] && ! clock_left_out; then
+        stage "$5" FAILED "the VM which loaded the state was not configured without the clock"
+    elif [ "$3" != offered ] && [ "$(clock_in_log)" -ne 0 ]; then
+        stage "$5" FAILED "the VM has set the clock up for a guest which has none"
+    else
+        stage "$5" ok "the VM has set the clock up $(clock_in_log) times for the state"
+        guest_goes_on "that guest keeps running"
+    fi
+    keep_logs "$4"
+}
+
+kvmclock_rounds() # <the extra data key>
+{
+    local n what src
+
+    # A VM without the value: the guest sets the clock up.
+    boot "the guest boots with the interface as it is" || return
+    n=$(clock_in_log)
+    serial_show 'kvm-clock: Using msrs|Hypervisor detected|Switched to clocksource' 6
+    what="the guest sets up the clock of the interface where it is offered"
+    if serial_has 'kvm-clock: Using msrs' && [ "$n" -gt 0 ] && ! clock_left_out; then
+        stage "$what" ok
+    else
+        stage "$what" FAILED "the VM has set it up $n times"
+    fi
+    keep_logs -offered
+    clock_state_round "$1" 0 "offered" -loaded-with \
+        "a state which was saved with the clock is loaded where the clock is not offered, and the guest goes on"
+    reset_vm
+
+    # A start with the value: the guest boots and has nothing of the clock.
+    run setextradata "$VM" "$1" 0
+    if boot "the guest boots where the clock is not offered"; then
+        n=$(clock_in_log)
+        serial_show 'kvm-clock|Hypervisor detected|Switched to clocksource' 6
+        src=$(serial_new | grep -a -o 'Switched to clocksource [a-z0-9_-]*' | tail -n 1 | awk '{print $4}')
+        what="the guest does without the clock which is not offered"
+        if serial_has 'kvm-clock'; then
+            stage "$what" FAILED "its kernel speaks of kvm-clock"
+        elif [ "$n" -ne 0 ]; then
+            stage "$what" FAILED "the VM has set the clock up $n times"
+        elif ! clock_left_out; then
+            stage "$what" FAILED "the VM does not say that it leaves the clock out"
+        else
+            stage "$what" ok "its clock source is ${src:-not told}"
+        fi
+        if serial_has 'Hypervisor detected: KVM'; then
+            stage "the guest finds the interface without the clock" ok
+        else
+            stage "the guest finds the interface without the clock" FAILED
+        fi
+        guest_goes_on "the guest keeps running without the clock"
+        keep_logs -without
+        clock_state_round "$1" "" "did not offer" -loaded-without \
+            "a state which was saved without the clock is loaded where the clock is offered, and the guest goes on"
+    fi
+    reset_vm
+
+    # The value taken back: as before.
+    run setextradata "$VM" "$1"
+    if boot "the guest boots with the value taken back"; then
+        n=$(clock_in_log)
+        what="the clock is offered again when the value is taken back"
+        if serial_has 'kvm-clock: Using msrs' && [ "$n" -gt 0 ] && ! clock_left_out; then
+            stage "$what" ok
+        else
+            stage "$what" FAILED "the VM has set it up $n times"
+        fi
+    fi
+}
+
+phase_kvmclock()
+{
+    local key=VBoxInternal/GIM/KVM/Clock
+    PHASE=kvmclock
+    reset_vm
+    vbm setextradata "$VM" "$key" > /dev/null 2>&1
+    kvmclock_rounds "$key"
+    end_phase
+    # The phases after this one get the VM as it was.
+    vbm setextradata "$VM" "$key" > /dev/null 2>&1
+}
+
+
 # The frontend is told to end with nothing of the passthrough device in the
 # VM.  The VM is paused, for which VBoxHeadless tries nothing: it closes the
 # session, and the Console powers the VM down from its uninit().  Twice: by
@@ -2483,6 +2610,7 @@ if setup; then
             import)      phase_import ;;
             gfx3d)       phase_gfx3d ;;
             fwsetup)     phase_fwsetup ;;
+            kvmclock)    phase_kvmclock ;;
             passthrough) phase_passthrough ;;
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;
