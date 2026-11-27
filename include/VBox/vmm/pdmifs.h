@@ -2552,6 +2552,10 @@ typedef struct PDMIPCIPASSTHROUGHPORT
      * @retval  VERR_MISMATCH if the PCI device is not like the one the VM is built for.
      * @retval  VERR_IO_NOT_READY if the host has not got the PCI device set up, or not any
      *          more: none of its BAR registers has an address.
+     * @retval  VERR_RESOURCE_IN_USE if the PCI device which was in the slot is still held
+     *          on to after an error the host reported of it.  That is for seconds, see
+     *          the ErrorHoldMs and ErrorHoldMaxMs settings of the device, and it is the
+     *          thing to try again after.  pfnQueryState tells of no device meanwhile.
      * @retval  VERR_VM_INVALID_VM_STATE if the VM is neither running nor suspended, which
      *          it isn't while its state is being saved or loaded.
      * @param   pInterface  Pointer to the interface structure containing the called function pointer.
@@ -2572,6 +2576,9 @@ typedef struct PDMIPCIPASSTHROUGHPORT
      * @retval  VERR_TIMEOUT if the guest didn't let go of the PCI device in time and
      *          fForce is clear.  The PCI device is where it was.  The guest was asked
      *          and can still switch the slot off, which leaves the PCI device in the slot.
+     * @note    The slot can be empty with the PCI device not yet free for others on the
+     *          host: after an error the host reported of it, it is held on to for
+     *          seconds, see pfnAttach.  This succeeds for an empty slot all the same.
      * @param   pInterface  Pointer to the interface structure containing the called function pointer.
      * @param   cMsWait     How long to wait for the guest to let go of the PCI device.
      * @param   fForce      Whether the PCI device is taken away from the guest if it didn't
