@@ -232,6 +232,8 @@
  * so it can output early during boot. However you need to disable the VirtualBox emulated graphics controller or starting the VM
  * fails because both devices want to register those ranges. Disable the emulated graphics controller with
  *    VBoxManage modifyvm vmname --graphicscontroller none
+ * The kernel of the host has to give these ranges away: it has to be built with CONFIG_VFIO_PCI_VGA, and the parameter
+ * disable_vga of its module vfio-pci must not be set. Starting the VM fails with a message about it otherwise.
  *
  * Instead of the VFIO device node with VfioPath a function can be given by its address on the host, the node is
  * looked up in sysfs then. The address has to have the form the host kernel uses for it
@@ -1277,7 +1279,20 @@ static DECLCALLBACK(VBOXSTRICTRC) pciVfioMmioWrite(PPDMDEVINS pDevIns, void *pvU
 }
 
 
-DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRegion, struct vfio_region_info *pRegionInfo)
+/**
+ * Asks the kernel about a region of a function.
+ *
+ * @returns VBox status code.
+ * @param   pThis               The VFIO PCI device instance.
+ * @param   pFun                The function, with the device file in place.
+ * @param   uRegion             The region, VFIO_PCI_XXX_REGION_INDEX.
+ * @param   pRegionInfo         Where to return the information about the region.
+ * @param   fRefusalIsNoRegion  Whether the kernel refusing to tell of the region, with
+ *                              EINVAL, is to come back as a region without flags and
+ *                              without a size, see pciVfioQueryVgaRegionInfo().
+ */
+static int pciVfioQueryRegionInfoWorker(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRegion, struct vfio_region_info *pRegionInfo,
+                                        bool fRefusalIsNoRegion)
 {
     RT_ZERO(*pRegionInfo);
     pRegionInfo->argsz = sizeof(*pRegionInfo);
@@ -1285,8 +1300,17 @@ DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_
 
     int rcLnx = ioctl(pFun->iFdVfio, VFIO_DEVICE_GET_REGION_INFO, pRegionInfo);
     if (rcLnx == -1)
-        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
-                                N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, errno);
+    {
+        int const iErrno = errno;
+        if (   fRefusalIsNoRegion
+            && iErrno == EINVAL)
+        {
+            RT_ZERO(*pRegionInfo);
+            return VINF_SUCCESS;
+        }
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(iErrno), RT_SRC_POS,
+                               N_("Getting information for region %u of opened VFIO device failed with %d"), uRegion, iErrno);
+    }
 
     const int iInstance = pThis->iInstance;
     LogRel(("VFIO#%d.%u: Region %u:\n"
@@ -1303,6 +1327,12 @@ DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_
             iInstance, pFun->uPciFun, pRegionInfo->offset));
 
     return VINF_SUCCESS;
+}
+
+
+DECLINLINE(int) pciVfioQueryRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, uint32_t uRegion, struct vfio_region_info *pRegionInfo)
+{
+    return pciVfioQueryRegionInfoWorker(pThis, pFun, uRegion, pRegionInfo, false /*fRefusalIsNoRegion*/);
 }
 
 
@@ -1574,17 +1604,47 @@ static int pciVfioVgaCreateRanges(PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
 }
 
 
+/**
+ * Asks the kernel for the legacy VGA region of a function.
+ *
+ * The kernel refuses to tell of this region, with EINVAL, where it has none to
+ * give for the function: the function is no VGA device, the kernel was built
+ * without CONFIG_VFIO_PCI_VGA, or vfio-pci was told not to give it away (its
+ * parameter disable_vga).  That comes back from here as a region without flags
+ * and without a size, which is how the kernel tells of a BAR the device
+ * doesn't have.
+ *
+ * @returns VBox status code.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the device file in place.
+ * @param   pRegionInfo Where to return the information about the region.
+ */
+static int pciVfioQueryVgaRegionInfo(PVFIOPCI pThis, PVFIOPCIFUN pFun, struct vfio_region_info *pRegionInfo)
+{
+    int rc = pciVfioQueryRegionInfoWorker(pThis, pFun, VFIO_PCI_VGA_REGION_INDEX, pRegionInfo, true /*fRefusalIsNoRegion*/);
+    if (   RT_SUCCESS(rc)
+        && (   !pRegionInfo->flags
+            || !pRegionInfo->size))
+        LogRel(("VFIO#%d.%u: The kernel of the host has no legacy VGA ranges to give for the function: the function is no VGA "
+                "device, or the kernel was built without CONFIG_VFIO_PCI_VGA, or its module vfio-pci has the parameter "
+                "disable_vga set\n", pThis->iInstance, pFun->uPciFun));
+    return rc;
+}
+
+
 static int pciVfioSetupVga(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMDEVINS pDevIns)
 {
     struct vfio_region_info RegionInfo; RT_ZERO(RegionInfo);
-    int rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_VGA_REGION_INDEX, &RegionInfo);
+    int rc = pciVfioQueryVgaRegionInfo(pThis, pFun, &RegionInfo);
     if (RT_FAILURE(rc))
         return rc;
 
     if (   !RegionInfo.flags
         || !RegionInfo.size)
         return PDMDevHlpVMSetError(pDevIns, VERR_NOT_SUPPORTED, RT_SRC_POS,
-                                   N_("The device has no legacy VGA ranges which could be exposed to the guest"));
+                                   N_("The kernel of the host has no legacy VGA ranges of the device which could be exposed to the "
+                                      "guest, as ExposeVga asks for. It was built without CONFIG_VFIO_PCI_VGA, or its module "
+                                      "vfio-pci has the parameter disable_vga set"));
 
     pFun->offVga = RegionInfo.offset;
 
@@ -4966,13 +5026,14 @@ static int pciVfioFunCheckLayout(PVFIOPCI pThis, PVFIOPCIFUN pFun)
     if (   !pszWhat
         && pFun->fVga)
     {
-        rc = pciVfioQueryRegionInfo(pThis, pFun, VFIO_PCI_VGA_REGION_INDEX, &RegionInfo);
+        rc = pciVfioQueryVgaRegionInfo(pThis, pFun, &RegionInfo);
         if (RT_FAILURE(rc))
             return rc;
         if (   !RegionInfo.flags
             || !RegionInfo.size)
             pszWhat = "legacy VGA ranges";
-        pFun->offVga = RegionInfo.offset;
+        else
+            pFun->offVga = RegionInfo.offset;
     }
 
     /* The interrupts. */
