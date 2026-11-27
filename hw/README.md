@@ -55,6 +55,7 @@ which can also be run by itself:
     sudo sh hw/linux/test-b.sh      # the second: a small Linux guest with the driver of the device
     sudo HW_VGA=yes sh hw/linux/test-b.sh   # for a graphics card, see below
     sudo sh hw/linux/test-c.sh      # the third: the device leaves that guest and comes back
+    sudo HW_VGA=yes sh hw/linux/test-c.sh   # for a graphics card, see below
 
 - The device is the first graphics card which is not the one the firmware
   shows its screen on, with all its functions. `HW_DEV=<address>` in front
@@ -118,6 +119,12 @@ which can also be run by itself:
   stays where it is on the host all the while, so this is not a device on
   Thunderbolt being pulled. `tests.sh` runs it last; `HW_SKIP_PLUG=yes` in
   front of that command leaves it out.
+- `sudo HW_VGA=yes sh hw/linux/test-c.sh` is the third test with the VM of
+  `HW_VGA=yes` above. The legacy VGA ranges stay those of the VM while the
+  card is out of it: the guest reads through them that nothing answers
+  then, and reads the register of the card again when the card is back. The
+  result is `hw-out/test-c-vga.txt`. `tests.sh` runs it for a graphics card
+  after the third test.
 
 The workflow runs the three tests in its simulation, with an emulated NVMe
 drive as the device, with two of them at one address, with a device which

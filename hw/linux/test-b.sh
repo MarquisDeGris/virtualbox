@@ -35,6 +35,7 @@ RESULT="$out/test-b.txt"
 if [ "${HW_PLUG:-no}" = yes ]; then
     me=test-c.sh
     RESULT="$out/test-c.txt"
+    [ "${HW_VGA:-no}" = yes ] && RESULT="$out/test-c-vga.txt"
 fi
 : > "$RESULT"
 
@@ -416,6 +417,25 @@ wait_there() # <the devices and their drivers, as the guest tells them> <seconds
     done
     return 1
 }
+# With the legacy VGA ranges the guest also tells every few seconds what a
+# register of the card reads as through the ports.  This waits for it to tell
+# twice more, so that what it read is of now, a minute and a half at most, and
+# has the answer in $vgamisc.
+vga_port_count() { said | grep -c -E '^HW: VGAPORT misc=[0-9a-f][0-9a-f]$'; }
+vga_port_wait()
+{
+    local n i=0
+    n=$(vga_port_count)
+    while [ "$(vga_port_count)" -lt "$((n + 2))" ]; do
+        [ "$i" -lt 90 ] || return 1
+        [ "$(vmstate)" = running ] || return 1
+        sleep 1
+        i=$((i + 1))
+    done
+    vgamisc=$(said | grep -E '^HW: VGAPORT misc=[0-9a-f][0-9a-f]$' | tail -n 1)
+    vgamisc=${vgamisc##*=}
+    return 0
+}
 nsaid=0
 if [ "${HW_PLUG:-no}" = yes ]; then
     nsaid=$(said | grep -c .)
@@ -448,6 +468,18 @@ if [ "${HW_PLUG:-no}" = yes ]; then
         else
             check "round $round: guest: the device is gone from it" FAILED "it tells: $(there_said)"
         fi
+        if [ -n "$vga" ]; then
+            # The legacy VGA ranges stay those of the VM, with no card behind
+            # them now.
+            what="round $round: guest: nothing answers at the legacy VGA ports while the card is out"
+            if ! vga_port_wait; then
+                check "$what" FAILED "the guest tells nothing of what it reads there"
+            elif [ "$vgamisc" = ff ]; then
+                check "$what" ok
+            else
+                check "$what" FAILED "the miscellaneous output register reads as 0x$vgamisc"
+            fi
+        fi
         for f in $FUNCS; do
             [ "$(driver_of "$f")" = vfio-pci ] || check "round $round: $f is still with vfio-pci while it is out" FAILED "driver $(driver_of "$f")"
         done
@@ -468,6 +500,16 @@ if [ "${HW_PLUG:-no}" = yes ]; then
             check "$what" ok "$(( $(date +%s) - t0 )) seconds after it was put in"
         else
             check "$what" FAILED "before: ${base%%;*}; now: $(there_said)"
+        fi
+        if [ -n "$vga" ]; then
+            what="round $round: guest: reads a register of the card through the legacy VGA ports again"
+            if ! vga_port_wait; then
+                check "$what" FAILED "the guest tells nothing of what it reads there"
+            elif [ "$vgamisc" != ff ]; then
+                check "$what" ok "the miscellaneous output register is 0x$vgamisc"
+            else
+                check "$what" look "it read 'ff', which is also what comes back where nothing answers"
+            fi
         fi
         if [ "$display" = yes ]; then
             # The connectors of the card and what is on them, which a driver

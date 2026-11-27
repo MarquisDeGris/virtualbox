@@ -11,6 +11,14 @@
 #
 #   sudo sh hw/linux/test-c.sh        writes hw-out/test-c.txt
 #
+#   sudo HW_VGA=yes sh hw/linux/test-c.sh     writes hw-out/test-c-vga.txt
+#
+# is the same with the VM of HW_VGA=yes of hw/linux/test-b.sh, which has no
+# graphics adapter of its own and was given the legacy VGA ranges of the
+# card: the ranges stay those of the VM while the card is out.  The guest
+# reads through them that nothing answers then, and reads the register of the
+# card again when the card is back.
+#
 # It runs as root and takes what hw/linux/test-b.sh takes.  HW_PLUG_WAIT is
 # how many seconds the drivers of the guest are given to take the device
 # which came back, 180 if nothing is said.

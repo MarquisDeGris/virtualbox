@@ -181,7 +181,11 @@ the simulation ran into what they are for:
   for Windows then. Part J has a step for it.
 
 For a graphics card switch the emulated graphics controller off and set
-`ExposeVga`, see the description in `DevPciVfio.cpp`.
+`ExposeVga`, see the description in `DevPciVfio.cpp`. The kernel of the
+host has to give the legacy VGA ranges of the card away for that
+(`CONFIG_VFIO_PCI_VGA`, and `vfio-pci` not loaded with `disable_vga`); the
+checklist tells whether it does, and a VM does not start where it does
+not.
 
 ## 2. Setting up the VM
 

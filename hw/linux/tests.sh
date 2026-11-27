@@ -59,6 +59,11 @@ if [ "$display" = yes ] && [ "${HW_SKIP_VGA:-no}" != yes ]; then
 fi
 if [ "${HW_SKIP_PLUG:-no}" != yes ]; then
     step "the third test" test-c.sh || failed="$failed test-c"
+    if [ "$display" = yes ] && [ "${HW_SKIP_VGA:-no}" != yes ]; then
+        echo
+        echo "======== the third test, with the legacy VGA ranges of the card given to the VM: HW_VGA=yes hw/linux/test-c.sh"
+        HW_VGA=yes sh "$here/test-c.sh" || failed="$failed test-c-vga"
+    fi
 fi
 
 give_back

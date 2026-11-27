@@ -197,6 +197,25 @@ for addr in "$@"; do
         *)  bad "it is bound to the driver $drv of the host: it has to be bound to vfio-pci instead (INSTALL.md, section 4)" ;;
     esac
     [ -r "$dev/reset_method" ] && note "ways the host can reset it: $(cat "$dev/reset_method" 2> /dev/null)"
+    # A VGA device (class 0300) can have its legacy VGA ranges given to the VM
+    # (the setting ExposeVga), which is what it takes for a card to show a
+    # guest from its start.  The kernel has to give them away for that.  The
+    # parameter of vfio-pci is there if the kernel was built with
+    # CONFIG_VFIO_PCI_VGA, once vfio-pci is loaded.
+    case "$(cat "$dev/class" 2> /dev/null)" in
+        0x0300*)
+            if [ -r /sys/module/vfio_pci/parameters/disable_vga ]; then
+                case "$(cat /sys/module/vfio_pci/parameters/disable_vga 2> /dev/null)" in
+                    N|0) note "it is a VGA device, and the kernel gives its legacy VGA ranges away: a VM can have them (ExposeVga)" ;;
+                    *)   note "it is a VGA device, and vfio-pci was told not to give its legacy VGA ranges away (disable_vga): a VM cannot have them (ExposeVga) and can have the device without" ;;
+                esac
+            elif [ -d /sys/module/vfio_pci ]; then
+                note "it is a VGA device, and this kernel gives no legacy VGA ranges away (CONFIG_VFIO_PCI_VGA is not set): a VM cannot have them (ExposeVga) and can have the device without"
+            else
+                unsure "it is a VGA device; whether the kernel gives its legacy VGA ranges away (CONFIG_VFIO_PCI_VGA) shows once vfio-pci is loaded"
+            fi
+            ;;
+    esac
 done
 
 echo "----"

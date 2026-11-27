@@ -48,12 +48,20 @@ first() { sed -n '1p' "$1" 2> /dev/null; }
     if [ -c /dev/iommu ]; then kv dev-iommu there; else kv dev-iommu "not there"; fi
     cfg="/boot/config-$(uname -r)"
     if [ -r "$cfg" ]; then
-        kv kernel-config "$(grep -E '^CONFIG_(IOMMUFD|VFIO_DEVICE_CDEV|VFIO_PCI|VFIO|KVM|KVM_INTEL|KVM_AMD)=' "$cfg" | tr '\n' ' ')"
+        kv kernel-config "$(grep -E '^CONFIG_(IOMMUFD|VFIO_DEVICE_CDEV|VFIO_PCI|VFIO_PCI_VGA|VFIO|KVM|KVM_INTEL|KVM_AMD)=' "$cfg" | tr '\n' ' ')"
     else
         kv kernel-config "not readable"
     fi
     if have modinfo; then
         if modinfo vfio-pci > /dev/null 2>&1; then kv vfio-pci "module or built in"; else kv vfio-pci "not found"; fi
+    fi
+    # Whether vfio-pci gives the legacy VGA ranges of a VGA device away, which
+    # a VM needs to show a guest from its start on a card: the parameter is
+    # there with CONFIG_VFIO_PCI_VGA, once vfio-pci is loaded.
+    if [ -r /sys/module/vfio_pci/parameters/disable_vga ]; then
+        kv vfio-pci-disable-vga "$(cat /sys/module/vfio_pci/parameters/disable_vga 2> /dev/null)"
+    elif [ -d /sys/module/vfio_pci ]; then
+        kv vfio-pci-disable-vga "no such parameter"
     fi
     if have mokutil; then kv secure-boot "$(mokutil --sb-state 2> /dev/null | sed -n '1p')"; fi
 

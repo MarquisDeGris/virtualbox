@@ -40,7 +40,9 @@ hex1() # what comes in as hexadecimal digits, with whichever tool this busybox h
 }
 port_in() { dd if=/dev/port bs=1 skip="$(($1))" count=1 2> /dev/null | hex1; }
 port_out() { printf "\\$(printf '%03o' "$(($2))")" | dd of=/dev/port bs=1 seek="$(($1))" count=1 conv=notrunc 2> /dev/null; }
+vgaports=no
 if grep -q -w 'hwvga=1' /proc/cmdline; then
+    vgaports=yes
     line="VGA misc=$(port_in 0x3cc) text=$(devmem 0xb8000 16 2> /dev/null || echo refused)"
     if grep -q -w 'hwvgawrite=1' /proc/cmdline; then
         # Sequencer: register 2, all four planes take what is written;
@@ -233,6 +235,10 @@ while :; do
     if [ "$t" -ge 5 ]; then
         t=0
         n=$((n + 1))
+        # With the legacy VGA ranges: what the register of the card reads as
+        # through the ports now.  Nothing answers there while the card is out
+        # of the VM, which reads as ff; hw/linux/test-c.sh looks at it.
+        [ "$vgaports" = yes ] && say "VGAPORT misc=$(port_in 0x3cc)"
         say "ALIVE $n"
         say "STILL$cur"
     fi

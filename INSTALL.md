@@ -172,7 +172,29 @@ to be loaded.
 | V1 | Chipset ICH9, firmware EFI | `VBoxManage modifyvm <vm> --chipset ich9 --firmware efi` |
 | V2 | KVM as execution engine | `VBoxManage modifyvm <vm> --vm-execution-engine native-api` |
 | V3 | The device attached, for hot-plug at device 0 of guest bus 1 or 2 and alone there | section 2 of [HWTEST.md](HWTEST.md) |
-| V4 | For a graphics card which is to show the start of the guest: the emulated graphics controller off, `ExposeVga` set | the top of `src/VBox/Devices/Bus/DevPciVfio.cpp` |
+| V4 | For a graphics card which is to show the start of the guest: the emulated graphics controller off, `ExposeVga` set. The kernel of the host has to give the legacy VGA ranges of the card away for that: built with `CONFIG_VFIO_PCI_VGA`, and `vfio-pci` not loaded with `disable_vga`. The checklist has a line about it for a VGA device | the top of `src/VBox/Devices/Bus/DevPciVfio.cpp` |
+
+`ExposeVga` (V4) has a price on the host, which is one of the kernel and
+not of VirtualBox. Each access of the guest to the legacy VGA ranges has
+the kernel hand these ranges to the card of the VM through its VGA
+arbiter (`drivers/pci/vgaarb.c`), and a graphics card of the host which
+still answers at them loses them for it. Where the kernel cannot do that
+with a bridge above that card, which is so for a card on the root bus,
+it switches the memory and I/O decoding of the card off, and nothing
+switches it on again until something asks the arbiter for that card. The
+usual graphics drivers are asked by the arbiter when it is first used
+with more than one card there, and answer that their card can do without
+the legacy ranges; such a card is left alone. A card of the host which
+has no such driver, one with the frame buffer of the firmware only for
+example, is what this hits: the guest can make the screen of the host
+stand still. So leave `ExposeVga`
+off where nobody has to see the guest before its driver has the card,
+and on a host where no VM is to have these ranges at all load `vfio-pci`
+with `disable_vga=1`: a VM with `ExposeVga` does not start then and says
+why, and the script of the checklist tells of the parameter. This is
+from the source of the kernel (Linux 7.0) and was not tried: the machine
+which stands in for a host in the simulation has one graphics adapter,
+the one which is passed through.
 
 ### What must not be used to get around a missing item
 

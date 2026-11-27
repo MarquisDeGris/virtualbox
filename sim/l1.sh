@@ -233,6 +233,13 @@ hw_scripts()
     # The third one after those: its guest has the device taken out and put
     # in again.
     hw_script c "the third script for a machine with real hardware" hw-out/test-c.txt hw-test-c
+    if [ "${SIM_HWTEST:-}" = vga ]; then
+        # And with the legacy VGA ranges of the card given to the guest: the
+        # ranges stay with the VM while the card is out and has left nothing
+        # behind them.
+        hw_script c "the third script, with a VM which is given the legacy VGA ranges of the card," hw-out/test-c-vga.txt hw-test-c-vga \
+                  HW_VGA=yes
+    fi
     if [ -n "${SIM_HWBIN:-}" ] && [ -x "$SIM_HWBIN/VBoxManage" ]; then
         # The first script once more, with the build as it is published for
         # machines with real hardware and as the runner fetched it.
