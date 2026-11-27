@@ -975,13 +975,43 @@ host_request() # <request>
     grep -q '^OK' "$SIM_OUT/host-reply"
 }
 
+# Where the host has the memory of each function of the device: the six BAR
+# registers as the device itself has them, read through sysfs.  A reset of the
+# bus by the kernel of the host, which is what it does about an error it takes
+# for fatal, leaves them empty unless something writes them again, and a
+# device without them is of no use to a guest which gets it next.
+host_bars()
+{
+    local f s=
+    for f in $HOSTFUNCS; do
+        s="$s ${f##*:}=$(od -A n -t x1 -j 16 -N 24 "/sys/bus/pci/devices/$f/config" 2> /dev/null | tr -d ' \n')"
+    done
+    echo "${s# }"
+}
+host_bars_check() # <what they were> <the moment, as the stage is to call it>
+{
+    local now f
+    now=$(host_bars)
+    if [ -z "$1" ]; then
+        stage "host: the functions of the device have their memory addresses $2" skipped "they were not read before"
+    elif [ "$now" = "$1" ]; then
+        stage "host: the functions of the device have their memory addresses $2" ok
+    else
+        stage "host: the functions of the device have their memory addresses $2" FAILED "the BAR registers were: $1; they are: $now"
+        for f in $HOSTFUNCS; do
+            echo "    | $f, the first 64 bytes of its configuration space: $(od -A n -t x1 -N 64 "/sys/bus/pci/devices/$f/config" 2> /dev/null | tr -s ' \n' ' ')"
+        done
+    fi
+}
+
 # One error of the device, as the host tells of it, with the device in the
 # slot and the guest using it.
 host_error_round() # <round> <what the error is called> <status>
 {
-    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 n1 want i=0
+    local round=$1 what=$2 status=$3 log="$VMDIR/Logs/VBox.log" n0 n1 want i=0 bars
     n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
     want=$(echo $HOSTFUNCS | wc -w)
+    bars=$(host_bars)
     serial_mark
     dmesg -C 2> /dev/null
     port_says "before the error which is $what"
@@ -1042,6 +1072,7 @@ host_error_round() # <round> <what the error is called> <status>
         return 1
     fi
     stage "host: has the device after the error ($what)" ok
+    host_bars_check "$bars" "after the error ($what)"
     serial_mark
     if run controlvm "$VM" plugpci "$HOSTADDR"; then
         stage "plugpci after the error ($what)" ok

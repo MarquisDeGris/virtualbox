@@ -1286,8 +1286,9 @@ frozen_note()
 # vbox-phases.sh, where the same is done with the Linux guest.
 win_host_error_round() # <what the error is called> <status>
 {
-    local what=$1 status=$2 log="$VMDIR/Logs/VBox.log" n0 i=0
+    local what=$1 status=$2 log="$VMDIR/Logs/VBox.log" n0 i=0 bars
     n0=$(grep -a -c 'the host reported an error of the device' "$log" 2> /dev/null)
+    bars=$(host_bars)
     serial_mark
     dmesg -C 2> /dev/null
     echo "+ the port in front of the device reports an error: $what (status $status)"
@@ -1323,6 +1324,7 @@ win_host_error_round() # <what the error is called> <status>
         return 1
     fi
     stage "host: has the device after the error ($what)" ok
+    host_bars_check "$bars" "after the error ($what)"
     serial_mark
     if VBM_TIMEOUT=300 run controlvm "$VM" plugpci "$HOSTADDR"; then
         stage "plugpci after the error ($what)" ok
