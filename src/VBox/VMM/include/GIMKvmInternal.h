@@ -254,7 +254,7 @@ typedef GIMKVMCPU const *PCGIMKVMCPU;
 RT_C_DECLS_BEGIN
 
 #ifdef IN_RING3
-VMMR3_INT_DECL(int)             gimR3KvmInit(PVM pVM);
+VMMR3_INT_DECL(int)             gimR3KvmInit(PVM pVM, PCFGMNODE pGimCfg);
 VMMR3_INT_DECL(int)             gimR3KvmInitCompleted(PVM pVM);
 VMMR3_INT_DECL(int)             gimR3KvmTerm(PVM pVM);
 VMMR3_INT_DECL(void)            gimR3KvmRelocate(PVM pVM, RTGCINTPTR offDelta);

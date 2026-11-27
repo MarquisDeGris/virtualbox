@@ -94,6 +94,12 @@ Rules for adding a changelog entry to make them look more uniform:
     <itemizedlist>
 
       <listitem>
+        <para>VMM: Added a setting with which a VM does not offer the
+          paravirtualized clock of the KVM paravirtualization interface to its
+          guest, see the user manual</para>
+      </listitem>
+
+      <listitem>
         <para>NAT: Fixed ICMP traceroute missing intermediate hops when using
           NAT networking</para>
       </listitem>
