@@ -104,12 +104,25 @@
  * for it this is hardware which stops answering. There is no way back either: the function stays
  * out of service until the VM is powered off.
  *
- * A device which was let go of because of an error can be left without its addresses by the
- * host: its kernel resets the bus the device is on for an error it takes for fatal, and
- * doesn't put back what a device had which nobody has opened at that moment. Such a
- * device is refused when it is opened the next time, be it for a VM which starts with it or for
- * the slot it is put into, and the message says how the host gets to set it up again, see
- * pciVfioFunCheckHostAddresses().
+ * A device the host reported an error of is not let go of at once. The kernel of the host resets
+ * the bus the device is on for an error it takes for fatal, right after it has told of the error,
+ * and it doesn't put back what the device had before that, the addresses in its BAR registers
+ * above all. Closing the device file is what puts that back, and it is of use only when it comes
+ * after the reset. So the function is taken out of service at once like above, but the device file
+ * is kept for a moment, see pciVfioFunLetGo() and pciVfioWatcherHolds(): the interrupts of the
+ * device are ended, the device is told to neither decode its addresses nor act as a bus master, and
+ * the file is closed when the time is up and the device answers. The ErrorHoldMs setting of the
+ * device is that time in milliseconds, 2000 unless set, and 0 for letting go at once
+ *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/ErrorHoldMs" 2000
+ * A device which doesn't answer when the time is up is held on to until it does, for no longer than
+ * the ErrorHoldMaxMs setting says, 15000 unless set. The host gets a device it asks for meanwhile
+ * at once. No device is put into the slot while one is held on to, and a VM which is powered off
+ * holds on to the device for what is left of ErrorHoldMs.
+ *
+ * A device which was let go of at the wrong moment nevertheless is left without its addresses by
+ * the host. Such a device is refused when it is opened the next time, be it for a VM which starts
+ * with it or for the slot it is put into, and the message says how the host gets to set it up
+ * again, see pciVfioFunCheckHostAddresses().
  *
  * @section sec_dev_vfio_hotplug        Hot-plug capable slot
  *
@@ -361,6 +374,20 @@
  * opposite. */
 #define VFIO_PCI_ATTN_BUTTON_HOLDOFF_MS       (10 * RT_MS_1SEC)
 
+/** How long a device the host reported an error of is held on to before it is let
+ * go of, in milliseconds, unless the configuration says otherwise (ErrorHoldMs).
+ * The kernel of the host resets the bus of the device right after it has told of
+ * an error it takes for fatal, and that takes it a tenth of a second at least and
+ * a second and more with some devices. */
+#define VFIO_PCI_ERROR_HOLD_MS_DEFAULT        (2 * RT_MS_1SEC)
+/** How long at most a device the host reported an error of is held on to when it
+ * doesn't answer, in milliseconds, unless the configuration says otherwise
+ * (ErrorHoldMaxMs). */
+#define VFIO_PCI_ERROR_HOLD_MAX_MS_DEFAULT    (15 * RT_MS_1SEC)
+/** How long it is until a device which is held on to and doesn't answer is asked
+ * again, in milliseconds. */
+#define VFIO_PCI_ERROR_HOLD_ASK_MS            100
+
 /** The version of the saved state unit.  The unit has the layout the VM is built
  * from for each function, nothing of the device. */
 #define VFIO_PCI_SAVED_STATE_VERSION          1
@@ -517,6 +544,21 @@ typedef struct VFIOPCIFUN
     int                  iFdEvtReq;
     /** The eventfd the host signals on an error of the device it can't recover from, -1 if it doesn't offer that. */
     int                  iFdEvtErr;
+    /** Where the device file is kept while the device is held on to after an error the
+     * host reported of it, see pciVfioFunLetGo().  The number belongs to the function
+     * from the start and refers to what iFdInert refers to while nothing is held on
+     * to. */
+    int                  iFdHeld;
+    /** Flag whether the device is held on to: the function is out of service and
+     * iFdHeld refers to the device file.  Set with the critical section of the slot
+     * held, and cleared with it held by the watcher thread once the device file is
+     * closed.  The watcher thread is the one to use iFdHeld meanwhile. */
+    bool volatile        fHeld;
+    /** Whether the device which is held on to was told to keep quiet, see
+     * pciVfioFunHeldQuiesce().  For the watcher thread. */
+    bool                 fHeldQuiet;
+    /** When the time the device is held on to began, for the watcher thread. */
+    uint64_t             msHeldSince;
 
     /** The start offset of the PCI config space. */
     uint64_t             offPciCfg;
@@ -684,6 +726,12 @@ typedef struct VFIOPCI
     /** How long the guest gets for letting go of the device before it is taken away
      * from it because the host wants it back, in milliseconds. */
     uint32_t             cMsGuestRelease;
+    /** How long a device the host reported an error of is held on to before it is let
+     * go of, in milliseconds, 0 for letting go of it at once (ErrorHoldMs). */
+    uint32_t             cMsErrorHold;
+    /** How long at most such a device is held on to when it doesn't answer, in
+     * milliseconds, not less than cMsErrorHold (ErrorHoldMaxMs). */
+    uint32_t             cMsErrorHoldMax;
     /** When the attention button of the slot was pressed last to ask the guest to let
      * go of the device, 0 if it wasn't since the link to the slot went down last. */
     uint64_t volatile    msAttnPressed;
@@ -4382,7 +4430,35 @@ static DECLCALLBACK(int) pciVfioFunGoneOnEmt(PPDMDEVINS pDevIns, uintptr_t iPciF
 }
 
 
-static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun);
+static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun, bool fHold);
+
+
+/**
+ * Ends the interrupts of a device which is held on to, as closing its file does
+ * for one which is let go of at once.  The eventfds of the function are not
+ * signalled by the device any more after this.  The notifications of the host
+ * about the device stay as they are: the host gets the device when it asks for
+ * it, see pciVfioWatcherThread().
+ *
+ * Nothing waits here for the kernel being done with the device.
+ *
+ * @param   pFun        The function, with the device file in iFdHeld.
+ */
+static void pciVfioFunHeldIrqsOff(PCVFIOPCIFUN pFun)
+{
+    for (uint32_t uVfioIrq = 0; uVfioIrq < RT_ELEMENTS(pFun->acIrqVectors); uVfioIrq++)
+        if (pFun->acIrqVectors[uVfioIrq])
+        {
+            struct vfio_irq_set IrqSet;
+            IrqSet.argsz = sizeof(IrqSet);
+            IrqSet.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
+            IrqSet.index = uVfioIrq;
+            IrqSet.start = 0;
+            IrqSet.count = 0;
+            int const rcLnx = ioctl(pFun->iFdHeld, VFIO_DEVICE_SET_IRQS, &IrqSet);
+            RT_NOREF(rcLnx); /* The kernel refuses it for a kind of interrupt which is not set up. */
+        }
+}
 
 
 /**
@@ -4404,8 +4480,12 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun);
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function.
  * @param   pszWhy      The reason, for the log.
+ * @param   fHold       Whether the device is held on to for a moment instead of
+ *                      being let go of at once, which is for an error the host
+ *                      reported and for the watcher thread to ask for, see
+ *                      pciVfioFunLetGo().
  */
-static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszWhy)
+static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszWhy, bool fHold)
 {
     /* Being out of service and the device being let go of are one thing for whoever
        holds the critical section of the slot. */
@@ -4415,7 +4495,7 @@ static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszW
     if (!fWasGone)
     {
         LogRel(("VFIO#%d.%u: The function is taken out of service: %s\n", pThis->iInstance, pFun->uPciFun, pszWhy));
-        pciVfioFunLetGo(pThis, pFun);
+        pciVfioFunLetGo(pThis, pFun, fHold);
     }
     if (RT_SUCCESS(rcLock))
         RTCritSectLeave(&pThis->CritSectSlot);
@@ -4436,10 +4516,30 @@ static void pciVfioFunSetGone(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszW
  * device memory mapped into this process, and the stand-in takes the place of
  * the device file.  See pciVfioFunSetGone() for the why and how.
  *
+ * With fHold the device file is not closed by that but kept under a number of
+ * its own, which nobody but the watcher thread uses: the device is held on to.
+ * Closing the device file is what makes the kernel of the host put back what
+ * the device had when it was opened, the addresses in its BAR registers above
+ * all.  That is of use only after the reset by which the kernel answers an
+ * error it takes for fatal: it resets the bus of the device right after it has
+ * told of the error, which takes it a tenth of a second at least, and puts
+ * nothing back itself.  A device which is closed before the reset or while it
+ * goes on is left without its addresses, see pciVfioFunCheckHostAddresses().
+ * So the watcher thread closes the device file later, see pciVfioWatcherHolds().
+ *
+ * Of what closing the device file does, the interrupts of the device are ended
+ * here, so nothing of it gets to the guest any more.  The device is still in the
+ * I/O address space after this.  The watcher thread tells it to keep off the bus
+ * as the first thing it does about it, see pciVfioFunHeldQuiesce(); that waits
+ * for as long as the kernel is busy with the device, which is nothing for
+ * whoever owns the critical section of the slot.
+ *
  * @param   pThis       The VFIO PCI device instance.
  * @param   pFun        The function, out of service.
+ * @param   fHold       Whether to hold on to the device.  The caller is the watcher
+ *                      thread and owns the critical section of the slot then.
  */
-static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun, bool fHold)
 {
     /* The device memory mapped into this process and through that into the guest. */
     bool fDevMemLeft = false;
@@ -4459,7 +4559,22 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
         }
     }
 
-    /* The device itself.  This also takes it out of the I/O address space and ends its interrupts. */
+    /* For holding on to the device its file gets a second number before it loses the first. */
+    bool fHeld = false;
+    if (   fHold
+        && pThis->cMsErrorHold
+        && pFun->iFdHeld != -1
+        && !pFun->fHeld)
+    {
+        Assert(RTCritSectIsOwner(&pThis->CritSectSlot));
+        if (dup3(pFun->iFdVfio, pFun->iFdHeld, O_CLOEXEC) != -1)
+            fHeld = true;
+        else
+            LogRel(("VFIO#%d.%u: Failed to hold on to the device (%d), it is let go of at once\n",
+                    pThis->iInstance, pFun->uPciFun, errno));
+    }
+
+    /* The device itself.  Unless it is held on to, this also takes it out of the I/O address space and ends its interrupts. */
     int      rcLnx;
     unsigned cTries = 0;
     do
@@ -4471,9 +4586,27 @@ static void pciVfioFunLetGo(PVFIOPCI pThis, PVFIOPCIFUN pFun)
     {
         LogRel(("VFIO#%d.%u: Failed to let go of the device (%d), it stays in use\n", pThis->iInstance, pFun->uPciFun, errno));
         fDevMemLeft = true;
+
+        /* Nothing to hold on to then. */
+        if (fHeld)
+        {
+            rcLnx = dup3(pFun->iFdInert, pFun->iFdHeld, O_CLOEXEC);
+            RT_NOREF(rcLnx);
+            fHeld = false;
+        }
     }
     ASMAtomicWriteBool(&pFun->fDevMemLeft, fDevMemLeft);
     pFun->fIoasAttached = false;
+
+    if (fHeld)
+    {
+        pciVfioFunHeldIrqsOff(pFun);
+        pFun->fHeldQuiet  = false;
+        pFun->msHeldSince = RTTimeMilliTS();
+        ASMAtomicWriteBool(&pFun->fHeld, true);
+        LogRel(("VFIO#%d.%u: The device is held on to for a moment before it is let go of, for the host to reset it first\n",
+                pThis->iInstance, pFun->uPciFun));
+    }
 }
 
 
@@ -4498,6 +4631,10 @@ static bool pciVfioIsOutOfService(PVFIOPCI pThis)
  * the state of the VM and loading one need: the memory which can be mapped into
  * the guest is read when the state is saved and written to when it is loaded,
  * and that must not be the memory of a device.
+ *
+ * A device which is held on to after an error, see pciVfioFunLetGo(), is not in
+ * the way of that: none of its memory is mapped anywhere, the guest has no way
+ * to it, and it is told to keep off the bus.
  *
  * @returns true if nothing of the device is left, false if something is.
  * @param   pThis       The VFIO PCI device instance.
@@ -4558,8 +4695,10 @@ static void pciVfioSlotAskGuest(PVFIOPCI pThis)
  * @param   puSlotGen   VFIOPCI::uSlotGen of the device this is about.  Nothing is
  *                      done if another one was put into the slot meanwhile.  NULL
  *                      for whatever is in the slot.
+ * @param   fHold       Whether the device is held on to for a moment instead of
+ *                      being let go of at once, see pciVfioFunSetGone().
  */
-static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy, uint32_t const *puSlotGen)
+static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy, uint32_t const *puSlotGen, bool fHold)
 {
     int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
     AssertRC(rcLock);
@@ -4568,11 +4707,174 @@ static void pciVfioSlotEmpty(PVFIOPCI pThis, const char *pszWhy, uint32_t const 
     {
         for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
             if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
-                pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy);
+                pciVfioFunSetGone(pThis, &pThis->aPciFuns[iPciFun], pszWhy, fHold);
         devpciR3HotPlugSlotSetPresence(pThis->pDevInsPort, false /*fPresent*/);
     }
     if (RT_SUCCESS(rcLock))
         RTCritSectLeave(&pThis->CritSectSlot);
+}
+
+
+/**
+ * Tells a device which is held on to to keep quiet: it neither decodes its
+ * addresses nor acts as a bus master after this, so it does nothing to the
+ * memory of the guest, which it still has in its I/O address space.  A device
+ * the host has reset is like that already.
+ *
+ * The kernel has whoever wants something of the config space of a device wait
+ * while it has the device to itself, as it has while it resets the bus of the
+ * device after an error.  So this can take as long as such a reset, and the
+ * reset is over when it returns, if one was going on.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the device file in iFdHeld.
+ *
+ * @thread  The watcher thread, owning nothing.
+ */
+static void pciVfioFunHeldQuiesce(PVFIOPCI pThis, PCVFIOPCIFUN pFun)
+{
+    uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
+    uint16_t       u16Cmd     = 0;
+    ssize_t        cb         = pread(pFun->iFdHeld, &u16Cmd, sizeof(u16Cmd), pFun->offPciCfg + VBOX_PCI_COMMAND);
+    if (cb != (ssize_t)sizeof(u16Cmd))
+    {
+        LogRel(("VFIO#%d.%u: The command register of the device which is held on to can't be read (%d)\n",
+                pThis->iInstance, pFun->uPciFun, errno));
+        return;
+    }
+
+    /* A device which doesn't answer is not told anything, and one which is quiet needs no telling. */
+    if (   u16Cmd == UINT16_MAX
+        || !(u16Cmd & fCmdActive))
+        return;
+
+    u16Cmd &= ~fCmdActive;
+    cb = pwrite(pFun->iFdHeld, &u16Cmd, sizeof(u16Cmd), pFun->offPciCfg + VBOX_PCI_COMMAND);
+    if (cb != (ssize_t)sizeof(u16Cmd))
+        LogRel(("VFIO#%d.%u: The command register of the device which is held on to can't be written (%d)\n",
+                pThis->iInstance, pFun->uPciFun, errno));
+}
+
+
+/**
+ * Checks whether a device which is held on to answers.  One which is being reset
+ * or whose link is down doesn't, and what the kernel puts back into a device
+ * when its file is closed is lost on such a device.
+ *
+ * This asks for a register which the kernel passes on to the device.  The
+ * kernel answers for the IDs of a device by itself, whatever has become of the
+ * device.
+ *
+ * @returns true if the device answers, false if not.
+ * @param   pFun        The function, with the device file in iFdHeld.
+ *
+ * @thread  The watcher thread, owning nothing.
+ */
+static bool pciVfioFunHeldAnswers(PCVFIOPCIFUN pFun)
+{
+    uint32_t      u32ClassRev = UINT32_MAX;
+    ssize_t const cb          = pread(pFun->iFdHeld, &u32ClassRev, sizeof(u32ClassRev), pFun->offPciCfg + VBOX_PCI_REVISION_ID);
+    return cb == (ssize_t)sizeof(u32ClassRev)
+        && u32ClassRev != UINT32_MAX;
+}
+
+
+/**
+ * Lets go of a device which was held on to: the stand-in takes the place of the
+ * device file, which closes the device file.  The kernel of the host puts back
+ * what the device had when it was opened, and resets the function if it can,
+ * so this takes as long as that.
+ *
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the device file in iFdHeld.
+ * @param   pszWhy      The reason, for the log.
+ *
+ * @thread  The watcher thread, owning nothing.
+ */
+static void pciVfioFunHoldEnd(PVFIOPCI pThis, PVFIOPCIFUN pFun, const char *pszWhy)
+{
+    uint64_t const cMsHeld = RTTimeMilliTS() - pFun->msHeldSince;
+    int            rcLnx;
+    unsigned       cTries = 0;
+    do
+        rcLnx = dup3(pFun->iFdInert, pFun->iFdHeld, O_CLOEXEC);
+    while (   rcLnx == -1
+           && (errno == EINTR || errno == EBUSY)
+           && ++cTries < 100);
+    if (rcLnx == -1)
+    {
+        LogRel(("VFIO#%d.%u: Failed to let go of the device which was held on to (%d), it stays in use\n",
+                pThis->iInstance, pFun->uPciFun, errno));
+        ASMAtomicWriteBool(&pFun->fDevMemLeft, true);
+    }
+    else
+        LogRel(("VFIO#%d.%u: The device which was held on to for %RU64 ms is let go of: %s\n",
+                pThis->iInstance, pFun->uPciFun, cMsHeld, pszWhy));
+
+    /* Whoever puts a device into the slot finds this one closed when it is not held on to any more. */
+    int const rcLock = RTCritSectEnter(&pThis->CritSectSlot);
+    AssertRC(rcLock);
+    ASMAtomicWriteBool(&pFun->fHeld, false);
+    if (RT_SUCCESS(rcLock))
+        RTCritSectLeave(&pThis->CritSectSlot);
+}
+
+
+/**
+ * Does what there is to do about the devices which are held on to after an
+ * error the host reported of them, see pciVfioFunLetGo(): each is told to keep
+ * quiet first, and is let go of when its time is up and it answers, or when it
+ * has not answered for too long.
+ *
+ * @returns How long it is until there is something to do again, in
+ *          milliseconds, -1 if nothing is held on to.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   fStopping   Whether the watcher thread is about to end.  A device is
+ *                      let go of when its time is up then, whether it answers
+ *                      or not.
+ *
+ * @thread  The watcher thread, owning nothing.
+ */
+static int pciVfioWatcherHolds(PVFIOPCI pThis, bool fStopping)
+{
+    int cMsWait = -1;
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+    {
+        PVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
+        if (!ASMAtomicReadBool(&pFun->fHeld))
+            continue;
+
+        /* The time counts from when the device was told to keep quiet: that has waited for
+           the kernel if it was resetting the bus of the device at that moment. */
+        if (!pFun->fHeldQuiet)
+        {
+            pciVfioFunHeldQuiesce(pThis, pFun);
+            pFun->fHeldQuiet  = true;
+            pFun->msHeldSince = RTTimeMilliTS();
+        }
+
+        uint64_t const cMsHeld = RTTimeMilliTS() - pFun->msHeldSince;
+        uint32_t       cMsLeft;
+        if (cMsHeld < pThis->cMsErrorHold)
+            cMsLeft = pThis->cMsErrorHold - (uint32_t)cMsHeld;
+        else if (pciVfioFunHeldAnswers(pFun))
+        {
+            pciVfioFunHoldEnd(pThis, pFun, "its time is up");
+            continue;
+        }
+        else if (   fStopping
+                 || cMsHeld >= pThis->cMsErrorHoldMax)
+        {
+            pciVfioFunHoldEnd(pThis, pFun, "it doesn't answer, what the host puts back into it may be lost on it");
+            continue;
+        }
+        else
+            cMsLeft = VFIO_PCI_ERROR_HOLD_ASK_MS;
+        if (   cMsWait < 0
+            || (uint32_t)cMsWait > cMsLeft)
+            cMsWait = (int)cMsLeft;
+    }
+    return cMsWait;
 }
 
 
@@ -4596,10 +4898,13 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
        and which device that is about. */
     uint64_t msLetGoDeadline = 0;
     uint32_t uSlotGenLetGo   = 0;
+    /* How long it is until there is something to do about a device which is held on to, -1 if none is. */
+    int      cMsHoldWait     = -1;
 
     while (!ASMAtomicReadBool(&pThis->fWatcherStop))
     {
-        /* The wakeup eventfd and what there is to watch of the functions which are still in service. */
+        /* The wakeup eventfd and what there is to watch of the functions which are still in service.
+           Of one whose device is held on to it is the host wanting the device back. */
         struct pollfd aFds[1 + RT_ELEMENTS(pThis->aPciFuns) * 2];
         uint8_t       aiPciFuns[RT_ELEMENTS(aFds)];
         bool          afRequest[RT_ELEMENTS(aFds)];
@@ -4612,8 +4917,10 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
         cFds++;
         for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         {
-            PCVFIOPCIFUN pFun = &pThis->aPciFuns[iPciFun];
-            if (pFun->fGone)
+            PCVFIOPCIFUN pFun  = &pThis->aPciFuns[iPciFun];
+            bool const   fHeld = ASMAtomicReadBool(&pFun->fHeld);
+            if (   pFun->fGone
+                && !fHeld)
                 continue;
             if (pFun->iFdEvtReq != -1)
             {
@@ -4624,7 +4931,8 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                 afRequest[cFds]    = true;
                 cFds++;
             }
-            if (pFun->iFdEvtErr != -1)
+            if (   pFun->iFdEvtErr != -1
+                && !fHeld)
             {
                 aFds[cFds].fd      = pFun->iFdEvtErr;
                 aFds[cFds].events  = POLLIN;
@@ -4636,7 +4944,12 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
         }
 
         /* While the guest is given time, the link to the slot is looked at now and then. */
-        int rcLnx = poll(&aFds[0], cFds, msLetGoDeadline ? 50 : -1 /*timeout*/);
+        int cMsPoll = msLetGoDeadline ? 50 : -1;
+        if (   cMsHoldWait >= 0
+            && (   cMsPoll < 0
+                || cMsPoll > cMsHoldWait))
+            cMsPoll = cMsHoldWait;
+        int rcLnx = poll(&aFds[0], cFds, cMsPoll);
         if (rcLnx == -1)
         {
             if (errno == EINTR)
@@ -4665,16 +4978,25 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
                 if (cbRead != (ssize_t)sizeof(u64Ign))
                     continue;
                 PVFIOPCIFUN const pFun = &pThis->aPciFuns[aiPciFuns[i]];
-                if (!pThis->pDevInsPort)
+                if (ASMAtomicReadBool(&pFun->fHeld))
+                {
+                    /* The device is held on to after an error, and the host gets it at once when it
+                       wants it back.  It asks when the driver is taken from the device, which waits
+                       for a reset of the bus to be over and keeps another one from beginning. */
+                    if (afRequest[i])
+                        pciVfioFunHoldEnd(pThis, pFun, "the host wants the device back");
+                }
+                else if (!pThis->pDevInsPort)
                     /* Nobody to ask and nobody to tell. */
                     pciVfioFunSetGone(pThis, pFun,
-                                      afRequest[i] ? "the host wants the device back" : "the host reported an error of the device");
+                                      afRequest[i] ? "the host wants the device back" : "the host reported an error of the device",
+                                      !afRequest[i] /*fHold*/);
                 else if (!afRequest[i])
-                    pciVfioSlotEmpty(pThis, "the host reported an error of the device", &uSlotGen);
+                    pciVfioSlotEmpty(pThis, "the host reported an error of the device", &uSlotGen, true /*fHold*/);
                 else if (   !pciVfioFunAnswers(pFun)
                          || !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort))
                     /* Unplugged, or nothing the guest would have to let go of. */
-                    pciVfioSlotEmpty(pThis, "the host wants the device back", &uSlotGen);
+                    pciVfioSlotEmpty(pThis, "the host wants the device back", &uSlotGen, false /*fHold*/);
                 else
                 {
                     /* The guest gets asked, and time to answer.  The host asks again and again meanwhile. */
@@ -4694,9 +5016,22 @@ static DECLCALLBACK(int) pciVfioWatcherThread(RTTHREAD hThreadSelf, void *pvUser
             && (   !devpciR3HotPlugSlotIsLinkUp(pThis->pDevInsPort)
                 || RTTimeMilliTS() >= msLetGoDeadline))
         {
-            pciVfioSlotEmpty(pThis, "the host wants the device back", &uSlotGenLetGo);
+            pciVfioSlotEmpty(pThis, "the host wants the device back", &uSlotGenLetGo, false /*fHold*/);
             msLetGoDeadline = 0;
         }
+
+        /* The devices which are held on to after an error. */
+        cMsHoldWait = pciVfioWatcherHolds(pThis, false /*fStopping*/);
+    }
+
+    /* A device which is still held on to is let go of when its time is up, so the host has
+       the time for its reset also when the VM is powered off right after the error. */
+    for (;;)
+    {
+        cMsHoldWait = pciVfioWatcherHolds(pThis, true /*fStopping*/);
+        if (cMsHoldWait < 0)
+            break;
+        RTThreadSleep((RTMSINTERVAL)RT_MIN(cMsHoldWait, 50));
     }
 
     return VINF_SUCCESS;
@@ -4994,7 +5329,7 @@ static DECLCALLBACK(int) pciVfioPortDetach(PPDMIPCIPASSTHROUGHPORT pInterface, R
         RTThreadSleep(10);
     }
 
-    pciVfioSlotEmpty(pThis, "it was detached", NULL /*puSlotGen*/);
+    pciVfioSlotEmpty(pThis, "it was detached", NULL /*puSlotGen*/, false /*fHold*/);
     return VINF_SUCCESS;
 }
 
@@ -5386,6 +5721,21 @@ static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
         if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
             && !pThis->aPciFuns[iPciFun].fGone)
             return VERR_ALREADY_EXISTS;
+
+    /*
+     * Not while the device which was in the slot is held on to after an error the
+     * host reported of it, see pciVfioFunLetGo().  It is that device which would
+     * be put in, and what the host puts back into it comes when it is let go of.
+     * The watcher thread does that in its time.
+     */
+    for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
+        if (ASMAtomicReadBool(&pThis->aPciFuns[iPciFun].fHeld))
+        {
+            LogRel(("VFIO#%d: No device is put into the slot while the one which was in it is held on to after an error of it, which is a matter of seconds\n",
+                    pThis->iInstance));
+            return VERR_RESOURCE_IN_USE;
+        }
+
     for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
         if (   pThis->aPciFuns[iPciFun].iFdVfio != -1
             && !pThis->aPciFuns[iPciFun].fGoneForGuest)
@@ -5402,7 +5752,7 @@ static int pciVfioSlotAttachWorker(PPDMDEVINS pDevIns)
     {
         for (uint8_t iPciFun = 0; iPciFun < RT_ELEMENTS(pThis->aPciFuns); iPciFun++)
             if (pThis->aPciFuns[iPciFun].iFdVfio != -1)
-                pciVfioFunLetGo(pThis, &pThis->aPciFuns[iPciFun]);
+                pciVfioFunLetGo(pThis, &pThis->aPciFuns[iPciFun], false /*fHold*/);
         LogRel(("VFIO#%d: No device was put into the slot (%Rrc)\n", pThis->iInstance, rc));
         return rc;
     }
@@ -5547,6 +5897,11 @@ static DECLCALLBACK(int) pciVfioDestruct(PPDMDEVINS pDevIns)
         if (pFun->iFdEvtErr != -1)
             close(pFun->iFdEvtErr);
         pFun->iFdEvtErr = -1;
+        /* The watcher thread has let go of what was held on to.  This is the device file
+           still if the thread did not end in time. */
+        if (pFun->iFdHeld != -1)
+            close(pFun->iFdHeld);
+        pFun->iFdHeld = -1;
         if (pFun->iFdInert != -1)
             close(pFun->iFdInert);
         pFun->iFdInert = -1;
@@ -5854,7 +6209,7 @@ static DECLCALLBACK(int) pciVfioLoadPrep(PPDMDEVINS pDevIns, PSSMHANDLE pSSM)
     pThis->fLoadReattach = false;
     if (!pciVfioIsOutOfService(pThis))
     {
-        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded", NULL /*puSlotGen*/);
+        pciVfioSlotEmpty(pThis, "a saved state is going to be loaded", NULL /*puSlotGen*/, false /*fHold*/);
         pThis->fLoadReattach = true;
     }
     if (pciVfioSlotIsEmptyForState(pThis))
@@ -6356,6 +6711,10 @@ static int pciVfioFunConstructEmpty(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV
     if (pFun->iFdVfio == -1)
         return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
                                N_("Failed to create the file descriptor standing in for a removed device"));
+    pFun->iFdHeld = fcntl(pFun->iFdInert, F_DUPFD_CLOEXEC, 0);
+    if (pFun->iFdHeld == -1)
+        return pciVfioSetError(pThis, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                               N_("Failed to create the file descriptor for holding on to a device"));
     ASMAtomicWriteBool(&pFun->fGone, true);
     ASMAtomicWriteBool(&pFun->fGoneForGuest, true);
 
@@ -6501,6 +6860,8 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
     pThis->fWatcherStop     = false;
     pThis->pDevInsPort      = NULL;
     pThis->cMsGuestRelease  = 15 * RT_MS_1SEC;
+    pThis->cMsErrorHold     = VFIO_PCI_ERROR_HOLD_MS_DEFAULT;
+    pThis->cMsErrorHoldMax  = VFIO_PCI_ERROR_HOLD_MAX_MS_DEFAULT;
     pThis->msAttnPressed    = 0;
     pThis->fLoadReattach    = false;
     pThis->fLoadUnitSeen    = false;
@@ -6524,6 +6885,10 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         pFun->iFdInert       = -1;
         pFun->iFdEvtReq      = -1;
         pFun->iFdEvtErr      = -1;
+        pFun->iFdHeld        = -1;
+        pFun->fHeld          = false;
+        pFun->fHeldQuiet     = false;
+        pFun->msHeldSince    = 0;
         pFun->iFdWakeup      = -1;
         pFun->fVga           = false;
         pFun->fInterceptMmio = false;
@@ -6569,6 +6934,8 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                      "VfioPath\0"
                                      "VfioGroupPath\0"
                                      "GuestReleaseTimeoutMs\0"
+                                     "ErrorHoldMs\0"
+                                     "ErrorHoldMaxMs\0"
                                      "Fun*\0"
                                     ))
         return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
@@ -6592,6 +6959,25 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         return PDMDevHlpVMSetError(pDevIns, RT_FAILURE(rc) ? rc : VERR_OUT_OF_RANGE, RT_SRC_POS,
                                    N_("Configuration error: \"GuestReleaseTimeoutMs\" is not a number of milliseconds up to five minutes"));
     pThis->cMsGuestRelease = (uint32_t)cMsGuestRelease;
+
+    /* How long a device the host reported an error of is held on to before it is let go of, and
+       how long at most when it doesn't answer.  The destructor waits for the first to be up. */
+    uint64_t cMsErrorHold = 0;
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "ErrorHoldMs", &cMsErrorHold, VFIO_PCI_ERROR_HOLD_MS_DEFAULT);
+    if (   RT_FAILURE(rc)
+        || cMsErrorHold > 10 * RT_MS_1SEC)
+        return PDMDevHlpVMSetError(pDevIns, RT_FAILURE(rc) ? rc : VERR_OUT_OF_RANGE, RT_SRC_POS,
+                                   N_("Configuration error: \"ErrorHoldMs\" is not a number of milliseconds up to ten seconds"));
+    uint64_t cMsErrorHoldMax = 0;
+    rc = pHlp->pfnCFGMQueryU64Def(pCfg, "ErrorHoldMaxMs", &cMsErrorHoldMax,
+                                  RT_MAX(cMsErrorHold, VFIO_PCI_ERROR_HOLD_MAX_MS_DEFAULT));
+    if (   RT_FAILURE(rc)
+        || cMsErrorHoldMax < cMsErrorHold
+        || cMsErrorHoldMax > 5 * RT_MS_1MIN)
+        return PDMDevHlpVMSetError(pDevIns, RT_FAILURE(rc) ? rc : VERR_OUT_OF_RANGE, RT_SRC_POS,
+                                   N_("Configuration error: \"ErrorHoldMaxMs\" is not a number of milliseconds from \"ErrorHoldMs\" up to five minutes"));
+    pThis->cMsErrorHold    = (uint32_t)cMsErrorHold;
+    pThis->cMsErrorHoldMax = (uint32_t)cMsErrorHoldMax;
 
     rc = pciVfioConfigureAccess(pDevIns, pThis, pHlp, pCfg);
     if (RT_FAILURE(rc))
@@ -6895,6 +7281,10 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Failed to create the file descriptor standing in for a removed device"));
+        pFun->iFdHeld = fcntl(pFun->iFdInert, F_DUPFD_CLOEXEC, 0);
+        if (pFun->iFdHeld == -1)
+            return PDMDevHlpVMSetError(pDevIns, RTErrConvertFromErrno(errno), RT_SRC_POS,
+                                       N_("Failed to create the file descriptor for holding on to a device"));
         rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_REQ_IRQ_INDEX, &pFun->iFdEvtReq);
         if (RT_SUCCESS(rc))
             rc = pciVfioNotifierSetup(pThis, pFun, VFIO_PCI_ERR_IRQ_INDEX, &pFun->iFdEvtErr);

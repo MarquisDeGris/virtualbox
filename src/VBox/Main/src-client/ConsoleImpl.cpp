@@ -3458,6 +3458,9 @@ HRESULT Console::plugHostPCIDevice(ULONG aHostAddress)
             else if (vrc == VERR_IO_NOT_READY)
                 hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
                                    tr("The PCI device of the host has lost its addresses there, as a reset of its bus leaves it when nothing sets the device up again afterwards. To have the host set it up again, remove the device there and have the bus scanned again: as root, write 1 to the file 'remove' of each function of the device in /sys/bus/pci/devices and then 1 to /sys/bus/pci/rescan. After that the device has to be bound to vfio-pci again. The release log has the details"));
+            else if (vrc == VERR_RESOURCE_IN_USE)
+                hrc = setErrorBoth(VBOX_E_OBJECT_IN_USE, vrc,
+                                   tr("The virtual machine still holds on to the PCI device of the host after an error the host reported of it, which gives the host the time to reset the device. Try again in a few seconds"));
             else
                 hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
                                    tr("The PCI device of the host could not be put into the virtual machine (%Rrc). The release log has the details"),

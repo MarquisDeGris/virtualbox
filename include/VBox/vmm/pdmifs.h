@@ -2552,6 +2552,8 @@ typedef struct PDMIPCIPASSTHROUGHPORT
      * @retval  VERR_MISMATCH if the PCI device is not like the one the VM is built for.
      * @retval  VERR_IO_NOT_READY if the host has not got the PCI device set up, or not any
      *          more: none of its BAR registers has an address.
+     * @retval  VERR_RESOURCE_IN_USE if the PCI device which was in the slot is still held
+     *          on to after an error the host reported of it, which is a matter of seconds.
      * @retval  VERR_VM_INVALID_VM_STATE if the VM is neither running nor suspended, which
      *          it isn't while its state is being saved or loaded.
      * @param   pInterface  Pointer to the interface structure containing the called function pointer.

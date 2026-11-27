@@ -163,6 +163,14 @@ typedef struct TSTVFIODEV
      * go of it and waits for that.  Like the kernel, which has the device locked for as
      * long, it refuses to reset the function or its bus meanwhile. */
     bool                fHeld;
+    /** Whether the function doesn't answer: the bus it is on is being reset or its link
+     * is down.  What is read of its config space is all ones then but for the IDs,
+     * which the kernel answers by itself, and what is written to it is lost, also
+     * what the kernel puts back when the user lets go of the function. */
+    bool                fSilent;
+    /** The BAR registers as they were when the function was opened, which is what the
+     * kernel puts back when the user lets go of the function. */
+    uint8_t             abBarsAtOpen[6 * sizeof(uint32_t)];
 } TSTVFIODEV;
 
 /**
@@ -443,6 +451,46 @@ static void tstVfioKrnlDevIntxFire(PTSTVFIODEV pDev)
             pDev->acIrqsTriggered[VFIO_PCI_INTX_IRQ_INDEX]++;
             pDev->fIntxMasked = true;
         }
+    }
+}
+
+
+/**
+ * Takes note of a PCI function having been opened.  The kernel keeps what the
+ * function has when its first user opens it and puts that back when the last
+ * one has let go of it, see tstVfioKrnlDevPutBack().  This goes for the BAR
+ * registers here.
+ *
+ * @param   pDev                The PCI function.
+ *
+ * @note    The caller owns the lock of the fake kernel.
+ */
+static void tstVfioKrnlDevOpened(PTSTVFIODEV pDev)
+{
+    if (pDev->cOpens++ == 0)
+    {
+        ssize_t const cbRead = __real_pread(pDev->iFdBacking, pDev->abBarsAtOpen, sizeof(pDev->abBarsAtOpen),
+                                            (off_t)(pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX] + VBOX_PCI_BASE_ADDRESS_0));
+        AssertRelease(cbRead == (ssize_t)sizeof(pDev->abBarsAtOpen));
+    }
+}
+
+
+/**
+ * Puts back what the PCI function had when it was opened, called when the last
+ * file descriptor has gone away.  It is lost on a function which doesn't answer.
+ *
+ * @param   pDev                The PCI function.
+ *
+ * @note    The caller owns the lock of the fake kernel.
+ */
+static void tstVfioKrnlDevPutBack(PTSTVFIODEV pDev)
+{
+    if (!pDev->fSilent)
+    {
+        ssize_t const cbWritten = __real_pwrite(pDev->iFdBacking, pDev->abBarsAtOpen, sizeof(pDev->abBarsAtOpen),
+                                                (off_t)(pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX] + VBOX_PCI_BASE_ADDRESS_0));
+        AssertRelease(cbWritten == (ssize_t)sizeof(pDev->abBarsAtOpen));
     }
 }
 
@@ -731,7 +779,7 @@ static int tstVfioKrnlGroupIoctl(unsigned long uReq, void *pvArg)
                         __real_close(iFd);
                         return errno = EMFILE, -1;
                     }
-                    pDev->cOpens++;
+                    tstVfioKrnlDevOpened(pDev);
                     pDev->fBound       = true;
                     pDev->fGroupDevice = true;
                     return iFd;
@@ -1197,7 +1245,7 @@ static int tstVfioKrnlOpen(const char *pszPath, int fFlags)
                     if (iFd != -1)
                     {
                         if (tstVfioKrnlFdRegister(iFd, TSTVFIOFDTYPE_DEVICE, pDev))
-                            pDev->cOpens++;
+                            tstVfioKrnlDevOpened(pDev);
                         else
                         {
                             __real_close(iFd);
@@ -1457,6 +1505,7 @@ int tstVfioKrnlDevReplace(PTSTVFIODEV pDev, PCTSTVFIODEVCFG pCfg)
         pDev->fIntxAsserted = false;
         pDev->cIntxUnmasks  = 0;
         pDev->fHeld         = false;
+        pDev->fSilent       = false;
         RT_ZERO(pDev->acIrqsAvailable);
     }
     else
@@ -1802,6 +1851,56 @@ void tstVfioKrnlDevSignalError(PTSTVFIODEV pDev)
 
 
 /**
+ * Has the host reset the bus the PCI function is on, which is what it does
+ * about an error of the function it takes for fatal: the function is as it was
+ * at power-on but for its BAR registers, which have no addresses any more, and
+ * it doesn't answer until tstVfioKrnlDevSetSilent() says it does again.
+ *
+ * The host puts nothing back into the function itself.  That comes when the
+ * user lets go of the function, and is lost if the function doesn't answer
+ * then.
+ *
+ * @param   pDev                The PCI function.
+ */
+void tstVfioKrnlDevHostReset(PTSTVFIODEV pDev)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    static uint8_t s_abCfg[sizeof(pDev->Cfg.abCfg)];
+    memcpy(s_abCfg, pDev->Cfg.abCfg, sizeof(s_abCfg));
+    for (uint32_t iBar = 0; iBar < 6; iBar++)
+    {
+        uint32_t const off = VBOX_PCI_BASE_ADDRESS_0 + iBar * 4;
+        if (!pDev->Cfg.aRegions[iBar].cb)
+            s_abCfg[off] = 0; /* No BAR, or the upper half of an address. */
+        else
+            s_abCfg[off] &= (s_abCfg[off] & PCI_ADDRESS_SPACE_IO) ? 0x3 : 0xf;
+        s_abCfg[off + 1] = 0;
+        s_abCfg[off + 2] = 0;
+        s_abCfg[off + 3] = 0;
+    }
+    ssize_t const cbWritten = __real_pwrite(pDev->iFdBacking, s_abCfg, pDev->Cfg.cbCfg,
+                                            (off_t)pDev->aoffRegions[VFIO_PCI_CONFIG_REGION_INDEX]);
+    AssertRelease(cbWritten == (ssize_t)pDev->Cfg.cbCfg);
+    pDev->fSilent = true;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
+ * Tells whether the PCI function answers, see TSTVFIODEV::fSilent.
+ *
+ * @param   pDev                The PCI function.
+ * @param   fSilent             Whether the function doesn't answer.
+ */
+void tstVfioKrnlDevSetSilent(PTSTVFIODEV pDev, bool fSilent)
+{
+    RTCritSectEnter(&g_Krnl.CritSect);
+    pDev->fSilent = fSilent;
+    RTCritSectLeave(&g_Krnl.CritSect);
+}
+
+
+/**
  * Returns the number of file descriptors of the fake kernel which are open.
  *
  * @returns Number of open file descriptors.
@@ -2088,7 +2187,10 @@ static void tstVfioKrnlFdForget(int iFd)
                 PTSTVFIODEV pDev = pFd->pDev;
                 Assert(pDev->cOpens > 0);
                 if (--pDev->cOpens == 0)
+                {
                     tstVfioKrnlDevRelease(pDev);
+                    tstVfioKrnlDevPutBack(pDev);
+                }
             }
             else if (pFd->enmType == TSTVFIOFDTYPE_IOMMU)
             {
@@ -2276,12 +2378,54 @@ static ssize_t tstVfioKrnlNoteStrayAccess(ssize_t cbDone)
 }
 
 
+/**
+ * Answers a read from the config space of a PCI function which doesn't answer
+ * itself, and drops a write to it, see TSTVFIODEV::fSilent.
+ *
+ * @returns Number of bytes done with, -1 if this is for the function to answer
+ *          or about something else, which the caller goes on with.
+ * @param   iFd                 The file descriptor which is accessed.
+ * @param   pvBuf               Where to put what is read, NULL for a write.
+ * @param   cbBuf               Number of bytes.
+ * @param   off                 Offset of the access.
+ */
+static ssize_t tstVfioKrnlSilentCfgAccess(int iFd, void *pvBuf, size_t cbBuf, off_t off)
+{
+    ssize_t cbDone = -1;
+    if (g_Krnl.fInitialized)
+    {
+        RTCritSectEnter(&g_Krnl.CritSect);
+        PTSTVFIOFD pFd = tstVfioKrnlFdLookup(iFd);
+        if (   pFd
+            && pFd->enmType == TSTVFIOFDTYPE_DEVICE
+            && pFd->pDev->fSilent
+            && ((uint64_t)off >> TSTVFIO_REGION_SHIFT) == VFIO_PCI_CONFIG_REGION_INDEX)
+        {
+            if (pvBuf)
+            {
+                /* All ones, but for the IDs: these the kernel knows. */
+                uint64_t const offCfg = (uint64_t)off & (RT_BIT_64(TSTVFIO_REGION_SHIFT) - 1);
+                memset(pvBuf, 0xff, cbBuf);
+                for (size_t i = 0; i < cbBuf && offCfg + i < VBOX_PCI_COMMAND; i++)
+                    ((uint8_t *)pvBuf)[i] = pFd->pDev->Cfg.abCfg[offCfg + i];
+            }
+            cbDone = (ssize_t)cbBuf;
+        }
+        RTCritSectLeave(&g_Krnl.CritSect);
+    }
+    return cbDone;
+}
+
+
 ssize_t __wrap_pread(int iFd, void *pvBuf, size_t cbBuf, off_t off)
 {
     tstVfioKrnlCfgAccessNotify(iFd, off, cbBuf, false /*fWrite*/);
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
+    ssize_t const cbSilent = tstVfioKrnlSilentCfgAccess(iFd, pvBuf, cbBuf, off);
+    if (cbSilent >= 0)
+        return cbSilent;
     return tstVfioKrnlNoteStrayAccess(__real_pread(iFd, pvBuf, cbBuf, off));
 }
 
@@ -2292,6 +2436,9 @@ ssize_t __wrap_pread64(int iFd, void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, false /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
+    ssize_t const cbSilent = tstVfioKrnlSilentCfgAccess(iFd, pvBuf, cbBuf, off);
+    if (cbSilent >= 0)
+        return cbSilent;
     return tstVfioKrnlNoteStrayAccess(__real_pread64(iFd, pvBuf, cbBuf, off));
 }
 
@@ -2320,6 +2467,9 @@ ssize_t __wrap_pwrite(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
+    ssize_t const cbSilent = tstVfioKrnlSilentCfgAccess(iFd, NULL /*pvBuf*/, cbBuf, off);
+    if (cbSilent >= 0)
+        return cbSilent;
     ssize_t const cbWritten = tstVfioKrnlNoteStrayAccess(__real_pwrite(iFd, pvBuf, cbBuf, off));
     if (cbWritten > 0)
         tstVfioKrnlCfgAccessNotify(iFd, off, (size_t)cbWritten, true /*fWrite*/);
@@ -2332,6 +2482,9 @@ ssize_t __wrap_pwrite64(int iFd, const void *pvBuf, size_t cbBuf, off_t off)
     int const iErrno = tstVfioKrnlCheckFdAccess(iFd, off, true /*fWrite*/);
     if (iErrno)
         return errno = iErrno, -1;
+    ssize_t const cbSilent = tstVfioKrnlSilentCfgAccess(iFd, NULL /*pvBuf*/, cbBuf, off);
+    if (cbSilent >= 0)
+        return cbSilent;
     ssize_t const cbWritten = tstVfioKrnlNoteStrayAccess(__real_pwrite64(iFd, pvBuf, cbBuf, off));
     if (cbWritten > 0)
         tstVfioKrnlCfgAccessNotify(iFd, off, (size_t)cbWritten, true /*fWrite*/);
