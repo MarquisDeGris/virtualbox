@@ -4671,14 +4671,18 @@ static bool pciVfioSlotIsEmptyForState(PVFIOPCI pThis)
 /**
  * Checks whether a function still answers, which it doesn't after it was unplugged.
  *
+ * This asks for a register which the kernel of the host passes on to the device,
+ * the revision and the class of the device.  The kernel answers for the IDs of
+ * a device by itself, whatever has become of the device, so these don't tell.
+ *
  * @returns true if the function answers, false if not.
  * @param   pFun        The function.
  */
 static bool pciVfioFunAnswers(PCVFIOPCIFUN pFun)
 {
-    uint16_t idVendor = UINT16_MAX;
-    int rc = pciVfioCfgSpaceReadU16(pFun, VBOX_PCI_VENDOR_ID, &idVendor);
-    return RT_SUCCESS(rc) && idVendor != UINT16_MAX;
+    uint32_t u32ClassRev = UINT32_MAX;
+    int rc = pciVfioCfgSpaceReadU32(pFun, VBOX_PCI_REVISION_ID, &u32ClassRev);
+    return RT_SUCCESS(rc) && u32ClassRev != UINT32_MAX;
 }
 
 

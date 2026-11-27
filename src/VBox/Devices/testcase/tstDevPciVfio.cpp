@@ -5508,7 +5508,7 @@ static void tstSlotHostRequest(void)
 {
     RTTestISub("Hot-plug slot: the host wants the device back");
 
-    for (unsigned iVariant = 0; iVariant < 5; iVariant++)
+    for (unsigned iVariant = 0; iVariant < 6; iVariant++)
     {
         TSTVFIODEVCFG aModels[2];
         tstModelInit(&aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
@@ -5557,6 +5557,13 @@ static void tstSlotHostRequest(void)
                 case 3:
                     /* The device was unplugged: no point in asking or waiting. */
                     tstVfioKrnlDevRemove(apDevs[1]);
+                    break;
+
+                case 4:
+                    /* The same, with the host still answering for what it knows of the device
+                       by itself, the IDs: the device doesn't answer, and that is what tells. */
+                    tstVfioKrnlDevSetSilent(apDevs[1], true);
+                    tstVfioKrnlDevRequest(apDevs[1]);
                     break;
 
                 default:
