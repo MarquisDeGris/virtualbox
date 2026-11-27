@@ -79,7 +79,12 @@
 #      device and VirtualBox do about it is what they do about a real one.
 #      The device goes out of the VM, the VM runs on, and the device can be
 #      put in again.  Once with an error the kernel does not take for fatal
-#      and once with one it does, after which it resets the bus.
+#      and once with one it does, after which it resets the bus.  Then, in a
+#      phase of its own, the bus is reset by hand while nobody has the
+#      device, once with the device asleep and once with it awake: a device
+#      which is left without the addresses of its memory by that is refused
+#      when it is to go into the VM, with words which say what gets them
+#      back, and is taken when that was done.
 #
 #   2f. The same with the device of two functions of part 2b (SIM_PARTS has
 #      "mferrhost"): the kernel tells the drivers of both functions of the
@@ -183,6 +188,12 @@ finish()
         missing=1
     fi
     if has_part mferrhost && ! grep -q '^mferrhost/hosterror: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part errhost && ! grep -q '^errhost/lostaddr: ' "$STAGES"; then
+        missing=1
+    fi
+    if has_part mferrhost && ! grep -q '^mferrhost/lostaddr: ' "$STAGES"; then
         missing=1
     fi
     if has_part plughost && ! grep -q '^plughost/hostplug: ' "$STAGES"; then
@@ -944,7 +955,7 @@ if has_part errhost; then
     # it is told, nothing else is lost.
     note "Part 2e: an error of the device, as the kernel of the host tells of it"
     if part_simhost_prepare; then
-        run_simhost errhost hosterror 600 5 2400
+        run_simhost errhost hosterror,lostaddr 600 5 3300
     fi
 fi
 
@@ -975,7 +986,7 @@ fi
 if has_part mferrhost; then
     note "Part 2f: the same with a device of two functions"
     if part_simhost_prepare; then
-        run_simhost mferrhost hosterror 600 5 2400 "" 2
+        run_simhost mferrhost hosterror,lostaddr 600 5 3300 "" 2
     fi
 fi
 

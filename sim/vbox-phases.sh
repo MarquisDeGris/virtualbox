@@ -1150,6 +1150,312 @@ phase_hosterror()
     bind_dev
 }
 
+# Whether a function has an address in one of its BAR registers, going by
+# what host_bars tells of it: the bits of a register above the lowest four,
+# which say what kind of register it is and stay as they are.
+bars_have_address() # <the six registers of a function as host_bars tells them>
+{
+    local h=$1 i=0 b0
+    while [ "$i" -lt 6 ]; do
+        [ "${h:$((i * 8 + 2)):6}" != 000000 ] && return 0
+        b0=${h:$((i * 8)):2}
+        [ $(( 16#${b0:-0} & 0xf0 )) != 0 ] && return 0
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# No function of the device has an address in a BAR register.
+host_bars_none() # <what host_bars told>
+{
+    local w
+    for w in $1; do
+        bars_have_address "${w#*=}" && return 1
+    done
+    return 0
+}
+
+# Whether the kernel of the host has the functions of the device awake or
+# asleep, which it puts a device to that nobody uses.
+host_rpm()
+{
+    local f s=
+    for f in $HOSTFUNCS; do
+        s="$s ${f##*:}=$(cat "/sys/bus/pci/devices/$f/power/runtime_status" 2> /dev/null || echo '?')"
+    done
+    echo "${s# }"
+}
+
+host_rpm_wait() # <active|suspended> <seconds>
+{
+    local i=0 f all
+    while [ "$i" -lt "$2" ]; do
+        all=1
+        for f in $HOSTFUNCS; do
+            [ "$(cat "/sys/bus/pci/devices/$f/power/runtime_status" 2> /dev/null)" = "$1" ] || all=
+        done
+        [ -n "$all" ] && return 0
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+host_rpm_control() # <on|auto>
+{
+    local f
+    for f in $HOSTFUNCS; do
+        echo "$1" > "/sys/bus/pci/devices/$f/power/control" 2> /dev/null
+    done
+}
+
+# The bus the device is on is reset through the port in front of it: the bit
+# of the bridge control register which does that is set and cleared again,
+# and nobody is told, neither the kernel of this machine nor a driver.  It is
+# what that kernel does itself about an error it takes for fatal, and there
+# it tells nobody afterwards either.
+host_bus_reset_by_hand()
+{
+    local port
+    port=$(basename "$(readlink -f "/sys/bus/pci/devices/$HOSTADDR/..")")
+    echo "+ setpci -s $port 3e.w=0040:0040, and 0000:0040 a second later (the register was $(setpci -s "$port" 3e.w 2> /dev/null || echo '?'))"
+    setpci -s "$port" 3e.w=0040:0040 || return 1
+    sleep 1
+    setpci -s "$port" 3e.w=0000:0040 || return 1
+    sleep 2
+    return 0
+}
+
+# What the kernel of the host said of the device since its log was cleared.
+lostaddr_dmesg()
+{
+    dmesg | grep -i -E 'vfio|enabling device|BAR |nvme|pcieport' | awk '{ print "    | " substr($0, 1, 200) }' | head -n 12
+}
+
+# The device goes into the slot again, as the host has it now.  One which has
+# its addresses is taken and the guest reads from it.  One which has lost them
+# is of no use to a guest: a build which tells such a device refuses it and
+# says what gets the addresses back, which is then done here, and a build
+# which does not is watched with it.  LA_ROUND counts what the guest counts.
+lostaddr_plug() # <how the device got where it is, for the stages>
+{
+    local how=$1 now out rc f i
+    now=$(host_bars)
+    dmesg -C 2> /dev/null
+    serial_mark
+    if ! host_bars_none "$now"; then
+        if run controlvm "$VM" plugpci "$HOSTADDR"; then
+            stage "plugpci of the device ($how)" ok
+        else
+            stage "plugpci of the device ($how)" FAILED
+            diag
+            return 1
+        fi
+        LA_ROUND=$((LA_ROUND + 1))
+        $HE_READS "$LA_ROUND" "guest: takes the device and reads from $HE_FROM ($how)"
+        lostaddr_dmesg
+        return 0
+    fi
+
+    echo "+ VBoxManage controlvm $VM plugpci $HOSTADDR"
+    out=$(VBM_TIMEOUT=180 vbm controlvm "$VM" plugpci "$HOSTADDR" 2>&1)
+    rc=$?
+    echo "$out" | awk '{ print "    " substr($0, 1, 600) }'
+    lostaddr_dmesg
+    if [ "$rc" != 0 ]; then
+        if [ -n "$LA_KNOWN" ]; then
+            stage "plugpci of a device which has lost its memory addresses is refused ($how)" ok
+            if echo "$out" | grep -q 'rescan'; then
+                stage "it says what gets the addresses back ($how)" ok
+            else
+                stage "it says what gets the addresses back ($how)" FAILED
+            fi
+        else
+            stage "plugpci of a device which has lost its memory addresses is refused ($how)" skipped "this build does not tell such a device, and has refused it with other words"
+        fi
+        $HE_STATE hotplug,absent,unused
+        guest_goes_on "the VM runs on after that ($how)" 90
+    else
+        if [ -n "$LA_KNOWN" ]; then
+            stage "plugpci of a device which has lost its memory addresses is refused ($how)" FAILED "it was taken"
+        else
+            stage "plugpci of a device which has lost its memory addresses is refused ($how)" skipped "this build does not tell such a device and takes it as it is"
+        fi
+        # What a guest makes of it.
+        LA_ROUND=$((LA_ROUND + 1))
+        wait_serial "GUEST: (READ|NODRIVE) $LA_ROUND" 150
+        echo "    the guest with the device as it is: $(serial_new | grep -a -E 'GUEST: (READ|NODRIVE|PRESENT|WROTE|WRITE-FAILED) ' | tail -n 3 | awk '{ print substr($0, 1, 90) }' | tr '\n' '|')"
+        serial_show 'GUEST: k: .*nvme' 8
+        serial_mark
+        VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=20000 --force
+        wait_serial "GUEST: GONE $LA_ROUND" 150 || echo "    the guest does not tell that the device went"
+        guest_goes_on "the VM runs on with such a device taken away again ($how)" 150
+    fi
+
+    # What gets the addresses back: the host forgets the device and finds it
+    # anew, and sets up what it finds.
+    for f in $HOSTFUNCS; do
+        echo "+ echo 1 > /sys/bus/pci/devices/$f/remove"
+        echo 1 > "/sys/bus/pci/devices/$f/remove"
+    done
+    echo "+ echo 1 > /sys/bus/pci/rescan"
+    echo 1 > /sys/bus/pci/rescan
+    i=0
+    while [ "$i" -lt 10 ] && ! host_has_all; do
+        sleep 1
+        i=$((i + 1))
+    done
+    now=$(host_bars)
+    echo "    the BAR registers of the device after that: $now"
+    if host_has_all && ! host_bars_none "$now"; then
+        stage "host: the device has memory addresses again after it was removed and found anew ($how)" ok
+    else
+        stage "host: the device has memory addresses again after it was removed and found anew ($how)" FAILED
+        return 1
+    fi
+    if ! bind_dev; then
+        stage "the device is bound to vfio-pci again ($how)" FAILED
+        return 1
+    fi
+    dmesg -C 2> /dev/null
+    serial_mark
+    if run controlvm "$VM" plugpci "$HOSTADDR"; then
+        stage "plugpci of the device which has its addresses again ($how)" ok
+    else
+        stage "plugpci of the device which has its addresses again ($how)" FAILED
+        diag
+        return 1
+    fi
+    LA_ROUND=$((LA_ROUND + 1))
+    $HE_READS "$LA_ROUND" "guest: takes the device which has its addresses again and reads from $HE_FROM ($how)"
+}
+
+# The guest lets go of the device, and nobody has it then.
+lostaddr_unplug() # <what the stage is to add>
+{
+    serial_mark
+    if VBM_TIMEOUT=120 run controlvm "$VM" unplugpci "$HOSTADDR" --timeout=60000; then
+        stage "unplugpci: the guest lets go of the device ($1)" ok
+    else
+        stage "unplugpci: the guest lets go of the device ($1)" FAILED
+        diag
+        return 1
+    fi
+    wait_serial "GUEST: GONE $LA_ROUND" 60 || echo "    the guest does not tell that the device went"
+    $HE_STATE hotplug,absent,unused
+}
+
+# The bus of the device is reset on the host while nobody has the device, the
+# VM not either: the device is out of the slot, bound to the driver which has
+# it for VirtualBox, and unused.  A reset leaves a device without the
+# addresses of its memory and with nothing switched on, and whether it has
+# them again when it is opened next depends on what the kernel of the host
+# kept of it.  Asleep, which is where that kernel puts a device nobody uses,
+# it wakes up with what it had when it fell asleep.  Awake it has nothing put
+# back, and falls asleep later as what the reset left of it.  The second is
+# what a device is left as which VirtualBox let go of after an error the host
+# takes for fatal, before the kernel had reset the bus for that error: the
+# kernel keeps a device awake while it deals with an error of it (see "A
+# drive which Windows does not start after an error the host takes for
+# fatal" in STATUS.md).
+phase_lostaddr()
+{
+    local bars now
+    PHASE=lostaddr
+    reset_vm
+    HE_READS=guest_reads
+    HE_STATE=check_pcistate
+    HE_FROM="the drive"
+    if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
+        HE_READS=guest_reads_both
+        HE_STATE=check_pcistate_all
+        HE_FROM="both drives"
+    fi
+    LA_ROUND=1
+    LA_KNOWN=
+    if ! command -v setpci > /dev/null 2>&1; then
+        stage "the bus of the device can be reset by hand" skipped "this machine has no setpci"
+        return
+    fi
+    bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
+    if grep -a -q 'has lost the addresses of its memory' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
+        LA_KNOWN=1
+        echo "    this build tells a device which has lost its memory addresses"
+    else
+        echo "    this build does not tell a device which has lost its memory addresses"
+    fi
+    if [ "$HOSTFUNCS" != "$HOSTADDR" ]; then
+        attach_funcs
+    else
+        run modifyvm "$VM" --pci-attach "$HOSTADDR@0000:01:00.0" && ATTACHED=$HOSTADDR
+    fi
+    run setextradata "$VM" VBoxInternal2/HostPCIHotPlug 1
+    if boot "a VM with the device in the hot-plug capable slot boots the guest"; then
+        $HE_READS 1 "guest: reads from $HE_FROM in the slot"
+        bars=$(host_bars)
+        echo "    the BAR registers of the device as the host has set them up: $bars"
+
+        # Asleep.
+        if lostaddr_unplug "the first time"; then
+            if host_rpm_wait suspended 20; then
+                echo "    with nobody having the device its functions are: $(host_rpm)"
+                if host_bus_reset_by_hand; then
+                    echo "    the BAR registers after the reset: $(host_bars), the functions: $(host_rpm)"
+                    # Woken up and left to fall asleep again, which is what
+                    # opening the device and closing it does to it.
+                    host_rpm_control on
+                    host_rpm_wait active 10
+                    now=$(host_bars)
+                    host_rpm_control auto
+                    host_rpm_wait suspended 20
+                    if [ "$now" = "$bars" ]; then
+                        stage "host: a device which slept through a reset of its bus wakes up with its memory addresses" ok
+                    else
+                        stage "host: a device which slept through a reset of its bus wakes up with its memory addresses" FAILED "the BAR registers were: $bars; they are: $now"
+                    fi
+                    lostaddr_plug "after a reset of the bus it slept through"
+                else
+                    stage "the bus of the device is reset by hand" FAILED
+                fi
+            else
+                stage "host: puts the device to sleep when nobody has it" skipped "its functions are: $(host_rpm)"
+                lostaddr_plug "with nothing done to it"
+            fi
+        fi
+
+        # Awake.
+        if lostaddr_unplug "the second time"; then
+            host_rpm_control on
+            if host_rpm_wait active 10; then
+                bars=$(host_bars)
+                if host_bus_reset_by_hand; then
+                    host_rpm_control auto
+                    host_rpm_wait suspended 20
+                    now=$(host_bars)
+                    echo "    the BAR registers after the reset, with the device left to itself again: $now, the functions: $(host_rpm)"
+                    if host_bars_none "$now"; then
+                        stage "host: a reset of the bus with the device awake and nobody having it leaves the device without memory addresses" ok
+                    else
+                        stage "host: a reset of the bus with the device awake and nobody having it leaves the device without memory addresses" FAILED "the BAR registers were: $bars; they are: $now"
+                    fi
+                    lostaddr_plug "after a reset of the bus with the device awake"
+                else
+                    stage "the bus of the device is reset by hand" FAILED
+                fi
+            else
+                stage "host: the device can be kept awake" skipped "its functions are: $(host_rpm)"
+                host_rpm_control auto
+            fi
+        fi
+        guest_goes_on "the VM runs on after all of that" 90
+    fi
+    end_phase
+    # For the phases after this one.
+    host_rpm_control auto
+    host_has_all || echo 1 > /sys/bus/pci/rescan
+    bind_dev
+}
+
 # The root port a port is behind: itself, where it is one.
 root_port_of() # <port>
 {
@@ -2844,6 +3150,7 @@ if setup; then
             hotplug)     phase_hotplug ;;
             hostremove)  phase_hostremove ;;
             hosterror)   phase_hosterror ;;
+            lostaddr)    phase_lostaddr ;;
             hostplug)    phase_hostplug ;;
             hostplug-again) phase_hostplug hostplug-again ;;
             startempty)  phase_startempty ;;
