@@ -2900,6 +2900,24 @@ int tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned 
 
 
 /**
+ * Checks whether somebody has an I/O port.  Reading the port doesn't tell: a
+ * port nobody has reads as all ones, and so can one which somebody has.
+ *
+ * @returns true if an I/O port range is mapped at the port, false if not.
+ * @param   uPort               The port.
+ */
+bool tstPdmIsIoPortMapped(RTIOPORT uPort)
+{
+    for (uint32_t i = 0; i < g_Pdm.cIoPorts; i++)
+        if (   g_Pdm.aIoPorts[i].fMapped
+            && uPort >= g_Pdm.aIoPorts[i].uPort
+            && (uint32_t)uPort < (uint32_t)g_Pdm.aIoPorts[i].uPort + g_Pdm.aIoPorts[i].cPorts)
+            return true;
+    return false;
+}
+
+
+/**
  * Checks whether a guest physical address is backed by a mapped MMIO2 range,
  * which means the guest accesses it without the device being involved.
  *
