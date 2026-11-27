@@ -8754,6 +8754,10 @@ typedef struct TSTSLOTFUZZ
     uint32_t                cFdsEmpty;
     /** How much guest memory is mapped for DMA. */
     uint64_t                cbDmaMapped;
+    /** Whether the host has reported an error of the device since a device was put into
+     * the slot last, with a time configured for holding on to a device: the device which
+     * was in the slot can be held on to, and it can be without its addresses. */
+    bool                    fErrorSinceAttach;
 } TSTSLOTFUZZ;
 
 
@@ -8860,15 +8864,26 @@ static bool tstSlotFuzzCheck(TSTSLOTFUZZ *pFuzz)
     uint32_t const uSltSta  = tstPortCfgRead(TSTPORT_SLTSTA, 2);
     bool           fInUse   = false;
     bool const     fPresent = tstSlotFuzzIsPresent(pFuzz, &fInUse);
-    uint32_t const cOpen    = tstVfioKrnlDevGetOpenCount(pFuzz->pDev);
-    uint32_t const cFds     = tstVfioKrnlGetOpenFdCount();
-    if (!fPresent && pFuzz->cFdsEmpty == UINT32_MAX)
+
+    /* A device which is held on to after an error is let go of by a thread of the passthrough
+       device in its own time, so both numbers are taken until they are of one moment. */
+    uint32_t cOpen = 0;
+    uint32_t cFds  = 0;
+    for (unsigned cTries = 0; cTries < 16; cTries++)
+    {
+        cOpen = tstVfioKrnlDevGetOpenCount(pFuzz->pDev);
+        cFds  = tstVfioKrnlGetOpenFdCount();
+        if (tstVfioKrnlDevGetOpenCount(pFuzz->pDev) == cOpen)
+            break;
+    }
+    bool const fHeld = !fPresent && cOpen == 1 && pFuzz->fErrorSinceAttach;
+    if (!fPresent && !fHeld && pFuzz->cFdsEmpty == UINT32_MAX)
         pFuzz->cFdsEmpty = cFds;
 
     const char *pszWhat = NULL;
-    if (cOpen != (fPresent ? 1U : 0U))
+    if (cOpen != (fPresent || fHeld ? 1U : 0U))
         pszWhat = "how often the device is open";
-    else if (cFds != (fPresent ? pFuzz->cFdsOccupied : pFuzz->cFdsEmpty))
+    else if (cFds != (fPresent || fHeld ? pFuzz->cFdsOccupied : pFuzz->cFdsEmpty))
         pszWhat = "the number of open file descriptors";
     else if (tstVfioKrnlGetDmaMappedBytes() != pFuzz->cbDmaMapped)
         pszWhat = "the guest memory mapped for DMA";
@@ -8895,13 +8910,22 @@ static bool tstSlotFuzzCheck(TSTSLOTFUZZ *pFuzz)
  * passthrough device in a hot-plug capable slot: accesses, devices which come
  * and go in every way there is, resets, and states which are saved and
  * loaded.  What has to hold is checked after each.
+ *
+ * With a time for holding on to a device after an error the host reported, the
+ * host reports more errors and resets the bus of the device for half of them,
+ * which leaves the device without its addresses and not answering until it is
+ * said to answer again.  Everything else goes on while a device is held on to.
+ *
+ * @param   cMsHold             How long a device is held on to after an error, in
+ *                              milliseconds, 0 for letting go of it at once.
  */
-static void tstSlotFuzz(void)
+static void tstSlotFuzzWorker(uint32_t cMsHold)
 {
-    RTTestISub("Hot-plug slot: random operations with devices coming and going");
+    RTTestISub(cMsHold ? "Hot-plug slot: random operations with a device held on to after an error"
+                       : "Hot-plug slot: random operations with devices coming and going");
 
     uint32_t    cOps  = 150 * 20;
-    uint32_t    uSeed = UINT32_C(0x20261113);
+    uint32_t    uSeed = cMsHold ? UINT32_C(0x20261114) : UINT32_C(0x20261113);
     const char *psz   = RTEnvGet("TSTDEVPCIVFIO_FUZZ_MODELS");
     if (psz)
         cOps = RT_MIN(RTStrToUInt32(psz), 5000) * 20;
@@ -8935,8 +8959,12 @@ static void tstSlotFuzz(void)
     uint32_t    cStatesLoaded = 0;
     uint32_t    cInterrupts  = 0;
     g_cMsTstGuestRelease = 20;
+    g_cMsTstErrorHold    = cMsHold;
+    g_cMsTstErrorHoldMax = cMsHold * 5;
     rc = tstSlotFixtureSetup(&s_Model, 1, &Fuzz.pDev, &Fuzz.pDevInsPort, &pDevInsDev);
     g_cMsTstGuestRelease = 0;
+    g_cMsTstErrorHold    = 0;
+    g_cMsTstErrorHoldMax = 0;
     if (RT_SUCCESS(rc))
         Fuzz.pPort = tstDevGetPort(pDevInsDev);
     if (RT_SUCCESS(rc) && Fuzz.pPort)
@@ -8949,6 +8977,7 @@ static void tstSlotFuzz(void)
 
         bool fKrnlThere = true;     /* Whether the host has the device. */
         bool fOtherKind = false;    /* Whether it is the other kind of device. */
+        bool fSilent    = false;    /* Whether the device doesn't answer since the host has reset its bus. */
         for (uint32_t iOp = 0; iOp < cOps; iOp++)
         {
             uint32_t const cErrorsBefore = RTTestIErrorCount();
@@ -9019,21 +9048,36 @@ static void tstSlotFuzz(void)
             }
             else if (uOp < 73)
             {
-                /* The management puts the device into the slot. */
+                /* The management puts the device into the slot.  Not one which doesn't answer:
+                   what becomes of that is no matter of this test. */
+                if (fSilent && !fPresent)
+                    continue;
                 rc = Fuzz.pPort->pfnAttach(Fuzz.pPort);
                 if (fPresent)
                     RTTESTI_CHECK_MSG(rc == VERR_ALREADY_EXISTS, ("putting a device into the occupied slot: %Rrc\n", rc));
+                else if (rc == VERR_RESOURCE_IN_USE && Fuzz.fErrorSinceAttach)
+                { /* The device which was in the slot is held on to after an error. */ }
                 else if (!fKrnlThere)
                     RTTESTI_CHECK_MSG(RT_FAILURE(rc), ("putting a device in which isn't there: %Rrc\n", rc));
                 else if (fOtherKind)
                     RTTESTI_CHECK_MSG(rc == VERR_MISMATCH, ("putting another kind of device in: %Rrc\n", rc));
+                else if (rc == VERR_IO_NOT_READY && Fuzz.fErrorSinceAttach)
+                    /* The device was let go of while it didn't answer and is without its addresses since. */
+                    RTTESTI_CHECK_MSG(!tstDevHostHasBar0Address(Fuzz.pDev), ("a device which has its addresses was refused as one without\n"));
                 else
                 {
                     RTTESTI_CHECK_MSG(rc == VINF_SUCCESS, ("putting the device in: %Rrc\n", rc));
+                    RTTESTI_CHECK_MSG(tstDevHostHasBar0Address(Fuzz.pDev), ("a device without its addresses was put in\n"));
                     cAttached++;
                 }
-                RTTESTI_CHECK_MSG(tstSlotFuzzIsPresent(&Fuzz, NULL) == (fPresent || (fKrnlThere && !fOtherKind)),
-                                  ("after putting a device in (%Rrc)\n", rc));
+                if (rc == VINF_SUCCESS)
+                    Fuzz.fErrorSinceAttach = false;
+                if (cMsHold)
+                    RTTESTI_CHECK_MSG(tstSlotFuzzIsPresent(&Fuzz, NULL) == (fPresent || rc == VINF_SUCCESS),
+                                      ("after putting a device in (%Rrc)\n", rc));
+                else
+                    RTTESTI_CHECK_MSG(tstSlotFuzzIsPresent(&Fuzz, NULL) == (fPresent || (fKrnlThere && !fOtherKind)),
+                                      ("after putting a device in (%Rrc)\n", rc));
             }
             else if (uOp < 81)
             {
@@ -9050,13 +9094,34 @@ static void tstSlotFuzz(void)
                 /* The host wants the device back, or reports an error of it. */
                 if (fPresent)
                 {
-                    if (tstRndChance(70))
+                    if (tstRndChance(cMsHold ? 30 : 70))
+                    {
                         tstVfioKrnlDevRequest(Fuzz.pDev);
-                    else
+                        tstSlotFuzzWaitForEmpty(&Fuzz);
+                    }
+                    else if (!cMsHold)
+                    {
                         tstVfioKrnlDevSignalError(Fuzz.pDev);
-                    tstSlotFuzzWaitForEmpty(&Fuzz);
+                        tstSlotFuzzWaitForEmpty(&Fuzz);
+                    }
+                    else
+                    {
+                        /* The device is held on to, and for half of the errors the host resets its bus.
+                           The guest has lost it when the slot tells of no card. */
+                        if (tstRndChance(50))
+                        {
+                            tstVfioKrnlDevHostReset(Fuzz.pDev);
+                            fSilent = true;
+                        }
+                        tstVfioKrnlDevSignalError(Fuzz.pDev);
+                        Fuzz.fErrorSinceAttach = true;
+                        RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_10SEC), ("the device was not taken out of the slot after an error\n"));
+                    }
                     cTakenByHost++;
                 }
+                else if (cMsHold && fKrnlThere && tstRndChance(50))
+                    /* The host wants a device back which may be held on to. */
+                    tstVfioKrnlDevRequest(Fuzz.pDev);
             }
             else if (uOp < 86)
             {
@@ -9074,12 +9139,22 @@ static void tstSlotFuzz(void)
             }
             else if (uOp < 90)
             {
-                /* A device gets plugged in where none is, or another one where one is which the VM doesn't have. */
-                if (!fPresent)
+                /* A device gets plugged in where none is, or another one where one is which the VM doesn't have.
+                   Or the device which didn't answer does again. */
+                if (fSilent && tstRndChance(50))
                 {
+                    tstVfioKrnlDevSetSilent(Fuzz.pDev, false);
+                    fSilent = false;
+                }
+                else if (!fPresent)
+                {
+                    /* Nobody plugs another device in where the VM still has one. */
+                    if (cMsHold)
+                        RTTESTI_CHECK_MSG(tstSlotWaitForRelease(Fuzz.pDev, RT_MS_10SEC), ("a device stays held on to\n"));
                     fOtherKind = tstRndChance(25);
                     RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(Fuzz.pDev, fOtherKind ? &s_Other : &s_Model), VINF_SUCCESS);
                     fKrnlThere = true;
+                    fSilent    = false;
                 }
             }
             else if (uOp < 92)
@@ -9093,8 +9168,11 @@ static void tstSlotFuzz(void)
             {
                 /* The VM is suspended for a while, during which the management is at it. */
                 tstPdmSuspend();
-                if (tstRndChance(50))
-                    Fuzz.pPort->pfnAttach(Fuzz.pPort);
+                if (tstRndChance(50) && !fSilent)
+                {
+                    if (Fuzz.pPort->pfnAttach(Fuzz.pPort) == VINF_SUCCESS)
+                        Fuzz.fErrorSinceAttach = false;
+                }
                 else
                     Fuzz.pPort->pfnDetach(Fuzz.pPort, 0 /*cMsWait*/, true /*fForce*/);
                 tstPdmResume();
@@ -9177,6 +9255,18 @@ static void tstSlotFuzz(void)
 
     RTRandAdvDestroy(g_hTstRand);
     g_hTstRand = NIL_RTRAND;
+}
+
+
+/**
+ * The random operations on a VM with a device in a hot-plug capable slot, once
+ * with a device being let go of at once when the host reports an error of it,
+ * and once with it being held on to.
+ */
+static void tstSlotFuzz(void)
+{
+    tstSlotFuzzWorker(0 /*cMsHold*/);
+    tstSlotFuzzWorker(30 /*cMsHold*/);
 }
 
 
