@@ -101,6 +101,9 @@ typedef struct TSTVFIODEVCFG
     bool                fNoFunctionReset;
     /** Whether the bus the function is on can't be reset by its user. */
     bool                fNoBusReset;
+    /** Whether the function is a virtual function of a device (SR-IOV), which sysfs
+     * tells by the function it belongs to. */
+    bool                fVirtFn;
 } TSTVFIODEVCFG;
 /** Pointer to a device model description. */
 typedef TSTVFIODEVCFG *PTSTVFIODEVCFG;

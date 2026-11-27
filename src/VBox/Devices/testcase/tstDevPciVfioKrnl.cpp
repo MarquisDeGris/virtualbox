@@ -1078,6 +1078,54 @@ static int tstVfioKrnlDevIoctl(PTSTVFIODEV pDev, unsigned long uReq, void *pvArg
 
 
 /**
+ * Opens what sysfs has of a function: the file with its config space, and the
+ * one of the function it belongs to if it is a virtual function.  There is
+ * nothing to read in them, they are there to be found.
+ *
+ * A function is found under /sys/class/vfio-dev by the name of its node, and
+ * under /sys/bus/pci/devices by the node itself where that is a name and no
+ * path, as with the legacy interface.
+ *
+ * @returns File descriptor, -1 with errno set if there is no such file.
+ * @param   pszPath             The path below one of the two directories.
+ * @param   fClass              Whether it is the one under /sys/class.
+ * @param   fFlags              The open flags, O_CLOEXEC is honoured.
+ */
+static int tstVfioKrnlOpenSysfs(const char *pszPath, bool fClass, int fFlags)
+{
+    bool fThere = false;
+    RTCritSectEnter(&g_Krnl.CritSect);
+    for (uint32_t i = 0; i < g_Krnl.cDevs && !fThere; i++)
+    {
+        PTSTVFIODEV const pDev     = &g_Krnl.aDevs[i];
+        const char       *pszSlash = strrchr(pDev->Cfg.szNode, '/');
+        const char       *pszName  = fClass ? (pszSlash ? pszSlash + 1 : "") : (pszSlash ? "" : pDev->Cfg.szNode);
+        size_t const      cchName  = strlen(pszName);
+        if (   !cchName
+            || pDev->fGone
+            || strncmp(pszPath, pszName, cchName)
+            || pszPath[cchName] != '/')
+            continue;
+
+        const char *pszFile = &pszPath[cchName + 1];
+        if (fClass)
+        {
+            if (strncmp(pszFile, RT_STR_TUPLE("device/")))
+                continue;
+            pszFile += sizeof("device/") - 1;
+        }
+        fThere =    !strcmp(pszFile, "config")
+                 || (   pDev->Cfg.fVirtFn
+                     && !strcmp(pszFile, "physfn/config"));
+    }
+    RTCritSectLeave(&g_Krnl.CritSect);
+    if (!fThere)
+        return errno = ENOENT, -1;
+    return __real_open("/dev/null", O_RDONLY | (fFlags & O_CLOEXEC), 0);
+}
+
+
+/**
  * Opens a node of the fake kernel.
  *
  * @returns File descriptor, -1 with errno set on failure, -2 if the path is not ours.
@@ -1088,6 +1136,14 @@ static int tstVfioKrnlOpen(const char *pszPath, int fFlags)
 {
     if (!g_Krnl.fInitialized || !pszPath)
         return -2;
+
+    /* Nothing of the functions is looked for in the sysfs of the real host. */
+    static const char s_szSysfsClass[] = "/sys/class/vfio-dev/";
+    static const char s_szSysfsBus[]   = "/sys/bus/pci/devices/";
+    if (!strncmp(pszPath, s_szSysfsClass, sizeof(s_szSysfsClass) - 1))
+        return tstVfioKrnlOpenSysfs(&pszPath[sizeof(s_szSysfsClass) - 1], true /*fClass*/, fFlags);
+    if (!strncmp(pszPath, s_szSysfsBus, sizeof(s_szSysfsBus) - 1))
+        return tstVfioKrnlOpenSysfs(&pszPath[sizeof(s_szSysfsBus) - 1], false /*fClass*/, fFlags);
 
     bool const fIommu = !strcmp(pszPath, TSTVFIO_IOMMU_NODE);
     if (!fIommu && strncmp(pszPath, RT_STR_TUPLE("/dev/vfio/")))
