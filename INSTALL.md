@@ -361,20 +361,39 @@ A device which is pulled without that is taken away from the guest when the
 host notices; the VM keeps running.
 
 The same goes for a device the host reports an error of: it is taken out of
-the VM at once and can be put in again with `plugpci`. About an error it
-takes for fatal the kernel resets the bus the device is on, and that reset
-can leave the device without the addresses of its memory, which nothing
-puts back then. Such a device is of no use to a guest. `plugpci` refuses it
-and says so, as does a VM which is to start with it, and the checklist
-script tells it too. The host has to set the device up again, as root:
+the VM at once and can be put in again with `plugpci`, a moment later. About
+an error it takes for fatal the kernel resets the device, as a rule the
+whole bus it is on, right after it has told of the error, and it puts back
+what the device had only when the VM lets go of the device. So the VM
+holds on to the device for two seconds, and for longer if the device does
+not answer then (15 seconds at most), before it lets go of it; the guest
+has lost the device by then. `plugpci` in that time is refused with a
+message which says to try again in a few seconds, and nobody else on the
+host gets the device before the VM has let go of it, though the VM tells
+of an empty slot. The log of the VM has a line when the device is let go
+of. The time is a setting of the device, in milliseconds, 0 for letting
+go at once:
+
+    VBoxManage setextradata <vm> "VBoxInternal/Devices/pci-vfio/0/Config/ErrorHoldMs" 2000
+
+A device which is let go of at the wrong moment nevertheless, by a VM
+process which is killed for one, can be left by that reset without the
+addresses of its memory, which nothing puts back then. Such a device is of
+no use to a guest. `plugpci` refuses it and says so, as does a VM which is
+to start with it, and the checklist script tells it too. The host has to
+set the device up again, as root:
 
     echo 1 > /sys/bus/pci/devices/0000:0a:00.0/remove
     echo 1 > /sys/bus/pci/rescan
 
 for every function of the device before the bus is scanned. The device is
 new to the host afterwards and bound to no driver: steps 2 and 3 again.
-This was seen in the simulation only, with the bus reset by hand (the
-phase `lostaddr`), and not on a machine with real hardware.
+All of this was seen in the simulation only and not on a machine with
+real hardware: the VM holding on to the device through the reset the
+kernel does about an error, and the device having its addresses and
+going into the VM again afterwards (the phase `hosterror`); and a
+device which lost its addresses, by a reset of the bus by hand, being
+refused and set up again (the phase `lostaddr`).
 
 The device goes by the BAR registers for this, on an x86 host and for a
 device the host shows as an ordinary function; a virtual function (SR-IOV)

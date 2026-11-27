@@ -1039,7 +1039,10 @@ win_second() # <what> [<seconds>]
         # and nothing to run it with (problem 28, which is what the Server
         # Core of the simulation tells: run 285).  That is told once, and
         # what needs the driver is left out.
-        if    wait_serial '^WIN: PRESENT [0-9]+ at=1\.0\.1 ' "${2:-420}" \
+        # The line is waited for up to the number of the problem: the guest
+        # writes it letter by letter, and a line which is half there tells of
+        # no problem yet (run 411).
+        if    wait_serial '^WIN: PRESENT [0-9]+ at=1\.0\.1 .* problem=[0-9]+ ' "${2:-420}" \
            && serial_has '^WIN: PRESENT [0-9]+ at=1\.0\.1 .* problem=28 '; then
             if [ "${AUDIO_DRIVER:-}" != no ]; then
                 stage "guest: has a driver for the audio controller" skipped "this Windows has none for it (problem 28); the function is there"

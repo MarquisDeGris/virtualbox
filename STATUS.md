@@ -7,7 +7,7 @@ Updated: 2026-11-27
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `dd03eb1c`, 49 commits. The last one is of 2026-11-27: a device which has lost its addresses on the host, as a reset of its bus can leave it, is refused when it is opened, with words for what gets them back, see "A drive which Windows does not start after an error the host takes for fatal". The two before it are of the same day: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `69ae4877`, 51 commits. The last two are of 2026-11-27: a device the host reported an error of is held on to until the host has reset it, where it was let go of at once, and a device which was pulled is told by a register the host passes on to it. The one before them is of the same day: a device which has lost its addresses on the host, as a reset of its bus can leave it, is refused when it is opened, with words for what gets them back. For the three see "A drive which Windows does not start after an error the host takes for fatal". The two before them are of the same day: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -3542,7 +3542,7 @@ minutes, AMD EPYC 9V74): the testcase passes on the 7.1 line with the
 KVM backend. Run 401 was that run started with the wrong branch to
 reuse a build of, and ended in its first minute; nothing of the code.
 
-The heads are `pci-passthrough-hotplug-v1` @ `dd03eb1c` (49 commits),
+The heads were `pci-passthrough-hotplug-v1` @ `dd03eb1c` (49 commits),
 `-7.2` @ `eed48f76`, `-7.2-kvm` @ `a349b046`, `-7.1` @ `f0ad59f4` and
 `-7.1-kvm` @ `1259a688`. The checklist script tells such a device as
 well (`tools/pci-passthrough-check.sh`: as missing if the device is
@@ -3550,27 +3550,231 @@ awake, as to be checked if it sleeps, since a sleeping device can get
 its addresses back when it is opened), and INSTALL.md has it in
 section 6 (meta `df0f1ca`).
 
+**Holding on to the device (the same evening, commits `f238d07a` and
+`69ae4877` on the branch of the merge request; this was item 7d).**
+What decides is the order of two things, and it was read in the source
+of the kernel (v7.0) before anything was changed. The kernel calls the
+driver of every device behind the port, and `vfio-pci` signals its
+user there and does nothing else, whatever the error is
+(`vfio_pci_core_aer_err_detected`). For an error it takes for fatal
+the kernel resets right after that (`pcie_do_recovery` in `err.c`): as
+a rule the bus the device is on (`aer_root_reset`,
+`pci_bus_error_reset`), with every device on that bus locked for the
+2 ms of the reset and for the wait after it, which is 100 ms as a rule
+and lasts until the device answers, a minute at most
+(`pci_bridge_wait_for_secondary_bus`). Nothing there puts a state
+back, and `vfio-pci` has none of the callbacks in which a driver does.
+What `vfio-pci` does is put back what the device had when it was
+opened, at the moment the device is closed (`vfio_pci_core_disable`).
+VirtualBox closed the device as soon as it was told, which is before
+the reset or in the middle of it, and what is written to a device in
+reset is lost.
+
+So the device is not closed at once any more:
+
+- The function goes out of service at once, as before: the guest finds
+  nothing where it was, and ordinary memory takes the place of the
+  memory of the device.
+- The file of the device is kept under a number of its own, which only
+  the watcher thread uses. That thread ends the interrupts of the
+  device and has it neither decode its addresses nor act as a bus
+  master, right away and again every tenth of a second, because
+  something an EMT had on its way into the kernel when the guest lost
+  the device can switch that on again. Where the kernel has the device
+  locked for its reset, the first of these waits for the reset to be
+  over, and the time counts from there.
+- When `ErrorHoldMs` is up (2000 unless set, 0 for what was done
+  before, ten seconds at most) the device is asked whether it answers,
+  and is closed if it does. One which does not is asked again every
+  tenth of a second and closed after `ErrorHoldMaxMs` at the latest
+  (15000 unless set).
+- The host gets the device without the time being up when it asks for
+  it, all functions of it, also while the VM is being powered off. A
+  VM which is powered off holds on to the device for what is left of
+  `ErrorHoldMs`, and no longer for one which does not answer.
+- `plugpci` is refused meanwhile, with the status
+  `VERR_RESOURCE_IN_USE`, which the API tells as
+  `VBOX_E_INVALID_OBJECT_STATE` with the words to try again in a few
+  seconds. `unplugpci` and the state of the slot tell of an empty
+  slot; the device is not free for anybody else on the host before it
+  is let go of.
+- The thread which passes the interrupts of a function on passes none
+  on for a function which is out of service.
+
+The kernel does not tell its user which kind an error is of, so a
+device is held on to for two seconds as well after an error nothing is
+reset for.
+
+A second thing came of reading the kernel for this (commit
+`69ae4877`). `vfio-pci` answers for the vendor ID and the device ID of
+every device by itself. The check whether a device still answers when
+the host wants it back read the vendor ID, so it could not tell a
+device which was pulled: the guest would be asked to let go of it, and
+the host kept waiting for as long as the guest gets, 15 seconds unless
+set. It reads the register with the revision and the class now, which
+`vfio-pci` passes on to the device. This was read in the source and
+seen nowhere: nothing here pulls a device without the kernel being
+asked first, which is the orderly way and went the right way before.
+
+**Two readers, three versions.** The change could not be built on
+this machine, and its first version did not build at all: a pointer
+to a constant where the function called takes none (run 404, four
+minutes, no test ran). The reader of that version, who had the source
+of the kernel to check against, found that as well, and more:
+
+- "Does not answer" went by the command register reading all ones,
+  which `vfio-pci` does not return: it answers one bit of that
+  register by itself. The register with the revision and the class
+  decides now, and the stand-in for the kernel in the testcase has
+  that bit.
+- What an EMT had on its way into the kernel when the function went
+  out of service is done to the device after it was told to keep
+  quiet, and before the change the closing of the file came after it
+  and undid it. Hence the telling again every tenth of a second, and
+  the thread for the interrupts passing none on.
+- The destructor waited 30 seconds for the watcher thread and went on
+  under it if it had not ended, and the kernel can have that thread
+  wait for longer since this change. It waits ten times 30 seconds
+  now, with a line in the log each time. Going on after that under a
+  thread which still runs is the weakness it was; nothing in a device
+  can keep its instance from being freed.
+- A request of the host let go of the one function it came for, and
+  was not looked for while the VM was being powered off.
+- Tests which took a state for reached a moment too early (the count
+  of opens of the stand-in read without its lock, putting a device in
+  right after the file was closed), and settings and paths no test
+  went through.
+
+The second version had all of that, and a second reader, who did not
+know the first one's words beyond a list of what had been found, read
+it whole. No crash, no deadlock and no error of the compiler any more.
+What he found is in the third version: ending the interrupts was done
+under the lock of the slot and could wait there for an EMT which
+waits for the kernel, so it is the watcher's first step now, without
+the lock; comments which said more than the kernel does ("at least a
+tenth of a second", "resets the bus"; both hold as a rule and not
+always); the result of the API missing in its description; and eleven
+changes to the device which no test would have noticed, of which
+tests were written for those that can be tested without a kernel
+which makes its callers wait: an interrupt set up again on a device
+which is held on to does not get to the guest and is ended again, the
+command register switched on again is cleared again, the host asking
+while the VM is being powered off, two functions and a request for
+one of them, the limits of the two settings, the time beginning anew
+for a second error, and that a device which is taken out on request,
+wanted back by the host or pulled is let go of at once also when a
+time is configured. The one change to the device in the third version
+(where the interrupts are ended) was not read by a third reader.
+
+Two things he found are older than this change and stay as they are.
+The watcher thread tells the root port that the slot is empty while it
+has the lock of the slot, and that takes the lock of the PCI bus; an
+EMT which has that lock and is kept waiting by the kernel, in an
+access of the guest to the device during the reset, keeps the watcher
+waiting with the lock of the slot for as long. And an error which
+comes after the watcher thread was told to end finds nobody: the
+destructor closes that device at once.
+
+**What was seen.** The testcase has two tests for it, 64 with them,
+and three random ones as before. Its stand-in for the kernel has the
+host reset the bus of a function, which leaves the function without
+addresses in its BAR registers and not answering until the test says
+it does again, and puts the BAR registers back when the last user
+lets go of a function, unless the function does not answer then. That
+is the kernel as read above without one thing: the stand-in makes
+nobody wait, and it resets before it tells of the error where the
+kernel tells first. With it a device which is held on to keeps its
+addresses, with the device nodes and with the legacy interface, with
+one function and with two, and one which is let go of at once, as the
+setting 0 has it, loses them and is refused when it is to go in again,
+which is how it was before the change.
+
+Run 405 (`tests`, `scratch/hold2` @ `e49de4ef`, the second version,
+10 minutes, Intel Xeon 6975P-C) and run 407 (`tests`, `scratch/hold3`
+@ `69ae4877`, the third, which is what the branches have, 9 minutes,
+the same processor): the testcase passes. Run 408 (`sanitize`,
+`pci-passthrough-hotplug-v1` @ `69ae4877`, 12 minutes, AMD EPYC 7763):
+the same with the sanitizers and the random tests in full length, no
+report. Run 410 (`tests`, `pci-passthrough-hotplug-7.1-kvm` @
+`16f2acff`, 12 minutes, Intel Xeon 6975P-C): the testcase passes on
+the 7.1 line with the KVM backend.
+
+Run 406 (`sim` with the parts errhost and mferrhost, exploring,
+`scratch/hold2` @ `e49de4ef`, 30 minutes, Intel Xeon 6975P-C, 141
+checks pass, none fails, 2 are left out as before) is the change with
+a real kernel on the machine which stands in for the host. After the
+error which that kernel takes for fatal the log of the VM has the
+function out of service, the device held on to 23 ms later and let go
+of 2.2 seconds after that, "2000 ms after it was told to keep quiet".
+The device has its addresses then, `plugpci` takes it and the guest
+reads from the drive. After the error which is not fatal, for which
+the kernel resets nothing, it is the same with 2.1 seconds. With the
+device of two functions both are held on to and let go of a tenth of
+a second apart. The phase with the reset by hand passes as before.
+How long the kernel's reset took is not in what the run kept: its log
+was read right after the error. Run 409
+(`sim` with the part errhost, `pci-passthrough-hotplug-7.2-kvm` @
+`6876af7e`, 21 minutes, Intel Xeon 6975P-C, all 94 checks pass) is the
+third version on the 7.2 line with the KVM backend: held on to for 2.1
+and 2.2 seconds, addresses in place, put in again, the guest reads.
+
+Run 411 (`winsim` with the parts runner, win and hdawinhost,
+exploring, the same head, 53 minutes, Intel Xeon 6975P-C, 149 checks
+pass, 1 fails, 1 is left out as before) is the part in which run 389
+had Windows unable to start the drive: Windows with the device of a
+drive and an audio controller. After the error which the kernel takes
+for fatal both functions are held on to, for 2.1 and 2.3 seconds, the
+device has its addresses, `plugpci` takes it, and Windows has the
+drive with its driver and reads from it. The check which fails is an
+earlier one and none about an error. After an ordinary `plugpci` the
+script waited for the line in which Windows tells of the second
+function, and went on when half of that line had arrived: without the
+number of the problem, which this Windows has for an audio controller
+at all times, as it has no driver for one. The line was complete a
+moment later and is the one of run 394. The script waits for the
+number now; the part was not run again for that.
+
+Before this change the device came back to a guest as one it could
+not start once, in run 389, and not in the other rounds with such an
+error before and after it. The rounds with the change are no proof by
+their number. What they show is the order, which the log of the VM has
+each time: the device is closed two seconds and more after the kernel
+has told of the error, and the kernel resets right after telling.
+
+The heads are `pci-passthrough-hotplug-v1` @ `69ae4877` (51 commits),
+`-7.2` @ `d5cfbd35`, `-7.2-kvm` @ `6876af7e`, `-7.1` @ `75164450` and
+`-7.1-kvm` @ `16f2acff`. INSTALL.md has the holding on in section 6,
+and the phases with an error wait for the device to be let go of
+before they look at its addresses and put it in again (meta
+`61f5366`).
+
 **What is left.**
 
-- A device can still get into that state: it is told now, and cured
-  by hand, with root on the host. Keeping hold of a device for a
-  moment after an error, with the guest cut off from it at once as
-  now, would have `vfio-pci` put back what the device had, since it
-  does that when the device is let go of, and that would then be after
-  the kernel's reset. It changes how a device is let go of, which the
-  host waits for in other cases, and wants an answer to what is done
-  when the host asks for the device in that moment and when the device
-  is to go into the VM again at once. Next, item 7d.
-- That run 389 was this is a reading: the order of the reset and of
-  letting go was not seen there.
-- None of it was seen on real hardware. There a reset of the bus takes
-  a second and more, and what is written to a device right after it
-  may not arrive, so a device may well be in this state after every
-  error the host takes for fatal.
+- That run 389 was this is a reading still: the order of the reset
+  and of letting go was not seen there. The order is seen now, and it
+  is the right one.
+- None of it was seen on real hardware. A reset of a bus takes longer
+  there than on the machine which stands in for the host, and a device
+  which needs more than two seconds to answer again is waited for, for
+  15 seconds at most.
+- A port which takes its link down by itself on an error (downstream
+  port containment) is in no test with a kernel: the port the
+  simulation has does not do that. The kernel locks nothing there, the
+  device just does not answer until the link is back, and what the
+  change does about it is ask the device before it lets go of it. The
+  testcase has that case with its stand-in.
+- A VM process which is killed lets go of its device at once, at
+  whatever moment. The device is told as one without addresses then
+  when it is opened next, and set up again by hand.
+- The random test of the slot does not run with a time for holding on:
+  its checks go by a device being closed at once. Next, item 7e.
+- The weakness of the destructor and the two older findings of the
+  second reader, see above.
 - A host which is not x86, and a device sysfs tells nothing of, are not
-  looked at.
+  looked at by the check for a device without addresses.
 - The build for machines with real hardware which is published
-  (`vbox-b1136fa26e96-3d`) is without the change. The next one has it.
+  (`vbox-b1136fa26e96-3d`) is without these changes. The next one has
+  them.
 
 ### The issue with upstream, 2026-11-23
 
@@ -4719,18 +4923,25 @@ harness since WP5, saved states since the fourth part of WP6.
    device tells a function none of whose BAR registers has an address
    when it opens it, and refuses it with a message which says what
    gets the addresses back, on all five branches (run 399).
-7d. Left of 7c: holding on to a device for a moment after an error the
-   host reports before letting go of it, with the guest cut off from
-   it at once as now, so that the kernel's reset comes while the
-   device is still open and what the device had is put back when it is
-   let go of. To be answered first: how long (the kernel tells nobody
-   when its reset is done; it takes a second and more on real
-   hardware), what is done when the host asks for the device in that
-   time, which it waits for, and when the device is to go into the VM
-   again at once, since the kernel lets a device be opened once. The
-   stand-in for the kernel in the testcase would have to reset a
-   device behind the back of who has it and put back what it had when
-   it is let go of. A change to the device which wants a reader.
+7d. Done on 2026-11-27, see "Holding on to the device" in the section
+   named under 7c: a device the host reported an error of is held on
+   to with the guest cut off from it at once, until its time is up and
+   it answers, and is let go of then, which is when what it had is put
+   back. The questions asked here have their answers there and in the
+   decisions of that day: two seconds and a look at the device, the
+   host gets a device it asks for without waiting, and no device goes
+   into the VM meanwhile. Two readers, three versions, on all five
+   branches (runs 405 to 411). The reading of the kernel for it found
+   that a device which was pulled could not be told from one which is
+   there, which is the second commit.
+7e. Left of 7d, nothing of it started. The random test of the slot
+   does not run with a time for holding on, as its checks go by a
+   device being closed at once. A port which takes its link down by
+   itself on an error is in no test with a kernel; the port the
+   simulation has does not do that. And the older findings of the
+   second reader: the watcher thread waiting with the lock of the slot
+   for an EMT the kernel keeps waiting, and the destructor going on
+   after five minutes under a watcher thread which has not ended.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -4917,6 +5128,16 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | Keeping hold of a device for a moment after an error, which would keep it out of that state, is not done with this change | It changes how a device is let go of, which the host waits for in other cases. The state is told now and cured by hand; this is the next step (Next 7d) |
 | 2026-11-27 | The checklist script tells a device whose BAR registers are empty: as missing if it is awake, as to be checked if it sleeps | A sleeping device gets its addresses back when it is opened if it had them when it fell asleep (run 397), so from outside it cannot be told which it is |
 | 2026-11-27 | The commit went to a branch of its own first (`scratch/lostaddr`), was built and tested there, and then to the five branches | It touches the device, Main and a header, and could not be built on this machine. The branch is left where it is |
+| 2026-11-27 | A device the host reported an error of is held on to: its function goes out of service at once, its file is closed by the watcher thread later, when `ErrorHoldMs` is up (2000) and the device answers, after `ErrorHoldMaxMs` at the latest (15000) | The kernel resets right after it has told of an error it takes for fatal and puts nothing back; `vfio-pci` puts back what the device had when the device is closed, and that is lost on a device which is closed before the reset or during it (read in the source of the kernel, see "Holding on to the device"). The kernel does not say when it is done, so it is a time, and a look at whether the device answers |
+| 2026-11-27 | Whether a device answers is told by the register with its revision and class, here and where the host wants a device back | `vfio-pci` answers for the IDs and for one bit of the command register by itself. The first version went by the command register, which a reader found; the check for a device which was pulled went by the vendor ID since it was written, which reading the kernel for this found |
+| 2026-11-27 | A device which is held on to is kept quiet by the watcher thread, at once and again every tenth of a second: interrupts ended, no decoding, no bus mastering. It is not taken out of the I/O address space before it is closed | What an EMT had on its way into the kernel can switch it on again (a reader). Closing takes the device out of the address space as before; doing that by hand earlier would be one more thing asked of the kernel while it is busy with the device, and the legacy interface has no way to do it for one device |
+| 2026-11-27 | `plugpci` is refused while a device is held on to (`VERR_RESOURCE_IN_USE`, in the API `VBOX_E_INVALID_OBJECT_STATE`), not made to wait | The device is put in on an EMT, which would stand still for seconds. A second open is refused by the kernel with the device nodes, and with the legacy interface it would keep the closing from putting anything back |
+| 2026-11-27 | The state of a VM is saved and loaded as before while a device is held on to | Nothing of the device is mapped anywhere and the guest has no way to it, which is what saving and loading need. What the device writes by itself until it is told to keep quiet goes to the buffers of a driver which has lost its device. Refusing would be a refusal for seconds with words of its own |
+| 2026-11-27 | The host gets a device it asks for without the time being up, all functions, also during power-off; power-off waits for what is left of `ErrorHoldMs` | The host waits with a lock held otherwise, and it cannot ask while the bus is being reset. A VM which is powered off right after an error is likely, and without the wait its device would be left as before |
+| 2026-11-27 | `unplugpci` and the state of the slot tell of an empty slot while a device is held on to | The slot is empty for the guest and for whoever wants to put a device in; that the device is not free for others for seconds is said where the interface is described and in INSTALL.md |
+| 2026-11-27 | The destructor waits ten times 30 seconds for the watcher thread and goes on then as it did after 30 | The kernel can keep that thread waiting for as long as it has a device locked. A device cannot keep its instance from being freed, so the rest of that weakness stays and is written down |
+| 2026-11-27 | The testcase lets go of a device at once unless a test sets the time | Some sixty tests go by the device being closed right after an error. The time which ships is gone through by the tests of the hold and by the simulation |
+| 2026-11-27 | Three versions on branches of their own (`scratch/hold`, `-hold2`, `-hold3`), each built by the workflow, the first two read by one reader each | It could not be built here, and it changes how a device is let go of. The first did not build, which cost a run; the one change to the device in the third was not read again |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -5270,5 +5491,13 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 401 | `pci-passthrough-hotplug-7.1-kvm` @ `1259a688` | tests | **failed** | 1 minute. Not the code: the run was started with `main` as the branch whose build is reused, which is for the development line, and the step which marks the files that differ from it gave up on the name of a file. Started again as run 403 with `VBox-7.1` |
 | 402 | `pci-passthrough-hotplug-7.2-kvm` @ `a349b046` | sim with the part errhost, exploring | passed | 21 minutes, Intel Xeon 6975P-C. All 92 pass. The change on the 7.2 line with the KVM backend: it builds, the testcase passes with its 62 tests, and the phase `lostaddr` goes as in run 399: the device without addresses is refused with the words, set up again on the host and taken, and the guest reads from the drive |
 | 403 | `pci-passthrough-hotplug-7.1-kvm` @ `1259a688` | tests | passed | 13 minutes, AMD EPYC 9V74. The change on the 7.1 line with the KVM backend: it builds and the testcase passes with its 62 tests and three random ones |
+| 404 | `scratch/hold` @ `f0bb6c9c` | tests | **failed** | 4 minutes. The first version of the two commits about holding on to a device did not build: a pointer to a constant function where an atomic read takes none, in the watcher thread. No test ran. Mine, and what building on a branch of its own first is for |
+| 405 | `scratch/hold2` @ `e49de4ef` | tests | passed | 10 minutes, Intel Xeon 6975P-C. The second version, after the first reader: it builds, and the testcase passes with its 64 tests and three random ones |
+| 406 | `scratch/hold2` @ `e49de4ef` | sim with the parts errhost and mferrhost, exploring | passed | 30 minutes, Intel Xeon 6975P-C. 141 pass, 2 are told as skipped as before (the two about the time of a guest). The first run of the phases which wait for a device to be let go of. With the kernel of the machine which stands in for the host the device is held on to for 2.1 seconds after the error which is not fatal and for 2.2 after the one which is, has its addresses then, is put in again and the guest reads; the same with the device of two functions. See "Holding on to the device" |
+| 407 | `scratch/hold3` @ `69ae4877` | tests | passed | 9 minutes, Intel Xeon 6975P-C. The third version, after the second reader, which is what the branches have: 64 tests and three random ones, no warning of the compiler for the files of the device |
+| 408 | `pci-passthrough-hotplug-v1` @ `69ae4877` | sanitize | passed | 12 minutes, AMD EPYC 7763. The same with the sanitizers and the random tests in full length, no report |
+| 409 | `pci-passthrough-hotplug-7.2-kvm` @ `6876af7e` | sim with the part errhost | passed | 21 minutes, Intel Xeon 6975P-C. All 94 pass. The third version on the 7.2 line with the KVM backend: it builds, the testcase passes, and after both errors the device is held on to (2.1 and 2.2 seconds), has its addresses, is put in again and the guest reads |
+| 410 | `pci-passthrough-hotplug-7.1-kvm` @ `16f2acff` | tests | passed | 12 minutes, Intel Xeon 6975P-C. The change on the 7.1 line with the KVM backend: it builds and the testcase passes with its 64 tests and three random ones |
+| 411 | `pci-passthrough-hotplug-7.2-kvm` @ `6876af7e` | winsim with the parts runner, win and hdawinhost, exploring | passed (1 check of the simulation fails) | 53 minutes, Intel Xeon 6975P-C. 149 pass, 1 is left out as before. Windows with the device of a drive and an audio controller, the part of run 389: after the error which the kernel takes for fatal both functions are held on to (2.1 and 2.3 seconds), the device has its addresses, is put in again, and Windows has the drive with its driver and reads from it. The one which fails is before the errors and of the script: it went on with half a line of the guest, the one about the second function after `plugpci`, which was complete a moment later. Fixed in the script, not run again |
 
 Run numbers are those GitHub shows for the `build` workflow.
