@@ -3455,6 +3455,9 @@ HRESULT Console::plugHostPCIDevice(ULONG aHostAddress)
             else if (vrc == VERR_MISMATCH)
                 hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
                                    tr("The PCI device of the host is of another kind than the one the virtual machine is built for. The release log has the details"));
+            else if (vrc == VERR_IO_NOT_READY)
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host has lost its addresses there, as a reset of its bus leaves it when nothing sets the device up again afterwards. To have the host set it up again, remove the device there and have the bus scanned again: as root, write 1 to the file 'remove' of each function of the device in /sys/bus/pci/devices and then 1 to /sys/bus/pci/rescan. After that the device has to be bound to vfio-pci again. The release log has the details"));
             else
                 hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
                                    tr("The PCI device of the host could not be put into the virtual machine (%Rrc). The release log has the details"),
