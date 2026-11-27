@@ -15,7 +15,7 @@ Updated: 2026-11-27
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
 | Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): `feat/gim-kvm-clock-option` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
-| Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26 |
+| Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26. [1012](https://github.com/VirtualBox/virtualbox/issues/1012): the timers of the KVM backend of `main`, which make a Linux guest without `kvm-clock` slow, shown with `main` as it is, since 2026-11-27 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
 ## Current step
@@ -3425,11 +3425,60 @@ says to leave the clock offered for a VM which runs with KVM on a
 Linux host, and why. It is text; no run was made for it.
 
 Not shown by a run: a host with the hypervisor of VirtualBox itself,
-a guest with more than one CPU, a guest other than Linux, and a guest
-started with `no-kvmclock` next to it. Not done: a setting in the API
-or the user interface; a change to the KVM backend of upstream for its
-timers; telling upstream of them, which is on the list of questions
-for the user (see the decisions).
+a guest with more than one CPU, and a guest other than Linux. Not
+done: a setting in the API or the user interface; a change to the KVM
+backend of upstream for its timers.
+
+**The timers of the KVM backend of upstream, told to upstream (issue
+1012, 2026-11-27).** The user said yes to telling it on 2026-11-27.
+As with issue 1009 it was shown with upstream's code alone first, and
+for that the simulation has a phase on every tree, `devtime`: a guest
+whose kernel is told not to use the clock (`no-kvmclock`, a disk of
+its own) in the VM as it is, and the usual guest in a VM which is told
+to have no paravirtualization interface. Both guests have their time
+from the devices of the VM. The time of the guest is taken as in the
+phase `kvmclock`, and a slow guest counts on a tree whose backend sets
+a timer for the deadline.
+
+**Run 387** (`main` @ `b6bea721`, upstream's code without any change,
+`sim` with the part on the runner, for finding out, 10 minutes, AMD
+EPYC 7763), with the VM without an interface only. The guest does not
+get through its start: 23 checks pass, the one of the phase fails, 2
+are the things of Main told as skipped. The kernel of the guest, which
+finds no hypervisor, checks whether its timer interrupt ticks
+(`timer_irq_works()`: more than 4 ticks within some 15 milliseconds
+here), gets too few with timers which are served every 10
+milliseconds, says that the timer is not connected to the I/O APIC and
+has it come through the 8259A. 2.6 seconds after its start the VM
+stops with a guru meditation, `VERR_NEM_IPE_5`: the backend gives an
+interrupt of the PIC to the kernel with `KVM_INTERRUPT`
+(`nemHCLnxHandleInterruptFF`), and the kernel answers EEXIST while it
+still has the one before. That is a second thing in the same backend.
+A guest which finds the KVM interface leaves the check out, which is
+why no run had come by it. Not a matter of security: what stops is the
+VM of the guest which does it.
+
+**Run 388** (the same code, 15 minutes, Intel Xeon 6975P-C), with both
+guests: 25 pass, none fails, 4 are skipped, the two things of Main and
+the two of the phase. The guest with `no-kvmclock` cannot calibrate
+the TSC against the PIT or the HPET, takes the HPET as its clock
+source, and 10 seconds of it take 91: what runs 384 and 385 had with
+the commit for request 580, with upstream's code alone. The log of
+the VM has the clock of the timers 120 seconds behind after two and a
+half minutes. The VM without an interface stops with the same guru
+meditation, at the second start of the guest; the first one ended in
+the panic of the kernel about its timer. The phase tells that as
+skipped on a tree with the backend of upstream, by the line of the
+assertion in the log.
+
+Issue 1012 has what was read, the numbers, the lines of the logs and
+the runs, and the guru meditation as the second thing which came up
+when it was tried; it says what was not tried (more than one CPU, a
+guest other than Linux, a host which is not a virtual machine itself).
+The Linux sources were looked up for it (`timer_irq_works()`, and
+`kvm_vcpu_ioctl_interrupt()` for the EEXIST). Not done yet: the phase
+on a tree with the backend of Cyberus Technology, where both guests
+have to keep time.
 
 **The tracker was read up to issue 1011 on 2026-11-27.** New since
 1004: a Linux guest with kernel 7.3 and the Guest Additions which
@@ -4206,7 +4255,8 @@ harness since WP5, saved states since the fourth part of WP6.
    Seen on 2026-11-27 with request 580: that backend does not enter the
    guest with the deadline of the next timer at all, so the tick is what
    serves every timer of a device there. See "Request 580" under
-   "Requests from the tracker of upstream".
+   "Requests from the tracker of upstream". Told to upstream on
+   2026-11-27, issue 1012.
 7b. From the reading of Main and the root port of 2026-11-25, see "Who
    waits for whom, in Main and in the root port": two changes to Main,
    which is code of upstream, on all five branches, after which the VM
@@ -4387,6 +4437,9 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | Request 580 is taken up as a configuration value of the VMM which is set as extra data, not as a setting of the API | It is the smallest thing which does what is asked, it is where VirtualBox has its settings of this kind, and the simulation can check it. An attribute of the API reaches into Main, the settings file and the frontends |
 | 2026-11-27 | The manual says to leave the clock offered for a VM which runs with KVM on a Linux host, and the checks of the time of the guest are told as skipped on a tree with the KVM backend of upstream | Runs 384 and 385: the guest without the clock runs several times too slow there, for what that backend does with the timers; run 386 has the same commit keeping time with the other backend. The backend of upstream is not changed with this request |
 | 2026-11-27 | Upstream is not told of the timers of its KVM backend for now | The yes of 2026-11-26 was for two named things. Whether this goes to the tracker as well is on the list of questions for the user |
+| 2026-11-27 | Upstream is told of the timers of its KVM backend: issue 1012 | The user said yes to it on 2026-11-27. As with issue 1009 it was shown with upstream's code alone first (runs 387 and 388) |
+| 2026-11-27 | The guru meditation of a VM without a paravirtualization interface is told in issue 1012 as a second thing, not as an issue of its own | It came up when the first thing was tried on upstream's code, the report would not be true to what was tried without it, and the late timers are what brings a guest there. The yes was for this report; an issue of its own would want another one |
+| 2026-11-27 | A phase of the simulation for a guest without a clock from an interface, on every tree (`devtime`) | On the branches for use it is a check that such a guest keeps time, which Windows guests with their time from the HPET depend on as well; on a tree with the backend of upstream it tells the numbers |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -4723,5 +4776,7 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 384 | `feat/gim-kvm-clock-option` @ `e9f4b6c8` | sim with the part runner, exploring | passed (2 checks of the simulation fail) | 15 minutes, Intel Xeon 6975P-C. Request 580 of the upstream tracker, the KVM paravirtualization interface without its clock: it builds, 33 pass, 2 are the things of Main told as skipped. The guest sets the clock up where it is offered and not where it is not, and a saved state goes on either way. The two which fail: the guest without the clock runs with its time too slow, for what the KVM backend of upstream does with the timers of a VM. See "Request 580" |
 | 385 | `feat/gim-kvm-clock-option` @ `e9f4b6c8` | sim with the part runner, exploring | passed | 20 minutes, Intel Xeon Platinum 8573C. 34 pass, none fails, 4 skipped: the two things of Main and the two about the time of the guest, which the phase takes now. With the clock 10 seconds of the guest take 11, without it 91 |
 | 386 | `scratch/kvm-clock-7.2-kvm` @ `aba26798` | sim with the part runner, exploring | passed | 17 minutes, Intel Xeon 6975P-C. The same commit on the head of the 7.2 line with the KVM backend of Cyberus Technology: all 51 pass, none skipped. Without the clock the guest takes the TSC and keeps time, 10 seconds of it in 9 |
+| 387 | `main` @ `b6bea721` | sim with the part runner, exploring | passed (1 check of the simulation fails) | 10 minutes, AMD EPYC 7763. Upstream's code without any change, with the new phase `devtime` and a VM which is told to have no paravirtualization interface: 23 pass, 2 are the things of Main told as skipped. The guest does not get through its start: its kernel finds the timer not ticking through the I/O APIC, and the VM stops with a guru meditation in the KVM backend of upstream, `VERR_NEM_IPE_5` |
+| 388 | `main` @ `b6bea721` | sim with the part runner, exploring | passed | 15 minutes, Intel Xeon 6975P-C. The same code with the phase as it is now: 25 pass, none fails, 4 skipped. A guest with `no-kvmclock` takes the HPET as its clock source and 10 seconds of it take 91; the VM without an interface stops with the same guru meditation, told as skipped on such a tree. What issue 1012 tells upstream |
 
 Run numbers are those GitHub shows for the `build` workflow.
