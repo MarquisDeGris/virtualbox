@@ -347,6 +347,14 @@ static bool     g_fTstExposeVga       = false;
 static bool     g_fTstInterceptMmio   = false;
 /** Whether tstFixtureSetup() configures function 0 not to be looked at for addresses in its BAR registers. */
 static bool     g_fTstSkipHostAddressCheck = false;
+/** How long tstFixtureSetup() and tstPortFixtureSetupEx() configure the passthrough
+ * device to hold on to a device after an error the host reported of it (ErrorHoldMs),
+ * in milliseconds.  It is 0 for most tests, which has the device let go of at once,
+ * and UINT32_MAX for configuring nothing, which leaves it at the default. */
+static uint32_t g_cMsTstErrorHold     = 0;
+/** How long they configure it to hold on to a device which doesn't answer at most
+ * (ErrorHoldMaxMs), in milliseconds; 0 for leaving it at the default. */
+static uint32_t g_cMsTstErrorHoldMax  = 0;
 /** The host address tstFixtureSetup() configures for function 0 instead of the
  * device node, NULL for configuring the device node. */
 static const char *g_pszTstHostAddressFun0 = NULL;
@@ -414,6 +422,10 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
     pCfg = tstCfgNodeCreate(pCfgInst, "Config");
     if (g_fTstLegacy)
         RTTESTI_CHECK_RC(tstCfgSetString(pCfg, "VfioGroupPath", TSTVFIO_GROUP_NODE), VINF_SUCCESS);
+    if (g_cMsTstErrorHold != UINT32_MAX)
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "ErrorHoldMs", g_cMsTstErrorHold), VINF_SUCCESS);
+    if (g_cMsTstErrorHoldMax)
+        RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "ErrorHoldMaxMs", g_cMsTstErrorHoldMax), VINF_SUCCESS);
     for (uint32_t i = 0; i < cModels; i++)
     {
         char szName[16];
@@ -4129,6 +4141,10 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
         pCfg = tstCfgNodeCreate(pCfgInst, "Config");
         if (g_cMsTstGuestRelease)
             RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "GuestReleaseTimeoutMs", g_cMsTstGuestRelease), VINF_SUCCESS);
+        if (g_cMsTstErrorHold != UINT32_MAX)
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "ErrorHoldMs", g_cMsTstErrorHold), VINF_SUCCESS);
+        if (g_cMsTstErrorHoldMax)
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfg, "ErrorHoldMaxMs", g_cMsTstErrorHoldMax), VINF_SUCCESS);
         if (g_fTstLegacy)
             RTTESTI_CHECK_RC(tstCfgSetString(pCfg, "VfioGroupPath", TSTVFIO_GROUP_NODE), VINF_SUCCESS);
         for (uint32_t i = 0; i < cModels; i++)
@@ -6312,6 +6328,583 @@ static void tstSlotVga(void)
         RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
         tstSlotVgaCheckDevice(__LINE__, pDev, 0x3c);
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Checks whether the first BAR register of a function of the fake kernel has an
+ * address, as the function itself has it.
+ *
+ * @returns true if it has one, false if not.
+ * @param   pDev                The PCI function of the fake kernel.
+ */
+static bool tstDevHostHasBar0Address(PTSTVFIODEV pDev)
+{
+    uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+    return pbCfg
+        && (   pbCfg[VBOX_PCI_BASE_ADDRESS_0 + 1]
+            || pbCfg[VBOX_PCI_BASE_ADDRESS_0 + 2]
+            || pbCfg[VBOX_PCI_BASE_ADDRESS_0 + 3]);
+}
+
+
+/**
+ * Returns the command register of a function of the fake kernel, as the function
+ * itself has it.
+ *
+ * @returns The command register, all ones on failure.
+ * @param   pDev                The PCI function of the fake kernel.
+ */
+static uint16_t tstDevHostCommand(PTSTVFIODEV pDev)
+{
+    uint8_t const *pbCfg = (uint8_t const *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+    return pbCfg ? RT_MAKE_U16(pbCfg[VBOX_PCI_COMMAND], pbCfg[VBOX_PCI_COMMAND + 1]) : UINT16_MAX;
+}
+
+
+/**
+ * Waits for a function of the fake kernel to neither decode its addresses nor
+ * act as a bus master, going by its command register.
+ *
+ * @returns true if the function is like that, false if the time is up.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   cMsTimeout          How long to wait at most.
+ */
+static bool tstDevWaitForHostQuiet(PTSTVFIODEV pDev, RTMSINTERVAL cMsTimeout)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (tstDevHostCommand(pDev) & (VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER))
+    {
+        if (RTTimeMilliTS() - msStart >= cMsTimeout)
+            return false;
+        RTThreadSleep(1);
+    }
+    return true;
+}
+
+
+/**
+ * Waits for the MSI interrupt of a function of the fake kernel to be ended: the
+ * function has nobody to tell of its first vector any more.  Each look is an
+ * interrupt of the function as long as it has somebody.
+ *
+ * @returns true if the interrupt is ended, false if the time is up.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   cMsTimeout          How long to wait at most.
+ */
+static bool tstDevWaitForMsiEnded(PTSTVFIODEV pDev, RTMSINTERVAL cMsTimeout)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    while (tstVfioKrnlDevTriggerIrq(pDev, VFIO_PCI_MSI_IRQ_INDEX, 0) != VERR_NOT_FOUND)
+    {
+        if (RTTimeMilliTS() - msStart >= cMsTimeout)
+            return false;
+        RTThreadSleep(1);
+    }
+    return true;
+}
+
+
+/**
+ * Puts the device into its slot like tstDevSlotAttach(), and tries again for a
+ * while if the device which was in the slot is held on to still: the device
+ * file is closed a moment before the device counts as let go of.
+ *
+ * @returns VBox status code.
+ * @param   pDevIns             The device instance of the passthrough device.
+ */
+static int tstDevSlotAttachAfterHold(PPDMDEVINS pDevIns)
+{
+    uint64_t const msStart = RTTimeMilliTS();
+    int            rc;
+    while (   (rc = tstDevSlotAttach(pDevIns)) == VERR_RESOURCE_IN_USE
+           && RTTimeMilliTS() - msStart < RT_MS_5SEC)
+        RTThreadSleep(1);
+    return rc;
+}
+
+
+/** What tstErrorHoldPowerOffHook() goes by: how many reads of the config space of a
+ * function are left until the host asks for the function back, 0 for not asking. */
+static uint32_t volatile g_cTstErrorHoldReadsLeft = 0;
+
+/**
+ * @callback_method_impl{FNTSTVFIOCFGREAD, Has the host ask for a function back
+ *      which is held on to\, some looks of the device at the function after the
+ *      test said so: the VM is being powered off by then.}
+ */
+static DECLCALLBACK(void) tstErrorHoldPowerOffHook(PTSTVFIODEV pDev, uint32_t offReg, size_t cb, void *pvUser)
+{
+    RT_NOREF(offReg, cb, pvUser);
+    uint32_t const cLeft = ASMAtomicReadU32(&g_cTstErrorHoldReadsLeft);
+    if (   cLeft
+        && ASMAtomicCmpXchgU32(&g_cTstErrorHoldReadsLeft, cLeft - 1, cLeft)
+        && cLeft == 1)
+        tstVfioKrnlDevRequest(pDev);
+}
+
+
+/**
+ * The host reports an error of a device which is not in a hot-plug capable slot
+ * and resets the bus the device is on, which leaves the device without its
+ * addresses and not answering for a while.  The guest loses the function at
+ * once.  The device is held on to until it answers again, so what the host
+ * puts back into it when it is let go of gets there: it has its addresses
+ * afterwards.  A second error and a reset of the VM meanwhile change nothing
+ * about that.  A device the host wants back is not held on to, and the times
+ * which can be configured have their limits.
+ */
+static void tstErrorHold(void)
+{
+    RTTestISub("A device is held on to after an error the host reported");
+
+    /* Variant 0: the device node; 1: the legacy interface; 2: the host wants the device back, which is no error. */
+    for (unsigned iVariant = 0; iVariant < 3; iVariant++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        g_fTstLegacy         = iVariant == 1;
+        g_cMsTstErrorHold    = iVariant == 2 ? 10 * RT_MS_1SEC : 300;
+        g_cMsTstErrorHoldMax = 5 * RT_MS_1MIN;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_fTstLegacy         = false;
+        g_cMsTstErrorHold    = 0;
+        g_cMsTstErrorHoldMax = 0;
+        RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("variant %u: pci-vfio: %Rrc - %s\n", iVariant, rc, tstPdmGetLastError()));
+        if (RT_SUCCESS(rc))
+        {
+            uint32_t const cReqsBefore = tstPdmGetRequestCount();
+            tstPdmPowerOn();
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            tstPdmPciCfgWrite(0, TST_PCI_DEVFN, VBOX_PCI_COMMAND, VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER, 2);
+            RTTESTI_CHECK_MSG(tstDevHostHasBar0Address(pDev), ("variant %u\n", iVariant));
+
+            if (iVariant == 2)
+            {
+                tstVfioKrnlDevRemove(pDev);
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_5SEC),
+                                  ("the device is held on to though the host wants it back\n"));
+            }
+            else
+            {
+                tstVfioKrnlDevHostReset(pDev);
+                tstVfioKrnlDevSignalError(pDev);
+
+                /* The guest loses the function. */
+                uint64_t const msStart = RTTimeMilliTS();
+                while (   tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) != UINT32_C(0xffff)
+                       && RTTimeMilliTS() - msStart < RT_MS_5SEC)
+                    RTThreadSleep(1);
+                RTTESTI_CHECK_MSG(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == UINT32_C(0xffff), ("variant %u\n", iVariant));
+
+                /* Another error, and the VM is reset: neither is anything to the device. */
+                uint32_t const cResetsBefore    = tstVfioKrnlDevGetResetCount(pDev);
+                uint32_t const cBusResetsBefore = tstVfioKrnlDevGetBusResetCount(pDev);
+                tstVfioKrnlDevSignalError(pDev);
+                tstPdmReset();
+
+                /* The time the device is held on to is up, but it doesn't answer: it is not let go of. */
+                RTThreadSleep(700);
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 1,
+                                  ("variant %u: the device is open %u time(s)\n", iVariant, tstVfioKrnlDevGetOpenCount(pDev)));
+                RTTESTI_CHECK_MSG(!tstDevHostHasBar0Address(pDev), ("variant %u\n", iVariant));
+                RTTESTI_CHECK_MSG(   tstVfioKrnlDevGetResetCount(pDev)    == cResetsBefore
+                                  && tstVfioKrnlDevGetBusResetCount(pDev) == cBusResetsBefore,
+                                  ("variant %u: the device was reset while it was held on to\n", iVariant));
+
+                /* It answers again, is let go of, and has what the host puts back. */
+                tstVfioKrnlDevSetSilent(pDev, false);
+                RTTESTI_CHECK_MSG(tstWaitForRelease(pDev, cReqsBefore, RT_MS_10SEC),
+                                  ("variant %u: the device has not let go of the function\n", iVariant));
+                RTTESTI_CHECK_MSG(tstDevHostHasBar0Address(pDev), ("variant %u: the device is left without its addresses\n", iVariant));
+                tstCheckFunctionIsGone(pDev, TST_PCI_DEVFN, TST_BAR0_ADDR, "held on to after an error");
+            }
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                              ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
+        }
+        tstFixtureTeardown();
+    }
+
+    /* The time is ten seconds at most, and the longest time is not below it and five minutes at most. */
+    static const struct { uint32_t cMsHold, cMsHoldMax; bool fValid; } s_aTimes[] =
+    {
+        { 10 * RT_MS_1SEC,                    0, true  },
+        { 10 * RT_MS_1SEC + 1,                0, false },
+        {             300,                  299, false },
+        {             300,                  300, true  },
+        {             300,       5 * RT_MS_1MIN, true  },
+        {             300,   5 * RT_MS_1MIN + 1, false },
+    };
+    for (unsigned i = 0; i < RT_ELEMENTS(s_aTimes); i++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        PTSTVFIODEV pDev = NULL;
+        g_cMsTstErrorHold    = s_aTimes[i].cMsHold;
+        g_cMsTstErrorHoldMax = s_aTimes[i].cMsHoldMax;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_cMsTstErrorHold    = 0;
+        g_cMsTstErrorHoldMax = 0;
+        if (s_aTimes[i].fValid)
+            RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("times %u: %Rrc - %s\n", i, rc, tstPdmGetLastError()));
+        else
+            RTTESTI_CHECK_MSG(rc == VERR_OUT_OF_RANGE, ("times %u: %Rrc\n", i, rc));
+        tstFixtureTeardown();
+    }
+}
+
+
+/**
+ * The host reports an error of the device in the slot and resets the bus the
+ * device is on, which leaves the device without its addresses and not
+ * answering for a while.  The guest loses the device at once, but the device
+ * is held on to until it answers again, so what the host puts back into it
+ * when it is let go of gets there: it has its addresses afterwards and goes
+ * into the slot again.  Let go of at once, it is left without them.
+ *
+ * The fake kernel resets the bus before it tells of the error and has nobody
+ * wait for the reset to be over; the real one tells first and has whoever asks
+ * the device for something wait in most cases.
+ */
+static void tstSlotErrorHold(void)
+{
+    RTTestISub("Hot-plug slot: a device is held on to after an error the host reported");
+
+    static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
+    tstModelInitDefault(&s_Model);
+    tstModelSetBar(&s_Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+    tstModelSetBar(&s_Model, 2, _1M, PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_BAR64 | PCI_ADDRESS_SPACE_MEM_PREFETCH);
+
+    /*
+     * The host resets the bus.  Variant 0: the device is held on to; 1: it is let
+     * go of at once, as it is configured; 2: like 0 with the legacy interface.
+     */
+    for (unsigned iVariant = 0; iVariant < 3; iVariant++)
+    {
+        bool const  fHold       = iVariant != 1;
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        g_fTstLegacy         = iVariant == 2;
+        g_cMsTstErrorHold    = fHold ? 200 : 0;
+        g_cMsTstErrorHoldMax = fHold ? 5 * RT_MS_1MIN : 0;
+        int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_fTstLegacy         = false;
+        g_cMsTstErrorHold    = 0;
+        g_cMsTstErrorHoldMax = 0;
+        if (RT_SUCCESS(rc))
+        {
+            tstSlotGuestEnableDevice();
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+            tstSlotCheckMsi(__LINE__, pDev);
+            RTTESTI_CHECK_MSG(tstDevHostHasBar0Address(pDev), ("variant %u\n", iVariant));
+            uint32_t const cFdsOccupied = tstVfioKrnlGetOpenFdCount();
+
+            for (unsigned iRound = 0; iRound < 2; iRound++)
+            {
+                tstVfioKrnlDevHostReset(pDev);
+                tstVfioKrnlDevSignalError(pDev);
+
+                /* The guest loses the device at once. */
+                RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("variant %u, round %u\n", iVariant, iRound));
+                RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == UINT32_C(0xffff),
+                                  ("variant %u, round %u\n", iVariant, iRound));
+                if (fHold)
+                {
+                    /* The device is still open, its interrupts are ended, and no device is put into the
+                       slot.  It can't be let go of meanwhile, as it doesn't answer. */
+                    RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 1,
+                                      ("variant %u, round %u: the device is open %u time(s)\n", iVariant, iRound,
+                                       tstVfioKrnlDevGetOpenCount(pDev)));
+                    RTTESTI_CHECK_MSG(tstDevWaitForMsiEnded(pDev, RT_MS_5SEC),
+                                      ("variant %u, round %u: the interrupt of the device is set up still\n", iVariant, iRound));
+                    RTTESTI_CHECK_MSG(tstVfioKrnlGetInheritableFdCount() == 0,
+                                      ("variant %u, round %u: %u file descriptor(s) a child process would get\n", iVariant, iRound,
+                                       tstVfioKrnlGetInheritableFdCount()));
+
+                    /* What the guest had on its way to the device when it lost the device gets the
+                       interrupt set up again: nothing of that gets to the guest, and it is ended again. */
+                    uint32_t const cMsisBefore = tstPdmMsiGetCount();
+                    RTTESTI_CHECK_RC(tstVfioKrnlDevIrqReinstate(pDev, VFIO_PCI_MSI_IRQ_INDEX), VINF_SUCCESS);
+                    RTTESTI_CHECK_MSG(tstDevWaitForMsiEnded(pDev, RT_MS_5SEC),
+                                      ("variant %u, round %u: the interrupt of the device stays set up\n", iVariant, iRound));
+                    RTThreadSleep(100);
+                    RTTESTI_CHECK_MSG(tstPdmMsiGetCount() == cMsisBefore,
+                                      ("variant %u, round %u: %u interrupt(s) of the device got to the guest\n", iVariant, iRound,
+                                       tstPdmMsiGetCount() - cMsisBefore));
+                    int const rcHeld = tstDevSlotAttach(pDevInsDev);
+                    RTTESTI_CHECK_MSG(rcHeld == VERR_RESOURCE_IN_USE, ("variant %u, round %u: %Rrc\n", iVariant, iRound, rcHeld));
+                    RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES),
+                                      ("variant %u, round %u\n", iVariant, iRound));
+
+                    /* Another error is nothing to a device which is held on to.  The time it is held on
+                       to is up then, but it doesn't answer: what the host puts back would be lost on
+                       it, so it is not let go of. */
+                    tstVfioKrnlDevSignalError(pDev);
+                    RTThreadSleep(700);
+                    RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 1,
+                                      ("variant %u, round %u: the device is open %u time(s)\n", iVariant, iRound,
+                                       tstVfioKrnlDevGetOpenCount(pDev)));
+                    RTTESTI_CHECK_MSG(!tstDevHostHasBar0Address(pDev), ("variant %u, round %u\n", iVariant, iRound));
+
+                    /* It answers again and is let go of. */
+                    tstVfioKrnlDevSetSilent(pDev, false);
+                    RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u, round %u\n", iVariant, iRound));
+                    RTTESTI_CHECK_MSG(tstDevHostHasBar0Address(pDev),
+                                      ("variant %u, round %u: the device is left without its addresses\n", iVariant, iRound));
+                }
+                else
+                {
+                    /* Let go of while it doesn't answer: nothing is put back. */
+                    RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("variant %u, round %u\n", iVariant, iRound));
+                    tstVfioKrnlDevSetSilent(pDev, false);
+                    RTTESTI_CHECK_MSG(!tstDevHostHasBar0Address(pDev), ("variant %u, round %u\n", iVariant, iRound));
+                }
+                tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+
+                int const rcAttach = tstDevSlotAttachAfterHold(pDevInsDev);
+                if (!fHold)
+                {
+                    RTTESTI_CHECK_MSG(rcAttach == VERR_IO_NOT_READY, ("variant %u: %Rrc\n", iVariant, rcAttach));
+                    RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("variant %u\n", iVariant));
+                    break;
+                }
+                RTTESTI_CHECK_MSG(rcAttach == VINF_SUCCESS, ("variant %u, round %u: %Rrc\n", iVariant, iRound, rcAttach));
+                tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+                tstSlotCheckMsi(__LINE__, pDev);
+                RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied,
+                                  ("variant %u, round %u: %u file descriptors open, were %u\n", iVariant, iRound,
+                                   tstVfioKrnlGetOpenFdCount(), cFdsOccupied));
+            }
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                              ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * What ends the time a device is held on to, and what a device is not held on
+     * to for.  Variant 0: the host resets nothing and the device answers, it is let
+     * go of when its time is up and not before, also the second time; 1: it is
+     * kept off the bus while it is held on to, and the host gets it without the
+     * time being up when it wants it back; 2: the VM is powered off, which waits
+     * for the time to be up; 3: the same with a device which doesn't answer, which
+     * is waited for no longer than that; 4: nothing is configured, and the device
+     * is held on to for two seconds; 5: a device which doesn't answer is let go of
+     * when the longest time is up, and is left without its addresses; 6: a device
+     * which is taken out of the slot on request is let go of at once; 7: so is
+     * one the host wants back; 8: the host gets a device it wants back while the
+     * VM is being powered off; 9: a device which was unplugged is let go of at
+     * once.
+     */
+    uint16_t const fCmdActive = VBOX_PCI_COMMAND_IO | VBOX_PCI_COMMAND_MEMORY | VBOX_PCI_COMMAND_MASTER;
+    for (unsigned iVariant = 0; iVariant < 10; iVariant++)
+    {
+        PTSTVFIODEV pDev        = NULL;
+        PPDMDEVINS  pDevInsPort = NULL;
+        PPDMDEVINS  pDevInsDev  = NULL;
+        switch (iVariant)
+        {
+            case 0:  g_cMsTstErrorHold = 300; break;
+            case 2:
+            case 3:  g_cMsTstErrorHold = 500; break;
+            case 4:  g_cMsTstErrorHold = UINT32_MAX; break;
+            case 5:  g_cMsTstErrorHold = 200; g_cMsTstErrorHoldMax = 800; break;
+            default: g_cMsTstErrorHold = 10 * RT_MS_1SEC; break;
+        }
+        g_cMsTstGuestRelease = RT_MS_1MIN;
+        int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_cMsTstErrorHold    = 0;
+        g_cMsTstErrorHoldMax = 0;
+        g_cMsTstGuestRelease = 0;
+        bool fTornDown = false;
+        if (RT_SUCCESS(rc))
+        {
+            tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_BASE_ADDRESS_0, TST_BAR0_ADDR, 4);
+            tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_BASE_ADDRESS_1, TST_IOBAR_PORT, 4);
+            tstPdmPciCfgWrite(TSTPORT_SEC_BUS, 0, VBOX_PCI_COMMAND, fCmdActive, 2);
+            RTTESTI_CHECK_MSG(tstSlotGuestReachesDevice(pDev), ("variant %u\n", iVariant));
+            RTTESTI_CHECK_MSG((tstDevHostCommand(pDev) & fCmdActive) == fCmdActive,
+                              ("variant %u: command %#x\n", iVariant, tstDevHostCommand(pDev)));
+
+            uint64_t const msStart = RTTimeMilliTS();
+            if (iVariant == 6)
+            {
+                RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("the device is held on to after it was taken out on request\n"));
+            }
+            else if (iVariant == 7)
+            {
+                tstVfioKrnlDevRequest(pDev);
+                RTTESTI_CHECK_MSG(tstSlotGuestLetGoWhenAsked(RT_MS_5SEC), ("the guest was not asked\n"));
+                RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_5SEC), ("the device is held on to though the host wants it back\n"));
+            }
+            else if (iVariant == 9)
+            {
+                tstVfioKrnlDevRemove(pDev);
+                RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_5SEC), ("the device is held on to though it was unplugged\n"));
+            }
+            else
+            {
+                if (iVariant == 3 || iVariant == 5)
+                    tstVfioKrnlDevHostReset(pDev);
+                tstVfioKrnlDevSignalError(pDev);
+            }
+            RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("variant %u\n", iVariant));
+
+            if (iVariant == 2 || iVariant == 3 || iVariant == 8)
+            {
+                if (iVariant == 8)
+                {
+                    /* The host asks after the device has looked at the function a few more times. */
+                    tstVfioKrnlSetCfgReadHook(tstErrorHoldPowerOffHook, NULL);
+                    ASMAtomicWriteU32(&g_cTstErrorHoldReadsLeft, 6);
+                }
+                tstFixtureTeardown();
+                fTornDown = true;
+                ASMAtomicWriteU32(&g_cTstErrorHoldReadsLeft, 0);
+                uint64_t const cMsHeld = RTTimeMilliTS() - msStart;
+                if (iVariant == 8)
+                    RTTESTI_CHECK_MSG(cMsHeld < 8 * RT_MS_1SEC, ("the host was kept waiting, powering off took %RU64 ms\n", cMsHeld));
+                else
+                {
+                    RTTESTI_CHECK_MSG(cMsHeld >= 500, ("variant %u: the device was held on to for %RU64 ms only\n", iVariant, cMsHeld));
+                    RTTESTI_CHECK_MSG(cMsHeld < 12 * RT_MS_1SEC, ("variant %u: powering off took %RU64 ms\n", iVariant, cMsHeld));
+                }
+            }
+            else
+            {
+                if (iVariant == 1)
+                {
+                    /* Held on to for ten seconds, and told to keep off the bus long before these are up. */
+                    RTTESTI_CHECK_MSG(tstDevWaitForHostQuiet(pDev, RT_MS_5SEC), ("command %#x\n", tstDevHostCommand(pDev)));
+
+                    /* A write of the guest to the command register which was on its way when the guest
+                       lost the device switches the device on again, and it is told once more. */
+                    uint8_t *pbCfg = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_CONFIG_REGION_INDEX);
+                    RTTESTI_CHECK(pbCfg != NULL);
+                    if (pbCfg)
+                        pbCfg[VBOX_PCI_COMMAND] |= (uint8_t)fCmdActive;
+                    RTTESTI_CHECK_MSG(tstDevWaitForHostQuiet(pDev, RT_MS_5SEC), ("command %#x\n", tstDevHostCommand(pDev)));
+                    RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 1,
+                                      ("the device is open %u time(s)\n", tstVfioKrnlDevGetOpenCount(pDev)));
+                    tstVfioKrnlDevRequest(pDev);
+                }
+                RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, iVariant == 1 ? RT_MS_5SEC : RT_MS_10SEC), ("variant %u\n", iVariant));
+                uint64_t const cMsHeld = RTTimeMilliTS() - msStart;
+                if (iVariant == 0)
+                {
+                    RTTESTI_CHECK_MSG(cMsHeld >= 300, ("the device was held on to for %RU64 ms only\n", cMsHeld));
+                    RTTESTI_CHECK_MSG(!(tstDevHostCommand(pDev) & fCmdActive),
+                                      ("the device was not told to keep off the bus: command %#x\n", tstDevHostCommand(pDev)));
+                }
+                else if (iVariant == 4)
+                    RTTESTI_CHECK_MSG(cMsHeld >= 2 * RT_MS_1SEC, ("the device was held on to for %RU64 ms only\n", cMsHeld));
+                else if (iVariant == 5)
+                    RTTESTI_CHECK_MSG(cMsHeld >= 800, ("the device was held on to for %RU64 ms only\n", cMsHeld));
+
+                /* It goes into the slot again, unless it was let go of while it didn't answer or is gone. */
+                tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+                if (iVariant == 5)
+                {
+                    tstVfioKrnlDevSetSilent(pDev, false);
+                    RTTESTI_CHECK_MSG(!tstDevHostHasBar0Address(pDev), ("variant %u\n", iVariant));
+                    RTTESTI_CHECK_RC(tstDevSlotAttachAfterHold(pDevInsDev), VERR_IO_NOT_READY);
+                }
+                else if (iVariant != 9)
+                {
+                    RTTESTI_CHECK_MSG(tstDevHostHasBar0Address(pDev), ("variant %u\n", iVariant));
+                    int const rcAttach = iVariant >= 6 ? tstDevSlotAttach(pDevInsDev) : tstDevSlotAttachAfterHold(pDevInsDev);
+                    RTTESTI_CHECK_MSG(rcAttach == VINF_SUCCESS, ("variant %u: %Rrc\n", iVariant, rcAttach));
+                    tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+                }
+
+                /* The time begins anew for the next error. */
+                if (iVariant == 0)
+                {
+                    uint64_t const msStart2 = RTTimeMilliTS();
+                    tstVfioKrnlDevSignalError(pDev);
+                    RTTESTI_CHECK(tstSlotWaitForEmpty(RT_MS_5SEC));
+                    RTTESTI_CHECK(tstSlotWaitForRelease(pDev, RT_MS_10SEC));
+                    RTTESTI_CHECK_MSG(RTTimeMilliTS() - msStart2 >= 300,
+                                      ("the device was held on to for %RU64 ms only the second time\n", RTTimeMilliTS() - msStart2));
+                }
+                RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                                  ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant, tstVfioKrnlGetViolationCount()));
+            }
+        }
+        if (!fTornDown)
+            tstFixtureTeardown();
+    }
+
+    /*
+     * A device of two functions: both are held on to, each until it answers, and
+     * no device goes into the slot while one of them is.
+     */
+    static TSTVFIODEVCFG s_aModels[2];
+    tstModelInit(&s_aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+    tstModelInit(&s_aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+    tstModelSetU16(&s_aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_aModels); i++)
+    {
+        tstModelSetBar(&s_aModels[i], 0, _64K, PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&s_aModels[i], TST_EXP_CAP_OFF);
+    }
+    PTSTVFIODEV apDevs[2]   = { NULL, NULL };
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    g_cMsTstErrorHold    = 200;
+    g_cMsTstErrorHoldMax = 5 * RT_MS_1MIN;
+    int rc = tstSlotFixtureSetup(s_aModels, RT_ELEMENTS(s_aModels), apDevs, &pDevInsPort, &pDevInsDev);
+    g_cMsTstErrorHold    = 0;
+    g_cMsTstErrorHoldMax = 0;
+    if (RT_SUCCESS(rc))
+    {
+        tstSlotGuestEnableDevice();
+        tstVfioKrnlDevHostReset(apDevs[0]);
+        tstVfioKrnlDevHostReset(apDevs[1]);
+        tstVfioKrnlDevSignalError(apDevs[1]);
+        RTTESTI_CHECK(tstSlotWaitForEmpty(RT_MS_5SEC));
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 1 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 1,
+                          ("function 0 is open %u time(s), function 1 %u time(s)\n",
+                           tstVfioKrnlDevGetOpenCount(apDevs[0]), tstVfioKrnlDevGetOpenCount(apDevs[1])));
+
+        /* The first function answers again and is let go of, the second is held on to still. */
+        RTThreadSleep(500);
+        tstVfioKrnlDevSetSilent(apDevs[0], false);
+        RTTESTI_CHECK(tstSlotWaitForRelease(apDevs[0], RT_MS_10SEC));
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(apDevs[1]) == 1,
+                          ("function 1 is open %u time(s)\n", tstVfioKrnlDevGetOpenCount(apDevs[1])));
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_RESOURCE_IN_USE);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0);
+
+        /* The second one answers too. */
+        tstVfioKrnlDevSetSilent(apDevs[1], false);
+        RTTESTI_CHECK(tstSlotWaitForRelease(apDevs[1], RT_MS_10SEC));
+        RTTESTI_CHECK(tstDevHostHasBar0Address(apDevs[0]));
+        RTTESTI_CHECK(tstDevHostHasBar0Address(apDevs[1]));
+        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+        RTTESTI_CHECK_RC(tstDevSlotAttachAfterHold(pDevInsDev), VINF_SUCCESS);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, apDevs[0]);
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
+
+        /* Once more, and the host wants the device back while both functions are held on to:
+           it gets both, by asking for one. */
+        tstVfioKrnlDevHostReset(apDevs[0]);
+        tstVfioKrnlDevHostReset(apDevs[1]);
+        tstVfioKrnlDevSignalError(apDevs[0]);
+        RTTESTI_CHECK(tstSlotWaitForEmpty(RT_MS_5SEC));
+        RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 1 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 1,
+                          ("function 0 is open %u time(s), function 1 %u time(s)\n",
+                           tstVfioKrnlDevGetOpenCount(apDevs[0]), tstVfioKrnlDevGetOpenCount(apDevs[1])));
+        tstVfioKrnlDevRequest(apDevs[1]);
+        RTTESTI_CHECK(tstSlotWaitForRelease(apDevs[1], RT_MS_5SEC));
+        RTTESTI_CHECK(tstSlotWaitForRelease(apDevs[0], RT_MS_5SEC));
         RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
                           ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
     }
@@ -8681,6 +9274,8 @@ int main()
     tstSlotStartEmpty();
     tstSlotVga();
     tstSlotLostAddresses();
+    tstErrorHold();
+    tstSlotErrorHold();
     tstSlotSavedState();
     tstSlotSavedStateRefused();
     tstSlotStateHostRequest();
