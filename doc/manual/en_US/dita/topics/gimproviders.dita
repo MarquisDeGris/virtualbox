@@ -55,6 +55,43 @@
         </p>
       </li>
     </ul>
+    <p>
+      The paravirtualized clock of the KVM interface can be left out of what a
+      VM offers to its guest. A Linux guest which is not offered the clock
+      takes another clock source, as it does when it is started with the kernel
+      parameter <codeph>no-kvmclock</codeph>, and is offered the rest of the
+      interface as before. The setting is for VMs whose paravirtualization
+      interface is KVM; a VM with another interface ignores it. Use the
+      following command while the VM is powered off:
+    </p>
+    <pre xml:space="preserve">$ VBoxManage setextradata <varname>VM-name</varname> "VBoxInternal/GIM/KVM/Clock" 0</pre>
+    <p>
+      To have the clock offered again, which is the default, use:
+    </p>
+    <pre xml:space="preserve">$ VBoxManage setextradata <varname>VM-name</varname> "VBoxInternal/GIM/KVM/Clock"</pre>
+    <p>
+      The setting applies when the VM is started from the powered off state. A
+      VM which is resumed from a saved state goes on with the clock its guest
+      was using when the state was saved.
+    </p>
+    <p>
+      Note that the clock has a second effect. When a guest sets it up, a VM
+      which runs with the <ph conkeyref="vbox-conkeyref-phrases/product-name"/>
+      hypervisor lets the guest read the time stamp counter (TSC) of the host
+      processor directly from then on, where the host processor is suitable for
+      it. A guest which does not set the clock up leaves the VM with its
+      default handling of the TSC, in which every read of the TSC by a guest
+      with more than one virtual CPU is emulated. Such a guest can get the
+      time more slowly without the clock than with it.
+    </p>
+    <p>
+      Leave the clock offered for a VM which runs with KVM as its execution
+      engine on a Linux host. The timers of the devices of such a VM are served
+      up to 10 milliseconds late at present. A Linux guest without the clock
+      has to find out the frequency of the TSC with the help of those devices,
+      and where it cannot rely on the result it takes its time from the HPET,
+      which is one of them: its clock falls behind.
+    </p>
   </body>
   
 </topic>

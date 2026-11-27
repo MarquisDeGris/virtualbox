@@ -31,6 +31,7 @@
 *********************************************************************************************************************************/
 #define LOG_GROUP LOG_GROUP_GIM
 #include <VBox/vmm/gim.h>
+#include <VBox/vmm/cfgm.h>
 #include <VBox/vmm/cpum.h>
 #include <VBox/vmm/hm.h>
 #include <VBox/vmm/pdmapi.h>
@@ -224,14 +225,40 @@ static int gimR3KvmUpdateSystemTime(PVM pVM, PVMCPU pVCpu)
  *
  * @returns VBox status code.
  * @param   pVM         The cross context VM structure.
+ * @param   pGimCfg     The GIM CFGM node.
  */
-VMMR3_INT_DECL(int) gimR3KvmInit(PVM pVM)
+VMMR3_INT_DECL(int) gimR3KvmInit(PVM pVM, PCFGMNODE pGimCfg)
 {
     AssertReturn(pVM, VERR_INVALID_PARAMETER);
     AssertReturn(pVM->gim.s.enmProviderId == GIMPROVIDERID_KVM, VERR_INTERNAL_ERROR_5);
 
     int rc;
     PGIMKVM pKvm = &pVM->gim.s.u.Kvm;
+
+    /*
+     * Read configuration.
+     */
+    PCFGMNODE pCfgKvm = CFGMR3GetChild(pGimCfg, "KVM");
+    if (pCfgKvm)
+    {
+        /*
+         * Validate the KVM settings.
+         */
+        rc = CFGMR3ValidateConfig(pCfgKvm, "/KVM/",
+                                  "Clock",
+                                  "" /* pszValidNodes */, "GIM/KVM" /* pszWho */, 0 /* uInstance */);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+
+    /** @cfgm{/GIM/KVM/Clock, bool, true}
+     * Whether the guest is offered the paravirtualized clock (kvm-clock).  A
+     * guest which is not offered it takes another clock source, the way a Linux
+     * guest does which is started with "no-kvmclock".  The rest of the interface
+     * is offered either way. */
+    bool fClock;
+    rc = CFGMR3QueryBoolDef(pCfgKvm, "Clock", &fClock, true);
+    AssertLogRelRCReturn(rc, rc);
 
     /*
      * Determine interface capabilities based on the version.
@@ -249,6 +276,15 @@ VMMR3_INT_DECL(int) gimR3KvmInit(PVM pVM)
                         //| GIM_KVM_BASE_FEAT_PV_EOI
                         | GIM_KVM_BASE_FEAT_PV_UNHALT
                         ;
+        if (!fClock)
+        {
+            /* Only the offer goes, the MSRs of the clock stay as they are.  A VM
+               which loads a saved state goes on with what the state says its guest
+               was offered (CPUM loads the CPUID leaves, gimR3KvmLoad the features),
+               and that guest may be using the clock. */
+            pKvm->uBaseFeat &= ~(uint32_t)(GIM_KVM_BASE_FEAT_CLOCK_OLD | GIM_KVM_BASE_FEAT_CLOCK);
+            LogRel(("GIM: KVM: Not offering the paravirtualized clock to the guest\n"));
+        }
         /* Rest of the features are determined in gimR3KvmInitCompleted(). */
     }
 
@@ -481,9 +517,18 @@ VMMR3_INT_DECL(int) gimR3KvmLoad(PVM pVM, PSSMHANDLE pSSM)
     /*
      * Load per-VM data.
      */
+    uint32_t const fClockFeat   = GIM_KVM_BASE_FEAT_CLOCK_OLD | GIM_KVM_BASE_FEAT_CLOCK;
+    uint32_t const uBaseFeatCfg = pKvm->uBaseFeat;
     SSMR3GetU64(pSSM, &pKvm->u64WallClockMsr);
     rc = SSMR3GetU32(pSSM, &pKvm->uBaseFeat);
     AssertRCReturn(rc, rc);
+
+    /* The features of the saved state take the place of the configured ones.  Where
+       the two differ in the clock, say so: what gimR3KvmInit has logged about the
+       clock is not what the guest of this state was offered. */
+    if (RT_BOOL(pKvm->uBaseFeat & fClockFeat) != RT_BOOL(uBaseFeatCfg & fClockFeat))
+        LogRel(("GIM: KVM: The saved state is of a VM which %s the paravirtualized clock, unlike what is configured now\n",
+                (pKvm->uBaseFeat & fClockFeat) ? "offered" : "did not offer"));
 
     return VINF_SUCCESS;
 }
