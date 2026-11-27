@@ -60,7 +60,14 @@ else
 fi
 dmesg | grep -i -E 'kvm' | cut -c1-200 | tail -n 6
 
-modprobe vfio-pci || echo "modprobe vfio-pci failed"
+if [ -n "${SIM_VGANONE:-}" ]; then
+    # A host which does not give the legacy VGA ranges of a graphics card
+    # away: vfio-pci takes that when it is loaded.
+    modprobe vfio-pci disable_vga=1 || echo "modprobe vfio-pci disable_vga=1 failed"
+    echo "vfio-pci, disable_vga: $(cat /sys/module/vfio_pci/parameters/disable_vga 2>&1)"
+else
+    modprobe vfio-pci || echo "modprobe vfio-pci failed"
+fi
 modprobe iommufd 2> /dev/null
 if [ -c /dev/iommu ]; then
     stage "/dev/iommu is there" ok
@@ -368,7 +375,7 @@ SIM_BOOT_WAIT=${SIM_BOOT_WAIT:-300} \
 SIM_PATIENCE=${SIM_PATIENCE:-3} \
     bash "$SIM_DIR/vbox-phases.sh" $PHASES
 
-if [ "$WHERE" = errhost ] || [ "$WHERE" = mferrhost ] || [ "$WHERE" = plughost ] || [ "$WHERE" = mfplughost ] || [ "$WHERE" = swplughost ]; then
+if [ "$WHERE" = errhost ] || [ "$WHERE" = mferrhost ] || [ "$WHERE" = plughost ] || [ "$WHERE" = mfplughost ] || [ "$WHERE" = swplughost ] || [ "$WHERE" = vganohost ]; then
     # This machine is for what its kernel does about an error of the device,
     # and for nothing which comes after that.
     echo "==== $WHERE: up for $(cut -d' ' -f1 /proc/uptime) s; kernel messages about the IOMMU and VFIO"

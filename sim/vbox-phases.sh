@@ -2764,6 +2764,68 @@ phase_endpaused()
 }
 
 
+# A VM which is to have the legacy VGA ranges of a graphics card (ExposeVga),
+# on a host whose kernel does not give them away: vfio-pci is loaded with
+# disable_vga in the machine of this part (l1.sh), and a kernel which was
+# built without CONFIG_VFIO_PCI_VGA is the other way to get there.  The VM
+# gets the card by extra data, as the top of DevPciVfio.cpp says, which every
+# tree with the device takes.  It must not start, and what it gives for a
+# reason is told: a tree with this work names what the kernel lacks, the code
+# of upstream tells of a region and of an error number.
+phase_vganone()
+{
+    local n node= said key
+    PHASE=vganone
+    reset_vm
+    if [ "$(cat /sys/module/vfio_pci/parameters/disable_vga 2> /dev/null)" != Y ]; then
+        stage "the kernel of the host gives no legacy VGA ranges away" skipped "vfio-pci is not loaded with disable_vga in this machine"
+        end_phase
+        return 0
+    fi
+    stage "the kernel of the host gives no legacy VGA ranges away" ok "vfio-pci has disable_vga set"
+    for n in "/sys/bus/pci/devices/$HOSTADDR"/vfio-dev/vfio*; do
+        [ -e "$n" ] && node=/dev/vfio/devices/${n##*/}
+    done
+    echo "    the card is $HOSTADDR, class $(cat "/sys/bus/pci/devices/$HOSTADDR/class" 2>&1), its node $node"
+    run modifyvm "$VM" --graphicscontroller none
+    run setextradata "$VM" "VBoxInternal/Devices/ich9pcibridge/0/Config/ExpressEnabled" 1
+    run setextradata "$VM" "VBoxInternal/Devices/ich9pcibridge/0/Config/ExpressPortType" RootCmplxRootPort
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/VfioPath" "$node"
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/ExposeVga" 1
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/Config/IommuPath" /dev/iommu
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/PCIBusNo" 1
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/PCIDeviceNo" 0
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/PCIFunctionNo" 0
+    run setextradata "$VM" "VBoxInternal/Devices/pci-vfio/0/Trusted" 1
+    if start_vm && wait_state running 20; then
+        stage "a VM which is to have the legacy VGA ranges of the card does not start" FAILED "it runs"
+        grep -a -E 'VFIO#0' "$VMDIR/Logs/VBox.log" 2> /dev/null | grep -a -v -E 'flags:|index:|cap_offset:|size:|offset:|count:' | tail -n 12 | awk '{ print "    | " substr($0, 1, 200) }'
+    else
+        stage "a VM which is to have the legacy VGA ranges of the card does not start" ok
+        # What it says: the answer to the command, and the log of the VM.
+        said=$(cat "$SIM_WORK/startvm.out" "$VMDIR/Logs/VBox.log" 2> /dev/null | grep -a -E 'legacy VGA|CONFIG_VFIO_PCI_VGA|Getting information for region|VMSetError|VERR_' | grep -a -v 'VINF_' | tail -n 6)
+        echo "$said" | awk '{ print "    | " substr($0, 1, 260) }'
+        if echo "$said" | grep -q 'CONFIG_VFIO_PCI_VGA'; then
+            stage "it says what the kernel of the host lacks" ok
+        elif echo "$said" | grep -q 'Getting information for region 8 of opened VFIO device failed with 22'; then
+            stage "it says what the kernel of the host lacks" skipped "a tree with the device as upstream has it: it says that getting information for region 8 failed with 22"
+        else
+            stage "it says what the kernel of the host lacks" FAILED "$(echo "$said" | tail -n 1 | awk '{ print substr($0, 1, 200) }')"
+            diag
+        fi
+    fi
+    keep_logs -vganone
+    reset_vm
+    for key in ich9pcibridge/0/Config/ExpressEnabled ich9pcibridge/0/Config/ExpressPortType pci-vfio/0/Config/Fun0/VfioPath \
+               pci-vfio/0/Config/Fun0/ExposeVga pci-vfio/0/Config/IommuPath pci-vfio/0/PCIBusNo pci-vfio/0/PCIDeviceNo \
+               pci-vfio/0/PCIFunctionNo pci-vfio/0/Trusted; do
+        vbm setextradata "$VM" "VBoxInternal/Devices/$key" > /dev/null 2>&1
+    done
+    run modifyvm "$VM" --graphicscontroller vmsvga
+    end_phase
+}
+
+
 # win-phases.sh takes the functions above and has phases of its own.
 [ -n "${SIM_LIB_ONLY:-}" ] && return 0
 
@@ -2789,6 +2851,7 @@ if setup; then
             intxslot)    phase_intxslot ;;
             devtime)     phase_devtime ;;
             endpaused)   phase_endpaused ;;
+            vganone)     phase_vganone ;;
             mfpassthrough) phase_mfpassthrough ;;
             mfhotplug)     phase_mfhotplug ;;
             mfstartempty)  phase_mfstartempty ;;

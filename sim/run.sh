@@ -106,7 +106,9 @@
 #
 # Which parts run is told by SIM_PARTS, a list with commas: runner, simhost,
 # mfhost, barhost, vgahost, errhost, mferrhost, plughost, mfplughost,
-# swplughost, win, winhost, mfwinhost, hdawinhost.
+# swplughost, win, winhost, mfwinhost, hdawinhost, and vganohost, which has
+# the graphics card of vgahost in a machine whose kernel gives no legacy VGA
+# ranges away and one phase (vganone).
 # Without it: runner,simhost.
 #
 # The guest is the same in 1 and 2: a kernel with guest-init, which tells on
@@ -172,6 +174,9 @@ finish()
         missing=1
     fi
     if has_part vgahost && ! grep -q '^vgahost/setup: the first script' "$STAGES"; then
+        missing=1
+    fi
+    if has_part vganohost && ! grep -q '^vganohost/vganone: ' "$STAGES"; then
         missing=1
     fi
     if has_part errhost && ! grep -q '^errhost/hosterror: ' "$STAGES"; then
@@ -695,6 +700,14 @@ run_simhost() # <name in the results> <phases> <seconds to wait for a guest> <wa
         cmdline="$cmdline SIM_DEVCLASS=0x030000 SIM_HWTEST=vga"
         dev=(-device "VGA,bus=rp1")
     fi
+    if [ "$funcs" = vganone ]; then
+        # The same graphics card in a machine whose kernel is told not to
+        # give legacy VGA ranges away (l1.sh loads vfio-pci with disable_vga),
+        # for the one phase about a VM which asks for them all the same.
+        port="$port,x-speed=2_5,x-width=1"
+        cmdline="$cmdline SIM_DEVCLASS=0x030000 SIM_VGANONE=1"
+        dev=(-device "VGA,bus=rp1")
+    fi
     if [ "$funcs" = hda ]; then
         # A drive and a High Definition Audio controller as the two functions
         # of one device.  The sound goes nowhere, in the time sound takes.
@@ -915,6 +928,14 @@ if has_part vgahost; then
     note "Part 2d: a graphics card, as far as the simulation has one"
     if part_simhost_prepare; then
         run_simhost vgahost none 600 5 3000 "" vga
+    fi
+fi
+
+if has_part vganohost; then
+    # Not among the parts a run has by default: it is asked for by name.
+    note "Part 2d, once more: a graphics card on a host whose kernel gives no legacy VGA ranges away"
+    if part_simhost_prepare; then
+        run_simhost vganohost vganone 600 5 1500 "" vganone
     fi
 fi
 
