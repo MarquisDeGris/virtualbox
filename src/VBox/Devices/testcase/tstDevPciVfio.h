@@ -258,6 +258,7 @@ int             tstPdmIoPortWrite(RTIOPORT uPort, uint32_t u32, unsigned cb);
 int             tstPdmPhysRead(RTGCPHYS GCPhys, void *pv, unsigned cb);
 int             tstPdmPhysWrite(RTGCPHYS GCPhys, const void *pv, unsigned cb);
 int             tstPdmPhysFill(RTGCPHYS GCPhys, uint32_t u32Item, unsigned cbItem, unsigned cItems);
+bool            tstPdmIsIoPortMapped(RTIOPORT uPort);
 bool            tstPdmIsMmio2Mapped(RTGCPHYS GCPhys);
 uint32_t        tstPdmGetMmio2MappedCount(void);
 bool            tstPdmIsRunning(void);

@@ -302,7 +302,7 @@ static uint8_t  g_bTstExecEngine      = VM_EXEC_ENGINE_NATIVE_API;
 /** Number of requests for mapping guest memory tstFixtureSetup() lets pass
  * before it makes one fail, UINT32_MAX for not making any fail. */
 static uint32_t g_cTstFailIoasMapSkip = UINT32_MAX;
-/** Whether tstFixtureSetup() configures function 0 to expose the legacy VGA ranges. */
+/** Whether tstFixtureSetup() and tstPortFixtureSetupEx() configure function 0 to expose the legacy VGA ranges. */
 static bool     g_fTstExposeVga       = false;
 /** Whether tstFixtureSetup() configures function 0 to trap all memory BAR accesses. */
 static bool     g_fTstInterceptMmio   = false;
@@ -3973,6 +3973,8 @@ static int tstPortFixtureSetupEx(const char *pszPortType, bool fHotPlug, PCTSTVF
             RTStrPrintf(szName, sizeof(szName), "Fun%u", i);
             PCFGMNODE pCfgFun = tstCfgNodeCreate(pCfg, szName);
             RTTESTI_CHECK_RC(tstCfgSetString(pCfgFun, "VfioPath", paModels[i].szNode), VINF_SUCCESS);
+            if (i == 0 && g_fTstExposeVga)
+                RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "ExposeVga", 1), VINF_SUCCESS);
             if (g_paTstLayouts)
                 tstCfgAddLayout(pCfgFun, &g_paTstLayouts[i]);
             else if (g_pTstLayoutValues && i == 0)
@@ -5888,6 +5890,266 @@ static void tstSlotStartEmpty(void)
         RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
         RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
         tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+    }
+    tstFixtureTeardown();
+}
+
+
+/**
+ * Checks that the guest reaches the device in the slot through the legacy VGA
+ * ranges: both ranges of I/O ports and the video memory, reading and writing.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   pDev                The PCI function of the fake kernel.
+ * @param   bMark               What the device is given to tell: different with every call, neither 0xff nor 0xfe,
+ *                              and none of what tstSlotVgaCheckNothingThere() gives it to tell.
+ */
+static void tstSlotVgaCheckDevice(unsigned uLine, PTSTVFIODEV pDev, uint8_t bMark)
+{
+    uint8_t *pbVga = (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_VGA_REGION_INDEX);
+    if (!pbVga)
+    {
+        RTTestIFailed("line %u: the device has no legacy VGA region\n", uLine);
+        return;
+    }
+
+    /* I/O ports: the port number is the offset into the VGA region. */
+    pbVga[0x3ba] = (uint8_t)(bMark + 1);
+    pbVga[0x3c5] = bMark;
+    uint32_t u32 = 0;
+    int rc = tstPdmIoPortRead(0x3ba, &u32, 1);
+    if (rc != VINF_SUCCESS || (u32 & 0xff) != (uint8_t)(bMark + 1))
+        RTTestIFailed("line %u: read %#RX32 from port 0x3ba (%Rrc)\n", uLine, u32, rc);
+    u32 = 0;
+    rc = tstPdmIoPortRead(0x3c5, &u32, 1);
+    if (rc != VINF_SUCCESS || (u32 & 0xff) != bMark)
+        RTTestIFailed("line %u: read %#RX32 from port 0x3c5 (%Rrc)\n", uLine, u32, rc);
+    pbVga[0x3d4] = 0;
+    pbVga[0x3d5] = 0;
+    rc = tstPdmIoPortWrite(0x3d4, 0x1234, 2);
+    if (rc != VINF_SUCCESS || pbVga[0x3d4] != 0x34 || pbVga[0x3d5] != 0x12)
+        RTTestIFailed("line %u: the device sees %.2Rhxs at port 0x3d4 (%Rrc)\n", uLine, &pbVga[0x3d4], rc);
+
+    /* Video memory: the guest physical address is the offset into the VGA region. */
+    pbVga[0xb8000] = bMark;
+    uint8_t b = 0;
+    rc = tstPdmPhysRead(0xb8000, &b, 1);
+    if (rc != VINF_SUCCESS || b != bMark)
+        RTTestIFailed("line %u: read %#x from the video memory (%Rrc)\n", uLine, b, rc);
+    static const uint8_t s_abWritten[4] = { 0x41, 0x0f, 0x42, 0x0f };
+    memset(&pbVga[0xa0010], 0, sizeof(s_abWritten));
+    rc = tstPdmPhysWrite(0xa0010, s_abWritten, sizeof(s_abWritten));
+    if (rc != VINF_SUCCESS || memcmp(&pbVga[0xa0010], s_abWritten, sizeof(s_abWritten)))
+        RTTestIFailed("line %u: the device sees %.4Rhxs in the video memory (%Rrc)\n", uLine, &pbVga[0xa0010], rc);
+}
+
+
+/**
+ * Checks what the guest finds in the legacy VGA ranges of a VM while no device
+ * is behind them: the VM has the ranges, reads find nothing, and what is
+ * written goes nowhere, neither to the device which was there nor to what
+ * stands in for it.
+ *
+ * @param   uLine               The line of the caller.
+ * @param   pDev                The PCI function of the fake kernel which was behind the ranges and
+ *                              has its legacy VGA region still, to look at what got to it; NULL
+ *                              if there is nothing to look at.
+ */
+static void tstSlotVgaCheckNothingThere(unsigned uLine, PTSTVFIODEV pDev)
+{
+    uint32_t const cStrayBefore = tstVfioKrnlGetStrayAccessCount();
+
+    /* The ports are somebody's: one which is nobody's reads as all ones too, and takes a write as well. */
+    if (   !tstPdmIsIoPortMapped(0x3b0)
+        || !tstPdmIsIoPortMapped(0x3bb)
+        || !tstPdmIsIoPortMapped(0x3c0)
+        || !tstPdmIsIoPortMapped(0x3df))
+        RTTestIFailed("line %u: the VM has not got the legacy VGA ports\n", uLine);
+
+    /* What the device would tell if it were asked. */
+    uint8_t *pbVga = pDev ? (uint8_t *)tstVfioKrnlDevGetRegionPtr(pDev, VFIO_PCI_VGA_REGION_INDEX) : NULL;
+    if (pbVga)
+    {
+        pbVga[0x3ba] = 0x11;
+        pbVga[0x3c5] = 0x22;
+        memset(&pbVga[0xb8000], 0x33, 4);
+    }
+
+    uint32_t u32 = 0;
+    int rc = tstPdmIoPortRead(0x3ba, &u32, 1);
+    if (rc != VINF_SUCCESS || (u32 & 0xff) != 0xff)
+        RTTestIFailed("line %u: read %#RX32 from port 0x3ba with no device there (%Rrc)\n", uLine, u32, rc);
+    u32 = 0;
+    rc = tstPdmIoPortRead(0x3c5, &u32, 1);
+    if (rc != VINF_SUCCESS || (u32 & 0xff) != 0xff)
+        RTTestIFailed("line %u: read %#RX32 from port 0x3c5 with no device there (%Rrc)\n", uLine, u32, rc);
+    /* Memory which is nobody's would read as what the VM has for RAM there, not as this. */
+    u32 = 0;
+    rc = tstPdmPhysRead(0xb8000, &u32, sizeof(u32));
+    if (rc != VINF_SUCCESS || u32 != UINT32_MAX)
+        RTTestIFailed("line %u: read %#RX32 from the video memory with no device there (%Rrc)\n", uLine, u32, rc);
+
+    static const uint8_t s_abWritten[4] = { 0x58, 0x59, 0x5a, 0x5b };
+    static const uint8_t s_abNothing[4] = { 0x00, 0x00, 0x00, 0x00 };
+    if (pbVga)
+    {
+        memset(&pbVga[0x3d4], 0, 2);
+        memset(&pbVga[0xa0010], 0, sizeof(s_abWritten));
+        memset(&pbVga[0xa0020], 0, sizeof(s_abWritten));
+    }
+    rc = tstPdmIoPortWrite(0x3d4, 0x5958, 2);
+    if (rc != VINF_SUCCESS)
+        RTTestIFailed("line %u: writing to port 0x3d4 with no device there: %Rrc\n", uLine, rc);
+    rc = tstPdmPhysWrite(0xa0010, s_abWritten, sizeof(s_abWritten));
+    if (rc != VINF_SUCCESS)
+        RTTestIFailed("line %u: writing to the video memory with no device there: %Rrc\n", uLine, rc);
+    rc = tstPdmPhysFill(0xa0020, UINT32_C(0x5b5a5958), 4, 1);
+    if (rc != VINF_SUCCESS)
+        RTTestIFailed("line %u: filling video memory with no device there: %Rrc\n", uLine, rc);
+    if (   pbVga
+        && (   pbVga[0x3d4] != 0
+            || pbVga[0x3d5] != 0
+            || memcmp(&pbVga[0xa0010], s_abNothing, sizeof(s_abNothing))
+            || memcmp(&pbVga[0xa0020], s_abNothing, sizeof(s_abNothing))))
+        RTTestIFailed("line %u: the device which is not in the VM got what the guest wrote: %.2Rhxs, %.4Rhxs, %.4Rhxs\n",
+                      uLine, &pbVga[0x3d4], &pbVga[0xa0010], &pbVga[0xa0020]);
+    if (tstVfioKrnlGetViolationCount() != 0)
+        RTTestIFailed("line %u: %u request(s) to the kernel which are out of bounds\n", uLine, tstVfioKrnlGetViolationCount());
+    /* Nobody has asked what stands in for the device either. */
+    if (tstVfioKrnlGetStrayAccessCount() != cStrayBefore)
+        RTTestIFailed("line %u: %u access(es) to what stands in for the device\n", uLine,
+                      tstVfioKrnlGetStrayAccessCount() - cStrayBefore);
+}
+
+
+/**
+ * A graphics device in the slot of a VM which has its legacy VGA ranges: the
+ * ranges are those of the VM for as long as it lives, and what is behind them
+ * goes and comes with the device.  While the slot is empty the guest finds
+ * nothing there and what it writes goes nowhere, whichever way the device
+ * left; a device the kernel has no such ranges for is another kind of device;
+ * and a VM which is started without the device has the ranges for it.
+ */
+static void tstSlotVga(void)
+{
+    RTTestISub("Hot-plug slot: a graphics device with its legacy VGA ranges");
+
+    static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
+    static TSTVFIODEVCFG s_Other;
+    tstModelInit(&s_Model, TST_VFIO_NODE, VBOX_PCI_CLASS_DISPLAY, VBOX_PCI_SUB_DISPLAY_VGA);
+    tstModelSetBar(&s_Model, 0, TST_BAR0_SIZE, PCI_ADDRESS_SPACE_MEM);
+    s_Model.acIrqs[VFIO_PCI_INTX_IRQ_INDEX] = 1;
+    tstModelAddMsiCap(&s_Model, TST_MSI_CAP_OFF, 2 /*cVectorsLog2*/, true /*f64Bit*/, true /*fMaskable*/);
+    tstModelAddExpCap(&s_Model, TST_EXP_CAP_OFF);
+    /* The region is bigger than what the legacy ranges need, as in tstVga(). */
+    s_Model.aRegions[VFIO_PCI_VGA_REGION_INDEX].cb     = _1M;
+    s_Model.aRegions[VFIO_PCI_VGA_REGION_INDEX].fFlags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
+    /* The same device as the kernel has it when it has no legacy VGA ranges to give for it. */
+    s_Other = s_Model;
+    s_Other.aRegions[VFIO_PCI_VGA_REGION_INDEX].cb     = 0;
+    s_Other.aRegions[VFIO_PCI_VGA_REGION_INDEX].fFlags = 0;
+
+    /*
+     * The VM is started with the device.
+     */
+    PCIVFIOFUNLAYOUT Layout;
+    RT_ZERO(Layout);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    g_fTstExposeVga = true;
+    int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    g_fTstExposeVga = false;
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstDevQueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
+        RTTESTI_CHECK(Layout.fVga);
+        tstSlotGuestEnableDevice();
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+        tstSlotVgaCheckDevice(__LINE__, pDev, 0xa5);
+        uint32_t const cFdsOccupied = tstVfioKrnlGetOpenFdCount();
+
+        /* Out and in again: from under the guest in the first round, with the slot switched off in the second. */
+        for (unsigned iRound = 0; iRound < 2; iRound++)
+        {
+            if (iRound > 0)
+                tstPortCfgWrite(TSTPORT_SLTCTL, TSTPORT_SLTCTL_EMPTY | TSTPORT_SLTCTL_ENABLES, 2);
+            RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("round %u\n", iRound));
+            RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES), ("round %u\n", iRound));
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            tstSlotVgaCheckNothingThere(__LINE__, pDev);
+
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied,
+                              ("round %u: %u file descriptors open, were %u\n", iRound, tstVfioKrnlGetOpenFdCount(), cFdsOccupied));
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            tstSlotVgaCheckDevice(__LINE__, pDev, (uint8_t)(0x5a + iRound * 2));
+        }
+
+        /* A device without legacy VGA ranges where this one was: refused, and nothing is behind the ranges. */
+        RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Other), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_MISMATCH);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & (VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD)));
+        tstSlotVgaCheckNothingThere(__LINE__, NULL);
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+        tstSlotVgaCheckDevice(__LINE__, pDev, 0x77);
+
+        /* The device gets unplugged from the host and plugged in again. */
+        tstVfioKrnlDevRemove(pDev);
+        RTTESTI_CHECK(tstSlotWaitForRelease(pDev, RT_MS_10SEC));
+        RTTESTI_CHECK(tstSlotWaitForEmpty(RT_MS_5SEC));
+        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+        tstSlotVgaCheckNothingThere(__LINE__, pDev);
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+        tstSlotVgaCheckDevice(__LINE__, pDev, 0x35);
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied,
+                          ("%u file descriptors open, were %u\n", tstVfioKrnlGetOpenFdCount(), cFdsOccupied));
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+    }
+    tstFixtureTeardown();
+    if (RT_FAILURE(rc) || !Layout.fVga)
+        return;
+
+    /*
+     * A VM with what that one told in its configuration is started without the
+     * device: the ranges are there, with nothing behind them until the device comes.
+     */
+    g_paTstLayouts      = &Layout;
+    g_fTstDevicesAbsent = RT_BIT_32(0);
+    g_fTstExposeVga     = true;
+    rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    g_paTstLayouts      = NULL;
+    g_fTstDevicesAbsent = 0;
+    g_fTstExposeVga     = false;
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+        tstSlotVgaCheckNothingThere(__LINE__, NULL);
+
+        /* A device without legacy VGA ranges is not what this VM was built for. */
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Other), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_MISMATCH);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+        tstSlotVgaCheckNothingThere(__LINE__, NULL);
+
+        /* The one it was built for. */
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+        tstSlotVgaCheckDevice(__LINE__, pDev, 0x3c);
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
     }
     tstFixtureTeardown();
 }
@@ -8103,6 +8365,7 @@ int main()
     tstSlotAttach();
     tstSlotIrqLeftOver();
     tstSlotStartEmpty();
+    tstSlotVga();
     tstSlotSavedState();
     tstSlotSavedStateRefused();
     tstSlotStateHostRequest();
