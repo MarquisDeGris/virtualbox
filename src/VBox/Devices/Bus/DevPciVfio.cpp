@@ -104,6 +104,13 @@
  * for it this is hardware which stops answering. There is no way back either: the function stays
  * out of service until the VM is powered off.
  *
+ * A device which was let go of because of an error can be left without its addresses by the
+ * host: its kernel resets the bus the device is on for an error it takes for fatal, and
+ * doesn't put back what a device had which nobody has opened at that moment. Such a
+ * device is refused when it is opened the next time, be it for a VM which starts with it or for
+ * the slot it is put into, and the message says how the host gets to set it up again, see
+ * pciVfioFunCheckHostAddresses().
+ *
  * @section sec_dev_vfio_hotplug        Hot-plug capable slot
  *
  * A device behind a PCI express root port with a hot-plug capable slot is the device in that slot,
@@ -242,6 +249,11 @@
  * The InterceptMmio setting of a function makes all accesses to its memory BARs go through the device emulation
  * instead of mapping the BARs into the guest. This is slow and meant for debugging
  *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/InterceptMmio" 1
+ *
+ * A function none of whose BAR registers has an address on the host is refused, as one which has lost them through
+ * a reset of its bus, see pciVfioFunCheckHostAddresses(). The SkipHostAddressCheck setting of a function switches
+ * that off, for a device which is like that at all times and works
+ *    VBoxManage setextradata vmname "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/SkipHostAddressCheck" 1
  *
  * After that you can start the VM with either the usual GUI or VBoxHeadless.
  *
@@ -479,6 +491,16 @@ typedef struct VFIOPCIFUN
     int                  iFdVfio;
     /** Flag whether the function is attached to the I/O address space (IOMMUFD only). */
     bool                 fIoasAttached;
+    /** Flag whether the host tells that the device is an ordinary function with BAR
+     * registers of its own and no virtual one (SR-IOV), see pciVfioIsOrdinaryFunction().
+     * False also if the host tells nothing, and if the configuration says not to go by
+     * the BAR registers (SkipHostAddressCheck). */
+    bool                 fOrdinaryFn;
+    /** The directory sysfs of the host has the device in, empty if it isn't known. */
+    char                 szSysDev[128];
+    /** Flag whether the configuration says not to go by the BAR registers of the device
+     * for whether the host has it set up (SkipHostAddressCheck). */
+    bool                 fSkipHostAddressCheck;
     /** Flag whether the function is out of service because the host took the device
      * back or reported an error of it.  iFdVfio refers to what iFdInert refers to then. */
     bool volatile        fGone;
@@ -4093,6 +4115,38 @@ static int pciVfioConfigureAccess(PPDMDEVINS pDevIns, PVFIOPCI pThis, PCPDMDEVHL
 
 
 /**
+ * Tells whether a device of the host is an ordinary function, going by what
+ * sysfs has of it: its config space is there and it has no function it
+ * belongs to, which a virtual function has (SR-IOV).  A virtual function has
+ * no BAR registers of its own, its memory is where the function it belongs to
+ * has it.
+ *
+ * @returns true if sysfs tells so, false if it tells of a virtual function
+ *          or tells nothing.
+ * @param   pszSysDev   The directory of the device in sysfs, empty if not known.
+ */
+static bool pciVfioIsOrdinaryFunction(const char *pszSysDev)
+{
+    if (!*pszSysDev)
+        return false;
+
+    char szFile[192];
+    RTStrPrintf(szFile, sizeof(szFile), "%s/config", pszSysDev);
+    int iFd = open(szFile, O_RDONLY | O_CLOEXEC);
+    if (iFd == -1)
+        return false;
+    close(iFd);
+
+    RTStrPrintf(szFile, sizeof(szFile), "%s/physfn/config", pszSysDev);
+    iFd = open(szFile, O_RDONLY | O_CLOEXEC);
+    if (iFd == -1)
+        return errno == ENOENT;
+    close(iFd);
+    return false;
+}
+
+
+/**
  * Opens the device of a function the way it is configured and brings it
  * together with the I/O address space of the VM.
  *
@@ -4124,6 +4178,28 @@ static int pciVfioFunOpen(PVFIOPCI pThis, PVFIOPCIFUN pFun, PCFGMNODE pCfg, int 
     else if (RT_FAILURE(rc))
         return pciVfioSetError(pThis, rc, RT_SRC_POS,
                                N_("Configuration error: Querying \"VfioPath\" failed"));
+
+    /*
+     * Where sysfs has the device, as far as that is plain from how the device is
+     * configured: under its PCI address, or under the name of its device node.
+     */
+    static const char s_szVfioDevDir[] = "/dev/vfio/devices/";
+    char szSysDev[sizeof(pFun->szSysDev)];
+    szSysDev[0] = '\0';
+    if (   fHostAddress
+        || (   pThis->fVfioLegacy
+            && pciVfioIsHostAddressValid(szPath)))
+        RTStrPrintf(szSysDev, sizeof(szSysDev), "/sys/bus/pci/devices/%s", szPath);
+    else if (   !pThis->fVfioLegacy
+             && !strncmp(szPath, s_szVfioDevDir, sizeof(s_szVfioDevDir) - 1))
+    {
+        const char *pszName = &szPath[sizeof(s_szVfioDevDir) - 1];
+        size_t      cchName = 0;
+        while (RT_C_IS_ALNUM(pszName[cchName]))
+            cchName++;
+        if (cchName > 0 && cchName < 32 && !pszName[cchName])
+            RTStrPrintf(szSysDev, sizeof(szSysDev), "/sys/class/vfio-dev/%s/device", pszName);
+    }
 
     int iFd;
     if (pThis->fVfioLegacy)
@@ -4219,6 +4295,9 @@ static int pciVfioFunOpen(PVFIOPCI pThis, PVFIOPCIFUN pFun, PCFGMNODE pCfg, int 
         }
         pFun->fIoasAttached = true;
     }
+
+    RTStrCopy(pFun->szSysDev, sizeof(pFun->szSysDev), szSysDev);
+    pFun->fOrdinaryFn = !pFun->fSkipHostAddressCheck && pciVfioIsOrdinaryFunction(szSysDev);
 
     *piFd = iFd;
     return VINF_SUCCESS;
@@ -4922,6 +5001,102 @@ static DECLCALLBACK(int) pciVfioPortDetach(PPDMIPCIPASSTHROUGHPORT pInterface, R
 
 
 /**
+ * Checks that the host has the memory of the device behind a function set up.
+ *
+ * A BAR register read through VFIO before anything was written to it has the
+ * address the device itself has there, above the bits which tell the kind of
+ * the register.  A device none of whose BAR registers has an address has lost
+ * them: a reset of its bus clears them, and they stay cleared where nothing
+ * puts back what the device had.  The kernel puts it back for a device somebody
+ * has opened and for one it has put to sleep.  It does not for a device which
+ * is awake with nobody having it, which is what a device is for a moment after
+ * it was let go of, and what the kernel keeps it as while it deals with an
+ * error.  The reset the kernel does about an error it takes for fatal can find
+ * a device like that, as this code lets go of a device when it is told of an
+ * error.  The kernel hands out the regions of such a device all the same and
+ * switches the decoding of its memory on, and what a guest finds in the
+ * regions then is not the device.
+ *
+ * This is told of a device only where it can not be taken for something else.
+ * On a host where no memory of a device is at the address zero, which is so
+ * on x86.  Of a device the host tells to be an ordinary function, see
+ * pciVfioIsOrdinaryFunction(): a virtual function (SR-IOV) has no addresses in
+ * its BAR registers at any time.  Everywhere else nothing is checked.
+ *
+ * What is left: a device which never has addresses in its BAR registers and
+ * is no virtual function would be refused.  One with the Enhanced Allocation
+ * capability is like that, which has its addresses there and which the kernel
+ * doesn't show to who has the device opened, and so is one all of whose BARs
+ * the kernel has at fixed places.  No such device is known to be passed
+ * through on an x86 host.  For one, the SkipHostAddressCheck setting of the
+ * function switches this check off.
+ *
+ * @returns VBox status code, VERR_IO_NOT_READY if the device has no addresses.
+ * @param   pThis       The VFIO PCI device instance.
+ * @param   pFun        The function, with the device file in place, its config
+ *                      space located and its BARs known.
+ */
+static int pciVfioFunCheckHostAddresses(PVFIOPCI pThis, PVFIOPCIFUN pFun)
+{
+#if defined(RT_ARCH_AMD64) || defined(RT_ARCH_X86)
+    if (!pFun->fOrdinaryFn)
+        return VINF_SUCCESS;
+
+    uint32_t cBars = 0;
+    for (uint32_t iBar = 0; iBar <= VFIO_PCI_BAR5_REGION_INDEX; iBar++)
+    {
+        if (!pFun->aBars[iBar].bType)
+            continue;
+
+        /* What is not read counts as an address: nothing is refused for that. */
+        uint32_t u32PciBar = UINT32_MAX;
+        int rc = pciVfioCfgSpaceReadU32(pFun, VBOX_PCI_BASE_ADDRESS_0 + iBar * sizeof(uint32_t), &u32PciBar);
+        if (RT_FAILURE(rc))
+            return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Failed to read BAR%u of the device with %Rrc"), iBar, rc);
+        if (u32PciBar & RT_BIT_32(0))
+        {
+            /* I/O ports. */
+            if (u32PciBar & ~UINT32_C(0x3))
+                return VINF_SUCCESS;
+        }
+        else
+        {
+            if (u32PciBar & ~UINT32_C(0xf))
+                return VINF_SUCCESS;
+            /* An address of 4 GiB and more has the next register for its upper half. */
+            if (   (u32PciBar & (RT_BIT_32(2) | RT_BIT_32(1))) == PCI_ADDRESS_SPACE_BAR64
+                && iBar < VFIO_PCI_BAR5_REGION_INDEX)
+            {
+                uint32_t u32PciBarHigh = UINT32_MAX;
+                rc = pciVfioCfgSpaceReadU32(pFun, VBOX_PCI_BASE_ADDRESS_0 + (iBar + 1) * sizeof(uint32_t), &u32PciBarHigh);
+                if (RT_FAILURE(rc))
+                    return pciVfioSetError(pThis, rc, RT_SRC_POS, N_("Failed to read BAR%u of the device with %Rrc"),
+                                           iBar + 1, rc);
+                if (u32PciBarHigh)
+                    return VINF_SUCCESS;
+            }
+        }
+        cBars++;
+    }
+    if (!cBars)
+        return VINF_SUCCESS;
+
+    return pciVfioSetError(pThis, VERR_IO_NOT_READY, RT_SRC_POS,
+                           N_("Function %u of the PCI device has lost its addresses on the host: none of its BAR registers "
+                              "has one. A reset of its bus leaves a device like that when nothing sets the device up again "
+                              "afterwards. To have the host set it up again, remove the device there and have the bus "
+                              "scanned again: as root, write 1 to %s/remove, the same for the other functions of the "
+                              "device, and then 1 to /sys/bus/pci/rescan. After that the device has to be bound to vfio-pci "
+                              "again"),
+                           pFun->uPciFun, pFun->szSysDev);
+#else
+    RT_NOREF(pThis, pFun);
+    return VINF_SUCCESS;
+#endif
+}
+
+
+/**
  * Checks that the device behind a function is like the one the VM was built
  * for, and takes note of where its regions are in the device file.
  *
@@ -5095,6 +5270,13 @@ static int pciVfioFunAttach(PVFIOPCI pThis, PVFIOPCIFUN pFun, PPDMPCIDEV pPciDev
      * It has to be like the device the VM was built for.
      */
     rc = pciVfioFunCheckLayout(pThis, pFun);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    /*
+     * And the host has to have it set up.
+     */
+    rc = pciVfioFunCheckHostAddresses(pThis, pFun);
     if (RT_FAILURE(rc))
         return rc;
 
@@ -6446,6 +6628,7 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
                                          "ExposeVga\0"
                                          "InterceptMmio\0"
                                          "HostAddress\0"
+                                         "SkipHostAddressCheck\0"
                                         ))
             return VERR_PDM_DEVINS_UNKNOWN_CFG_VALUES;
 
@@ -6459,6 +6642,11 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
         if (RT_FAILURE(rc))
             return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
                                        N_("Configuration error: Querying \"ExposeVga\" failed"));
+
+        rc = pHlp->pfnCFGMQueryBoolDef(pCfgFun, "SkipHostAddressCheck", &pFun->fSkipHostAddressCheck, false);
+        if (RT_FAILURE(rc))
+            return PDMDevHlpVMSetError(pDevIns, rc, RT_SRC_POS,
+                                       N_("Configuration error: Querying \"SkipHostAddressCheck\" failed"));
 
         /*
          * A device which isn't there can be put in later if it is in a hot-plug capable
@@ -6556,6 +6744,11 @@ static DECLCALLBACK(int) pciVfioConstruct(PPDMDEVINS pDevIns, int iInstance, PCF
             if (RT_FAILURE(rc))
                 return rc;
         }
+
+        /* A device which the host does not have set up is of no use to a guest. */
+        rc = pciVfioFunCheckHostAddresses(pThis, pFun);
+        if (RT_FAILURE(rc))
+            return rc;
 
         uint8_t bClassBase = PDMPciDevGetByte(pPciDev, VBOX_PCI_CLASS_BASE);
         uint8_t bClassSub  = PDMPciDevGetByte(pPciDev, VBOX_PCI_CLASS_SUB);
