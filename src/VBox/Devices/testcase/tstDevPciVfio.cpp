@@ -659,7 +659,8 @@ static void tstIoBarAndSilentDevice(void)
 
 /**
  * The legacy VGA ranges of a graphics device: I/O ports, video memory, and a
- * memory fill which doesn't end where the video memory ends.
+ * memory fill which doesn't end where the video memory ends.  And a kernel
+ * which has no such ranges to give for the device.
  */
 static void tstVga(void)
 {
@@ -732,6 +733,33 @@ static void tstVga(void)
             RTTESTI_CHECK_RC(tstPdmPhysFill(0xa0000, 0, 1, 16), VINF_SUCCESS);
             tstVfioKrnlDevSetGone(pDev, false);
         }
+    }
+    tstFixtureTeardown();
+
+    /*
+     * A kernel which has no legacy VGA ranges to give for the device refuses to
+     * tell of the region: the VM doesn't start and says what is missing.
+     */
+    Model.aRegions[VFIO_PCI_VGA_REGION_INDEX].cb     = 0;
+    Model.aRegions[VFIO_PCI_VGA_REGION_INDEX].fFlags = 0;
+    pDev = NULL;
+    g_fTstExposeVga = true;
+    rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    g_fTstExposeVga = false;
+    RTTESTI_CHECK_MSG(rc == VERR_NOT_SUPPORTED, ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    RTTESTI_CHECK_MSG(strstr(tstPdmGetLastError(), "CONFIG_VFIO_PCI_VGA") != NULL, ("the message: %s\n", tstPdmGetLastError()));
+    tstFixtureTeardown();
+
+    /* Not asked for: such a device is passed through without them. */
+    pDev = NULL;
+    rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+    RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("pci-vfio: %Rrc - %s\n", rc, tstPdmGetLastError()));
+    if (RT_SUCCESS(rc))
+    {
+        tstPdmPowerOn();
+        RTTESTI_CHECK(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID);
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
     }
     tstFixtureTeardown();
 }

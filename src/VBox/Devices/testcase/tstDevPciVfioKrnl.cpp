@@ -757,6 +757,10 @@ static int tstVfioKrnlDevGetRegionInfo(PTSTVFIODEV pDev, struct vfio_region_info
     if (   pInfo->argsz < sizeof(*pInfo)
         || pInfo->index >= TSTVFIO_REGION_COUNT)
         return errno = EINVAL, -1;
+    /* Like the real thing: it tells of the legacy VGA region only where it has one to give for the function. */
+    if (   pInfo->index == VFIO_PCI_VGA_REGION_INDEX
+        && !pDev->acbRegions[VFIO_PCI_VGA_REGION_INDEX])
+        return errno = EINVAL, -1;
 
     uint32_t const idxRegion = pInfo->index;
     uint64_t const cbRegion  = pDev->acbRegions[idxRegion];
