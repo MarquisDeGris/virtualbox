@@ -84,6 +84,14 @@
       with more than one virtual CPU is emulated. Such a guest can get the
       time more slowly without the clock than with it.
     </p>
+    <p>
+      Leave the clock offered for a VM which runs with KVM as its execution
+      engine on a Linux host. The timers of the devices of such a VM are served
+      up to 10 milliseconds late at present. A Linux guest without the clock
+      has to find out the frequency of the TSC with the help of those devices,
+      and where it cannot rely on the result it takes its time from the HPET,
+      which is one of them: its clock falls behind.
+    </p>
   </body>
   
 </topic>
