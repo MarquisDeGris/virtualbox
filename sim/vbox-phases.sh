@@ -1156,10 +1156,21 @@ phase_hosterror()
 bars_have_address() # <the six registers of a function as host_bars tells them>
 {
     local h=$1 i=0 b0
+    [ "${#h}" -ge 48 ] || return 1
     while [ "$i" -lt 6 ]; do
         [ "${h:$((i * 8 + 2)):6}" != 000000 ] && return 0
-        b0=${h:$((i * 8)):2}
-        [ $(( 16#${b0:-0} & 0xf0 )) != 0 ] && return 0
+        b0=$(( 16#${h:$((i * 8)):2} ))
+        if [ $((b0 & 1)) = 1 ]; then
+            # I/O ports: the address is above the lowest two bits.
+            [ $((b0 & 0xfc)) != 0 ] && return 0
+        else
+            [ $((b0 & 0xf0)) != 0 ] && return 0
+            # A 64-bit register has the upper half of the address in the next one.
+            if [ $((b0 & 6)) = 4 ] && [ "$i" -lt 5 ]; then
+                [ "${h:$((i * 8 + 8)):8}" != 00000000 ] && return 0
+                i=$((i + 1))
+            fi
+        fi
         i=$((i + 1))
     done
     return 1
@@ -1378,7 +1389,7 @@ phase_lostaddr()
         return
     fi
     bind_dev || { stage "the device is bound to vfio-pci" FAILED; return; }
-    if grep -a -q 'has lost the addresses of its memory' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
+    if grep -a -q 'has lost its addresses on the host' "$VBOX_BIN/VBoxDD.so" 2> /dev/null; then
         LA_KNOWN=1
         echo "    this build tells a device which has lost its memory addresses"
     else

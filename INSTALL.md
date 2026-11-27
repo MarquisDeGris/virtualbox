@@ -359,3 +359,27 @@ let go of it:
 
 A device which is pulled without that is taken away from the guest when the
 host notices; the VM keeps running.
+
+The same goes for a device the host reports an error of: it is taken out of
+the VM at once and can be put in again with `plugpci`. About an error it
+takes for fatal the kernel resets the bus the device is on, and that reset
+can leave the device without the addresses of its memory, which nothing
+puts back then. Such a device is of no use to a guest. `plugpci` refuses it
+and says so, as does a VM which is to start with it, and the checklist
+script tells it too. The host has to set the device up again, as root:
+
+    echo 1 > /sys/bus/pci/devices/0000:0a:00.0/remove
+    echo 1 > /sys/bus/pci/rescan
+
+for every function of the device before the bus is scanned. The device is
+new to the host afterwards and bound to no driver: steps 2 and 3 again.
+This was seen in the simulation only, with the bus reset by hand (the
+phase `lostaddr`), and not on a machine with real hardware.
+
+The device goes by the BAR registers for this, on an x86 host and for a
+device the host shows as an ordinary function; a virtual function (SR-IOV)
+is not looked at. Should a device be refused which works and has no
+addresses in its BAR registers at any time, which none is known to be, the
+check can be switched off for a function:
+
+    VBoxManage setextradata <vm> "VBoxInternal/Devices/pci-vfio/0/Config/Fun0/SkipHostAddressCheck" 1

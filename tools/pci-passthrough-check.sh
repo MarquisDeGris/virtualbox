@@ -197,6 +197,41 @@ for addr in "$@"; do
         *)  bad "it is bound to the driver $drv of the host: it has to be bound to vfio-pci instead (INSTALL.md, section 4)" ;;
     esac
     [ -r "$dev/reset_method" ] && note "ways the host can reset it: $(cat "$dev/reset_method" 2> /dev/null)"
+    # A device has the addresses of its memory in its BAR registers, the 24
+    # bytes from 0x10 of its config space, which anybody may read.  A reset of
+    # its bus takes them away, and where nothing puts them back the device is
+    # of no use to a VM, which refuses it.  A device which sleeps can get
+    # them back when it is woken up, which opening it does.  A virtual
+    # function (SR-IOV) has none of its own at any time.
+    if [ ! -e "$dev/physfn" ] && [ -r "$dev/config" ] && [ -r "$dev/resource" ]; then
+        nbar=$(awk 'NR <= 6 && $2 != "0x0000000000000000" { n++ } END { print n + 0 }' "$dev/resource" 2> /dev/null)
+        addr=$(od -A n -t x1 -j 16 -N 24 "$dev/config" 2> /dev/null | tr -s ' \n' ' ' \
+               | awk 'function hv(s) { return (index("0123456789abcdef", substr(s, 1, 1)) - 1) * 16 + index("0123456789abcdef", substr(s, 2, 1)) - 1 }
+                      NF >= 24 {
+                          for (i = 0; i < 6; i++) {
+                              b0 = hv($(4 * i + 1))
+                              if ($(4 * i + 2) $(4 * i + 3) $(4 * i + 4) != "000000") { print "yes"; exit }
+                              if (b0 % 2 == 1) {
+                                  # I/O ports: the address is above the lowest two bits.
+                                  if (b0 >= 4) { print "yes"; exit }
+                              } else {
+                                  if (b0 >= 16) { print "yes"; exit }
+                                  # A 64-bit register has the upper half of the address in the next one.
+                                  if (int(b0 / 2) % 4 == 2 && i < 5) {
+                                      if ($(4 * i + 5) $(4 * i + 6) $(4 * i + 7) $(4 * i + 8) != "00000000") { print "yes"; exit }
+                                      i++
+                                  }
+                              }
+                          }
+                      }')
+        if [ "${nbar:-0}" != 0 ] && [ -z "$addr" ]; then
+            if [ "$(cat "$dev/power/runtime_status" 2> /dev/null)" = suspended ]; then
+                unsure "its BAR registers have no addresses while it sleeps, as after a reset of its bus. If a VM refuses it for that, the host has to set it up again, as root: echo 1 > $dev/remove; echo 1 > /sys/bus/pci/rescan, and then bind it to vfio-pci again"
+            else
+                bad "it has lost the addresses of its memory: its BAR registers have none, as after a reset of its bus which nothing set it up again after. A VM refuses it. As root: echo 1 > $dev/remove; echo 1 > /sys/bus/pci/rescan, and then bind it to vfio-pci again"
+            fi
+        fi
+    fi
     # A VGA device (class 0300) can have its legacy VGA ranges given to the VM
     # (the setting ExposeVga), which is what it takes for a card to show a
     # guest from its start.  The kernel has to give them away for that.  The
