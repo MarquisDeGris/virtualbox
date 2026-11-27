@@ -3363,7 +3363,28 @@ when it is let go of.
 the Linux guest and with Windows, read the BAR registers of every
 function from the host before the error and again before the device is
 put back, and have a check that they are the same (meta `038e565`).
-Run 394 is the part again, on the head of the line. What VirtualBox
+
+**Run 394** (the same day, `winsim` with the parts runner, win and
+hdawinhost, exploring, `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e`,
+34 minutes, Intel Xeon Platinum 8573C): all 147 checks pass and one is
+left out as before. The step which failed passes: after both errors
+the BAR registers of both functions are what they were, the kernel
+says nothing of enabling the device when it is opened again, and
+Windows starts the drive and reads from it. So the part has failed
+once in three runs (336, 389, 394), and the check has seen the case
+which works only. It stays in both phases, which run in every run of
+the simulation, and tells when the case comes again.
+
+The source of the kernel has one thing more to say to it
+(`vfio_pci_config.c`): `vfio-pci` compares the BAR registers of the
+device with what it read when the device was opened whenever its user
+writes the command register, and writes them again if they differ. A
+device which stays open while the kernel resets the bus gets its
+addresses back that way. One which was let go of before the reset is
+opened later with empty registers, which are then what `vfio-pci` takes
+for right.
+
+What VirtualBox
 could do, should the reading hold, is two things: tell a device which
 has lost its memory addresses when it is to be put into a VM, and say
 so and what gets it back, where today the guest gets a device which is
@@ -4508,9 +4529,17 @@ harness since WP5, saved states since the fourth part of WP6.
    was opened again. Open: whether the device loses its memory
    addresses on the host when VirtualBox lets go of it before the
    kernel has reset the bus; the simulation has a check for it since,
-   and run 394 is the part again. Depending on it: the device tells a
-   function which has lost its addresses and refuses it with a message,
-   and holds on to a device for a moment after an error.
+   in both phases with an error. Run 394, the part again, passes with
+   the addresses in place, so the case which fails has not been seen
+   with the check yet: once in three runs of the part so far. What can
+   be done without waiting for it: have the machine which stands in
+   for a host reset the bus by hand while nobody has the device, which
+   is what the reading comes to, and see what a guest gets then; and
+   have the device tell a function whose BAR registers are empty when
+   it is opened and refuse it with a message which says what gets the
+   addresses back. The test stand-in for the kernel has BAR registers
+   without addresses and needs them first. After that: holding on to a
+   device for a moment after an error before letting go of it.
 8. Done on 2026-11-24: a register of a function which went out of
    service a moment ago is answered from what is kept of the function,
    and no line is written, see "The device does not ask a function
@@ -5032,5 +5061,6 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 391 | `pci-passthrough-hotplug-7.1-kvm` @ `903f9a65` | tests | passed | 12 minutes, AMD EPYC 9V74. The same two commits on the 7.1 line with the KVM backend: it builds and the testcase passes |
 | 392 | `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e` | sim with the part vgahost, exploring | passed | 24 minutes, AMD EPYC 9V74. All 62 pass. The first run of the third script for a machine with real hardware with `HW_VGA=yes`: 37 checks. The guest reads 0x67 from a register of the VGA adapter through the legacy ports, 0xff while the adapter is out of the VM, and 0x67 again when it is back, in both rounds. The checklist and the inventory tell that the kernel gives these ranges away. The testcase passes on this line too |
 | 393 | `pci-passthrough-hotplug-v1` @ `5732c720` | sanitize | passed | 12 minutes, Intel Xeon Platinum 8573C. The same head with the sanitizers and the random tests in full length (20000 device models, 2000000 and 100000 operations): the testcase passes, the two tests about the legacy VGA ranges among its 60, and the sanitizers have no report |
+| 394 | `pci-passthrough-hotplug-7.2-kvm` @ `c5e9ca0e` | winsim with the parts runner, win and hdawinhost, exploring | passed | 34 minutes, Intel Xeon Platinum 8573C. All 147 pass, 1 is left out as before. The part of run 389 which had two checks fail, again, on the head with the two commits about the legacy VGA ranges and with the new check of the memory addresses of the device on the host: after the error which is fatal the BAR registers of both functions are what they were, and Windows starts the drive and reads from it. The failure of run 389 did not come again |
 
 Run numbers are those GitHub shows for the `build` workflow.
