@@ -12113,6 +12113,11 @@
         <result name="VBOX_E_OBJECT_IN_USE">
           There is a device in the slot.
         </result>
+        <result name="VBOX_E_INVALID_OBJECT_STATE">
+          The device which was in the slot is still held on to after an error
+          the host reported of it, which gives the host the time to reset
+          the device and is a matter of seconds. Try again then.
+        </result>
         <result name="VBOX_E_PDM_ERROR">
           The device could not be put into the slot: it is not there, cannot
           be used, or is of another kind than the one the virtual machine is
