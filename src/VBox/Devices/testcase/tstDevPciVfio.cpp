@@ -150,7 +150,46 @@ static void tstModelSetBar(PTSTVFIODEVCFG pModel, uint32_t iBar, uint64_t cbBar,
     pModel->aRegions[iBar].fFlags = VFIO_REGION_INFO_FLAG_READ | VFIO_REGION_INFO_FLAG_WRITE;
     if (!(fType & PCI_ADDRESS_SPACE_IO))
         pModel->aRegions[iBar].fFlags |= VFIO_REGION_INFO_FLAG_MMAP;
-    pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBar * 4] = (uint8_t)fType;
+
+    /*
+     * The address the host has given it, which is what a device has in the
+     * register when it gets opened.  An address of 4 GiB and more for a 64-bit
+     * BAR, which leaves nothing in the register itself; the upper half is an
+     * even number, so the register it is in is not taken for one of I/O ports
+     * by who looks at the lowest bit only.
+     */
+    uint32_t u32Bar = fType;
+    if (fType & PCI_ADDRESS_SPACE_IO)
+        u32Bar |= UINT32_C(0xd000) + iBar * UINT32_C(0x100);
+    else if ((fType & (RT_BIT_32(2) | RT_BIT_32(1))) == PCI_ADDRESS_SPACE_BAR64)
+        pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + (iBar + 1) * 4] = (uint8_t)(0x40 + iBar * 2);
+    else
+        u32Bar |= UINT32_C(0xe0000000) + iBar * UINT32_C(0x02000000);
+    for (uint32_t i = 0; i < 4; i++)
+        pModel->abCfg[VBOX_PCI_BASE_ADDRESS_0 + iBar * 4 + i] = (uint8_t)(u32Bar >> (i * 8));
+}
+
+
+/**
+ * Takes the addresses out of the BAR registers of a device model, which is how
+ * a reset of its bus leaves a device nothing sets up again.  What tells the
+ * kind of a register stays.
+ *
+ * @param   pModel              The device model.
+ */
+static void tstModelLoseAddresses(PTSTVFIODEVCFG pModel)
+{
+    for (uint32_t iBar = 0; iBar < 6; iBar++)
+    {
+        uint32_t const off = VBOX_PCI_BASE_ADDRESS_0 + iBar * 4;
+        if (!pModel->aRegions[iBar].cb)
+            pModel->abCfg[off] = 0; /* No BAR, or the upper half of an address. */
+        else
+            pModel->abCfg[off] &= (pModel->abCfg[off] & PCI_ADDRESS_SPACE_IO) ? 0x3 : 0xf;
+        pModel->abCfg[off + 1] = 0;
+        pModel->abCfg[off + 2] = 0;
+        pModel->abCfg[off + 3] = 0;
+    }
 }
 
 
@@ -306,6 +345,8 @@ static uint32_t g_cTstFailIoasMapSkip = UINT32_MAX;
 static bool     g_fTstExposeVga       = false;
 /** Whether tstFixtureSetup() configures function 0 to trap all memory BAR accesses. */
 static bool     g_fTstInterceptMmio   = false;
+/** Whether tstFixtureSetup() configures function 0 not to be looked at for addresses in its BAR registers. */
+static bool     g_fTstSkipHostAddressCheck = false;
 /** The host address tstFixtureSetup() configures for function 0 instead of the
  * device node, NULL for configuring the device node. */
 static const char *g_pszTstHostAddressFun0 = NULL;
@@ -387,6 +428,8 @@ static int tstFixtureSetup(PCTSTVFIODEVCFG paModels, uint32_t cModels, PTSTVFIOD
             RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "ExposeVga", 1), VINF_SUCCESS);
         if (i == 0 && g_fTstInterceptMmio)
             RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "InterceptMmio", 1), VINF_SUCCESS);
+        if (i == 0 && g_fTstSkipHostAddressCheck)
+            RTTESTI_CHECK_RC(tstCfgSetInteger(pCfgFun, "SkipHostAddressCheck", 1), VINF_SUCCESS);
     }
     rc = tstPdmDevCreate(&g_DevicePciVfio, 0 /*iInstance*/, pCfgInst, &g_pTstDevInsVfio);
     if (RT_SUCCESS(rc))
@@ -762,6 +805,127 @@ static void tstVga(void)
                           ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
     }
     tstFixtureTeardown();
+}
+
+
+/**
+ * A device the host does not have set up, or not any more: none of its BAR
+ * registers has an address, which is what a reset of its bus leaves where
+ * nothing puts back what the device had.  A VM doesn't start with it and says
+ * what gets the addresses back.  One address is enough for a device to be
+ * taken, and a device without a BAR has none to lose.  A virtual function has
+ * no addresses in its BAR registers and is taken, and so is a device the host
+ * does not tell to be an ordinary function, and one the configuration says
+ * not to look at.  With the legacy interface the device is known by its PCI
+ * address, which is where sysfs has it then.
+ */
+static void tstLostAddresses(void)
+{
+    RTTestISub("A device which has lost its addresses on the host");
+
+    for (unsigned iVariant = 0; iVariant < 12; iVariant++)
+    {
+        TSTVFIODEVCFG Model;
+        tstModelInitDefault(&Model);
+        bool fTaken  = false;
+        bool fLegacy = false;
+        bool fSkip   = false;
+        bool fHostAddress = false;
+        switch (iVariant)
+        {
+            case 0: /* One memory BAR. */
+                break;
+            case 1: /* With an I/O port BAR and a 64-bit memory BAR. */
+                tstModelSetBar(&Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+                tstModelSetBar(&Model, 2, _1M, PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_BAR64 | PCI_ADDRESS_SPACE_MEM_PREFETCH);
+                break;
+            case 2: /* Nothing but I/O ports. */
+                Model.aRegions[0].cb     = 0;
+                Model.aRegions[0].fFlags = 0;
+                tstModelSetBar(&Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+                break;
+            case 3: /* The I/O port BAR has its address. */
+                tstModelSetBar(&Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+                fTaken = true;
+                break;
+            case 4: /* The 64-bit memory BAR has an address of 4 GiB and more, all of which is in the next register. */
+                tstModelSetBar(&Model, 2, _1M, PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_BAR64 | PCI_ADDRESS_SPACE_MEM_PREFETCH);
+                fTaken = true;
+                break;
+            case 5: /* The second of two memory BARs has one. */
+                tstModelSetBar(&Model, 2, _8K, PCI_ADDRESS_SPACE_MEM);
+                fTaken = true;
+                break;
+            case 6: /* A virtual function (SR-IOV) has none at any time. */
+                Model.fVirtFn = true;
+                fTaken = true;
+                break;
+            case 7: /* A device the host tells nothing of, going by the name of its node, is taken as it is. */
+                RTStrCopy(Model.szNode, sizeof(Model.szNode), "/dev/vfio/devices/vfio_0");
+                fTaken = true;
+                break;
+            case 8: /* No BAR at all. */
+                Model.aRegions[0].cb     = 0;
+                Model.aRegions[0].fFlags = 0;
+                fTaken = true;
+                break;
+            case 9: /* The configuration says not to look. */
+                fSkip  = true;
+                fTaken = true;
+                break;
+            case 10: /* The legacy interface, by which the device has its PCI address for a name: configured by its address. */
+                RTStrCopy(Model.szNode, sizeof(Model.szNode), "0000:0a:00.0");
+                fLegacy      = true;
+                fHostAddress = true;
+                break;
+            default: /* The same for a virtual function, configured with the address as its node. */
+                RTStrCopy(Model.szNode, sizeof(Model.szNode), "0000:0a:00.0");
+                Model.fVirtFn = true;
+                fLegacy = true;
+                fTaken  = true;
+                break;
+        }
+        tstModelLoseAddresses(&Model);
+        if (iVariant == 3)
+            Model.abCfg[VBOX_PCI_BASE_ADDRESS_1 + 1] = 0xd0;
+        else if (iVariant == 4)
+            Model.abCfg[VBOX_PCI_BASE_ADDRESS_3] = 0x01;
+        else if (iVariant == 5)
+            Model.abCfg[VBOX_PCI_BASE_ADDRESS_2 + 3] = 0xe0;
+
+        PTSTVFIODEV pDev = NULL;
+        g_fTstLegacy               = fLegacy;
+        g_fTstSkipHostAddressCheck = fSkip;
+        g_pszTstHostAddressFun0    = fHostAddress ? "0000:0a:00.0" : NULL;
+        int rc = tstFixtureSetup(&Model, 1, &pDev, NULL);
+        g_fTstLegacy               = false;
+        g_fTstSkipHostAddressCheck = false;
+        g_pszTstHostAddressFun0    = NULL;
+        if (fTaken)
+        {
+            RTTESTI_CHECK_MSG(RT_SUCCESS(rc), ("variant %u: pci-vfio: %Rrc - %s\n", iVariant, rc, tstPdmGetLastError()));
+            if (RT_SUCCESS(rc))
+            {
+                tstPdmPowerOn();
+                RTTESTI_CHECK_MSG(tstPdmPciCfgRead(0, TST_PCI_DEVFN, VBOX_PCI_VENDOR_ID, 2) == TST_VENDOR_ID,
+                                  ("variant %u\n", iVariant));
+            }
+        }
+        else
+        {
+            RTTESTI_CHECK_MSG(rc == VERR_IO_NOT_READY, ("variant %u: pci-vfio: %Rrc - %s\n", iVariant, rc, tstPdmGetLastError()));
+            RTTESTI_CHECK_MSG(strstr(tstPdmGetLastError(), "/sys/bus/pci/rescan") != NULL,
+                              ("variant %u: the message: %s\n", iVariant, tstPdmGetLastError()));
+            /* It names the file to write to, in the place sysfs has the device at. */
+            RTTESTI_CHECK_MSG(strstr(tstPdmGetLastError(), fLegacy ? "/sys/bus/pci/devices/0000:0a:00.0/remove"
+                                                                   : "/sys/class/vfio-dev/vfio0/device/remove") != NULL,
+                              ("variant %u: the message: %s\n", iVariant, tstPdmGetLastError()));
+        }
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("variant %u: %u request(s) to the kernel which are out of bounds\n", iVariant,
+                           tstVfioKrnlGetViolationCount()));
+        tstFixtureTeardown();
+    }
 }
 
 
@@ -6155,6 +6319,155 @@ static void tstSlotVga(void)
 }
 
 
+/**
+ * The device which is to go into the slot has lost its addresses on the host,
+ * see tstLostAddresses(): it is refused and nothing of it is kept, as often as
+ * it is tried, and it is taken once the host has set it up again.  This is
+ * what a device can be like after an error of it, when the host has reset the
+ * bus the device is on.
+ */
+static void tstSlotLostAddresses(void)
+{
+    RTTestISub("Hot-plug slot: a device which has lost its addresses on the host");
+
+    static TSTVFIODEVCFG s_Model; /* Too big for the stack. */
+    static TSTVFIODEVCFG s_Lost;
+    tstModelInitDefault(&s_Model);
+    tstModelSetBar(&s_Model, 1, TST_IOBAR_SIZE, PCI_ADDRESS_SPACE_IO);
+    tstModelSetBar(&s_Model, 2, _1M, PCI_ADDRESS_SPACE_MEM | PCI_ADDRESS_SPACE_BAR64 | PCI_ADDRESS_SPACE_MEM_PREFETCH);
+    s_Lost = s_Model;
+    tstModelLoseAddresses(&s_Lost);
+
+    /*
+     * The VM is started with the device.
+     */
+    PCIVFIOFUNLAYOUT Layout;
+    RT_ZERO(Layout);
+    PTSTVFIODEV pDev        = NULL;
+    PPDMDEVINS  pDevInsPort = NULL;
+    PPDMDEVINS  pDevInsDev  = NULL;
+    int rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstDevQueryLayout(pDevInsDev, 0, &Layout), VINF_SUCCESS);
+        tstSlotGuestEnableDevice();
+        RTTESTI_CHECK(tstSlotGuestReachesDevice(pDev));
+        uint32_t const cFdsOccupied = tstVfioKrnlGetOpenFdCount();
+
+        /* In the first round the device is taken out on request, in the second the host reports
+           an error of it, which empties the slot.  Then the bus is reset with nobody having the device. */
+        for (unsigned iRound = 0; iRound < 2; iRound++)
+        {
+            if (iRound == 0)
+                RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+            else
+            {
+                tstVfioKrnlDevSignalError(pDev);
+                RTTESTI_CHECK_MSG(tstSlotWaitForRelease(pDev, RT_MS_10SEC), ("round %u\n", iRound));
+                RTTESTI_CHECK_MSG(tstSlotWaitForEmpty(RT_MS_5SEC), ("round %u\n", iRound));
+            }
+            RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("round %u\n", iRound));
+            tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+            uint32_t const cFdsEmpty = tstVfioKrnlGetOpenFdCount();
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Lost), VINF_SUCCESS);
+
+            for (unsigned iTry = 0; iTry < 2; iTry++)
+            {
+                int const rcAttach = tstDevSlotAttach(pDevInsDev);
+                RTTESTI_CHECK_MSG(rcAttach == VERR_IO_NOT_READY, ("round %u, try %u: %Rrc\n", iRound, iTry, rcAttach));
+                RTTESTI_CHECK_MSG(tstVfioKrnlDevGetOpenCount(pDev) == 0, ("round %u, try %u\n", iRound, iTry));
+                RTTESTI_CHECK_MSG(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & (VBOX_PCI_EXP_SLTSTA_PRES | VBOX_PCI_EXP_SLTSTA_PRSD)),
+                                  ("round %u, try %u\n", iRound, iTry));
+                RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsEmpty,
+                                  ("round %u, try %u: %u file descriptors open, were %u\n", iRound, iTry,
+                                   tstVfioKrnlGetOpenFdCount(), cFdsEmpty));
+                RTTESTI_CHECK_MSG(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 0, VBOX_PCI_VENDOR_ID, 2) == UINT32_C(0xffff),
+                                  ("round %u, try %u\n", iRound, iTry));
+            }
+
+            /* The host has set the device up again. */
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            tstSlotCheckMsi(__LINE__, pDev);
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetOpenFdCount() == cFdsOccupied,
+                              ("round %u: %u file descriptors open, were %u\n", iRound, tstVfioKrnlGetOpenFdCount(), cFdsOccupied));
+        }
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+    }
+    tstFixtureTeardown();
+
+    /*
+     * A VM which is started without the device, and the device is like that
+     * when it is to go in for the first time.
+     */
+    if (RT_SUCCESS(rc) && Layout.cbPciCfg)
+    {
+        g_paTstLayouts      = &Layout;
+        g_fTstDevicesAbsent = RT_BIT_32(0);
+        rc = tstSlotFixtureSetup(&s_Model, 1, &pDev, &pDevInsPort, &pDevInsDev);
+        g_paTstLayouts      = NULL;
+        g_fTstDevicesAbsent = 0;
+        if (RT_SUCCESS(rc))
+        {
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Lost), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_IO_NOT_READY);
+            RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(pDev) == 0);
+            RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+
+            RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(pDev, &s_Model), VINF_SUCCESS);
+            RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+            tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, pDev);
+            RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                              ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+        }
+        tstFixtureTeardown();
+    }
+
+    /*
+     * A device of two functions the second of which has lost its addresses:
+     * neither is put in.  A virtual function has none at any time, and both are.
+     */
+    static TSTVFIODEVCFG s_aModels[2];
+    static TSTVFIODEVCFG s_Lost1;
+    tstModelInit(&s_aModels[0], "/dev/vfio/devices/vfio0", 0x03 /* display */, 0x80 /* other */);
+    tstModelInit(&s_aModels[1], "/dev/vfio/devices/vfio1", 0x04 /* multimedia */, 0x03 /* audio device */);
+    tstModelSetU16(&s_aModels[1], VBOX_PCI_DEVICE_ID, TST_DEVICE_ID + 1);
+    for (uint32_t i = 0; i < RT_ELEMENTS(s_aModels); i++)
+    {
+        tstModelSetBar(&s_aModels[i], 0, _64K, PCI_ADDRESS_SPACE_MEM);
+        tstModelAddExpCap(&s_aModels[i], TST_EXP_CAP_OFF);
+    }
+    s_Lost1 = s_aModels[1];
+    tstModelLoseAddresses(&s_Lost1);
+    PTSTVFIODEV apDevs[2] = { NULL, NULL };
+    rc = tstSlotFixtureSetup(s_aModels, RT_ELEMENTS(s_aModels), apDevs, &pDevInsPort, &pDevInsDev);
+    if (RT_SUCCESS(rc))
+    {
+        RTTESTI_CHECK_RC(tstDevSlotDetach(pDevInsDev, 0 /*cMsWait*/, true /*fForce*/), VINF_SUCCESS);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 0);
+        tstPortCfgWrite(TSTPORT_SLTSTA, tstPortCfgRead(TSTPORT_SLTSTA, 2), 2);
+
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(apDevs[1], &s_Lost1), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VERR_IO_NOT_READY);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[0]) == 0 && tstVfioKrnlDevGetOpenCount(apDevs[1]) == 0);
+        RTTESTI_CHECK(!(tstPortCfgRead(TSTPORT_SLTSTA, 2) & VBOX_PCI_EXP_SLTSTA_PRES));
+
+        s_Lost1.fVirtFn = true;
+        RTTESTI_CHECK_RC(tstVfioKrnlDevReplace(apDevs[1], &s_Lost1), VINF_SUCCESS);
+        RTTESTI_CHECK_RC(tstDevSlotAttach(pDevInsDev), VINF_SUCCESS);
+        RTTESTI_CHECK(tstVfioKrnlDevGetOpenCount(apDevs[1]) == 1);
+        tstSlotCheckDeviceArrived(__LINE__, pDevInsPort, apDevs[0]);
+        RTTESTI_CHECK(tstPdmPciCfgRead(TSTPORT_SEC_BUS, 1, VBOX_PCI_DEVICE_ID, 2) == TST_DEVICE_ID + 1);
+        RTTESTI_CHECK_MSG(tstVfioKrnlGetViolationCount() == 0,
+                          ("%u request(s) to the kernel which are out of bounds\n", tstVfioKrnlGetViolationCount()));
+    }
+    tstFixtureTeardown();
+}
+
+
 /*
  *
  * Saved states with the hot-plug capable slot being empty.
@@ -8332,6 +8645,7 @@ int main()
     tstDmaMapFailure();
     tstIoBarAndSilentDevice();
     tstVga();
+    tstLostAddresses();
     tstQuirkConfigRange();
     tstReadOnlyBar();
     tstFdsNotInherited();
@@ -8366,6 +8680,7 @@ int main()
     tstSlotIrqLeftOver();
     tstSlotStartEmpty();
     tstSlotVga();
+    tstSlotLostAddresses();
     tstSlotSavedState();
     tstSlotSavedStateRefused();
     tstSlotStateHostRequest();
