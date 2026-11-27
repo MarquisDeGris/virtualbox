@@ -131,7 +131,8 @@ VMMR3_INT_DECL(int) GIMR3Init(PVM pVM)
     rc = CFGMR3ValidateConfig(pCfgNode, "/GIM/", /* pszNode */
                               "Provider"         /* pszValidValues */
                               "|Version",
-                              "HyperV",          /* pszValidNodes */
+                              "HyperV"           /* pszValidNodes */
+                              "|KVM",
                               "GIM",             /* pszWho */
                               0);                /* uInstance */
     if (RT_FAILURE(rc))
@@ -176,7 +177,7 @@ VMMR3_INT_DECL(int) GIMR3Init(PVM pVM)
         else if (!RTStrCmp(szProvider, "KVM"))
         {
             pVM->gim.s.enmProviderId = GIMPROVIDERID_KVM;
-            rc = gimR3KvmInit(pVM);
+            rc = gimR3KvmInit(pVM, pCfgNode);
         }
         else
 #endif
