@@ -104,9 +104,6 @@ extern const PDMDEVREG g_DeviceVirtioSCSI;
 #ifdef VBOX_WITH_EFI
 extern const PDMDEVREG g_DeviceEFI;
 #endif
-#ifdef VBOX_WITH_PCI_PASSTHROUGH_IMPL
-extern const PDMDEVREG g_DevicePciRaw;
-#endif
 extern const PDMDEVREG g_DeviceGIMDev;
 extern const PDMDEVREG g_DeviceLPC;
 #ifdef VBOX_WITH_VIRTUALKD
@@ -189,9 +186,6 @@ extern const PDMDRVREG g_DrvHostSerial;
 #ifdef VBOX_WITH_DRV_DISK_INTEGRITY
 extern const PDMDRVREG g_DrvDiskIntegrity;
 extern const PDMDRVREG g_DrvRamDisk;
-#endif
-#ifdef VBOX_WITH_PCI_PASSTHROUGH_IMPL
-extern const PDMDRVREG g_DrvPciRaw;
 #endif
 
 #ifdef VBOX_WITH_USB

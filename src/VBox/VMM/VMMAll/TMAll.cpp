@@ -211,6 +211,10 @@ VMMDECL(void) TMNotifyEndOfExecution(PVMCC pVM, PVMCPUCC pVCpu, uint64_t uTsc)
 # ifndef VBOX_VMM_TARGET_ARMV8 /* This is perfectly valid on ARM if the guest is halting in the hypervisor. */
     AssertStmt(cTicks <= uCpuHz << 2, cTicks = uCpuHz << 2); /* max 4 sec */
 # endif
+    /* Execute for at most 4s. */
+    AssertMsgStmt(cTicks <= uCpuHz << 2,
+                  ("TM/%u: execution took longer than 4s: cTicks=%llu uCpuHz=%llu\n", pVCpu->idCpu, cTicks, uCpuHz),
+                  cTicks = uCpuHz << 2);
 
     uint64_t cNsExecutingDelta;
     if (uCpuHz < _4G)

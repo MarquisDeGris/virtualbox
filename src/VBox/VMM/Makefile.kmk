@@ -147,7 +147,8 @@ VBoxVMM_SOURCES  = \
 	VMMR3/EMR3Nem.cpp \
 	VMMR3/GCMR3.cpp \
 	VMMR3/GIMR3.cpp \
-	VMMR3/GIMR3Hv.cpp \
+	$(if-expr !defined(VBOX_WITH_KVM), VMMR3/GIMR3Hv.cpp,) \
+	$(if-expr  defined(VBOX_WITH_KVM), VMMR3/GIMHvOnKvm.cpp,) \
 	VMMR3/GIMR3Kvm.cpp \
 	VMMR3/GIMR3Minimal.cpp \
 	VMMR3/IEMR3.cpp \
@@ -237,7 +238,8 @@ VBoxVMM_SOURCES  = \
 	VMMAll/EMAll.cpp \
 	VMMAll/GCMAll.cpp \
 	VMMAll/GIMAll.cpp \
-	VMMAll/GIMAllHv.cpp \
+	$(if-expr !defined(VBOX_WITH_KVM), VMMAll/GIMAllHv.cpp,) \
+	$(if-expr  defined(VBOX_WITH_KVM), VMMAll/GIMAllHvOnKvm.cpp,) \
 	VMMAll/GIMAllKvm.cpp \
 	VMMAll/TMAll.cpp \
 	VMMAll/TMAllCpu.cpp \
@@ -959,9 +961,6 @@ if defined(VBOX_WITH_R0_MODULES) && !defined(VBOX_ONLY_BUILD)
 
  VMMR0_DEFS      = VBOX_VMM_TARGET_AGNOSTIC VBOX_IN_VMM IN_VMM_R0 IN_RT_R0 IN_DIS DIS_CORE_ONLY IN_INTNET_R0 \
  	$(VMM_COMMON_DEFS) RTASSERT_HAVE_SHOULD_PANIC
- ifdef VBOX_WITH_PCI_PASSTHROUGH
-  VMMR0_DEFS     += IN_PCIRAW_R0
- endif
  ifdef VBOX_WITH_TRIPLE_FAULT_HACK
   VMMR0_DEFS     += VBOX_WITH_TRIPLE_FAULT_HACK
  endif

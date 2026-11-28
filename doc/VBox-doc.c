@@ -132,7 +132,6 @@
  *      - @ref pg_netadp
  *      - VBoxUSB - The USB support driver.
  *      - @ref pg_netflt
- *      - @ref pg_rawpci
  *  - Host Services.
  *      - @ref pg_hostclip
  *      - Shared Folders.

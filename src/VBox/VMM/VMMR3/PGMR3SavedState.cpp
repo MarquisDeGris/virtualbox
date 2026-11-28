@@ -2935,7 +2935,12 @@ static int pgmR3LoadMemory(PVM pVM, PSSMHANDLE pSSM, uint32_t uVersion, uint32_t
                  * Load the page bits.
                  */
                 if ((u8 & ~PGM_STATE_REC_FLAG_ADDR) == PGM_STATE_REC_MMIO2_ZERO)
-                    RT_BZERO(pvDstPage, GUEST_PAGE_SIZE);
+                {
+                    /* A page which is zero already is left alone: the host might not have had to
+                       come up with memory for it so far, and writing to it would change that. */
+                    if (!ASMMemIsZero(pvDstPage, GUEST_PAGE_SIZE))
+                        RT_BZERO(pvDstPage, GUEST_PAGE_SIZE);
+                }
                 else
                 {
                     rc = SSMR3GetMem(pSSM, pvDstPage, GUEST_PAGE_SIZE);

@@ -131,11 +131,6 @@
 # include "../Storage/DevNVMe.cpp"
 #endif
 
-#ifdef VBOX_WITH_PCI_PASSTHROUGH_IMPL
-# undef LOG_GROUP
-# include "../Bus/DevPciRaw.cpp"
-#endif
-
 #ifdef VBOX_WITH_IOMMU_AMD
 # undef LOG_GROUP
 # include "../Bus/DevIommuAmd.cpp"
@@ -410,9 +405,6 @@ int main()
     CHECK_MEMBER_ALIGNMENT(VGASTATE, bmDirtyBitmap, 8);
     CHECK_MEMBER_ALIGNMENT(VGASTATE, pciRegions, 8);
     CHECK_MEMBER_ALIGNMENT(VMMDEV, CritSect, 8);
-#ifdef VBOX_WITH_PCI_PASSTHROUGH_IMPL
-    CHECK_MEMBER_ALIGNMENT(PCIRAWSENDREQ, u.aGetRegionInfo.u64RegionSize, 8);
-#endif
 #ifdef VBOX_WITH_IOMMU_AMD
     CHECK_MEMBER_ALIGNMENT(IOMMU, IommuBar, 8);
     CHECK_MEMBER_ALIGNMENT(IOMMU, aDevTabBaseAddrs, 8);
