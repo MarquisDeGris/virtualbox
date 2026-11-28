@@ -1451,6 +1451,65 @@ RTEXITCODE handleControlVM(HandlerArg *a)
                                                            dev.asOutParam()));
             }
         }
+        else if (   !strcmp(a->argv[1], "plugpci")
+                 || !strcmp(a->argv[1], "unplugpci"))
+        {
+            bool const fPlug = !strcmp(a->argv[1], "plugpci");
+            setCurrentSubcommand(fPlug ? HELP_SCOPE_CONTROLVM_PLUGPCI : HELP_SCOPE_CONTROLVM_UNPLUGPCI);
+
+            /* The address of the device on the host.  Taking it out has options: how long
+               the guest gets for letting go of it, and whether it is taken away regardless. */
+            static const RTGETOPTDEF s_aUnplugPciOptions[] =
+            {
+                { "--timeout", 't', RTGETOPT_REQ_UINT32 },
+                { "--force",   'f', RTGETOPT_REQ_NOTHING }
+            };
+            uint32_t      uHostAddr  = UINT32_MAX;
+            uint32_t      cMsTimeout = 15000;
+            bool          fForce     = false;
+            RTGETOPTSTATE GetOptState;
+            RTGetOptInit(&GetOptState, a->argc, a->argv, s_aUnplugPciOptions, fPlug ? 0 : RT_ELEMENTS(s_aUnplugPciOptions),
+                         2, RTGETOPTINIT_FLAGS_NO_STD_OPTS);
+            int           ch;
+            RTGETOPTUNION Value;
+            while (   SUCCEEDED(hrc)
+                   && (ch = RTGetOpt(&GetOptState, &Value)))
+            {
+                switch (ch)
+                {
+                    case 't': cMsTimeout = Value.u32; break;
+                    case 'f': fForce     = true; break;
+                    case VINF_GETOPT_NOT_OPTION:
+                        if (uHostAddr != UINT32_MAX)
+                        {
+                            errorSyntax(ControlVM::tr("Too many parameters."));
+                            hrc = E_FAIL;
+                        }
+                        else if ((uHostAddr = parsePci(Value.psz)) == UINT32_MAX)
+                        {
+                            errorArgument(ControlVM::tr("Invalid host PCI address '%s' (valid: 'HDom:HB:HD.HF')"), Value.psz);
+                            hrc = E_FAIL;
+                        }
+                        break;
+                    default:
+                        errorGetOpt(ch, &Value);
+                        hrc = E_FAIL;
+                        break;
+                }
+            }
+            if (SUCCEEDED(hrc) && uHostAddr == UINT32_MAX)
+            {
+                errorSyntax(ControlVM::tr("Not enough parameters."));
+                hrc = E_FAIL;
+            }
+            if (FAILED(hrc))
+                break;
+
+            if (fPlug)
+                CHECK_ERROR_BREAK(console, PlugHostPCIDevice(uHostAddr));
+            else
+                CHECK_ERROR_BREAK(console, UnplugHostPCIDevice(uHostAddr, cMsTimeout, fForce));
+        }
         else if (!strcmp(a->argv[1], "setvideomodehint"))
         {
             setCurrentSubcommand(HELP_SCOPE_CONTROLVM_SETVIDEOMODEHINT);

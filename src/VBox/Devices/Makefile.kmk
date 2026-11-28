@@ -1439,6 +1439,41 @@ if !defined(VBOX_ONLY_EXTPACKS) && "$(intersects $(KBUILD_TARGET_ARCH),$(VBOX_SU
  endif
 
  #
+ # VFIO PCI passthrough device testcase.  Runs the device behind the ICH9 PCI
+ # bus against a fake VFIO/IOMMUFD kernel interface, no hardware required.
+ # The wrapped C library functions live in testcase/tstDevPciVfioKrnl.cpp.
+ #
+ if defined(VBOX_WITH_VFIO_PCI_PASSTHROUGH) && defined(VBOX_WITH_TESTCASES)
+  PROGRAMS.linux += tstDevPciVfio
+  tstDevPciVfio_TEMPLATE = VBoxR3TstExe
+  tstDevPciVfio_DEFS     = VBOX_WITH_VFIO_PCI_PASSTHROUGH
+  tstDevPciVfio_INCS     = build
+  tstDevPciVfio_SOURCES  = \
+  	testcase/tstDevPciVfio.cpp \
+  	testcase/tstDevPciVfioKrnl.cpp \
+  	testcase/tstDevPciVfioPdm.cpp \
+  	Bus/DevPciVfio.cpp \
+  	Bus/DevPciIch9.cpp \
+  	Bus/MsiCommon.cpp \
+  	Bus/MsixCommon.cpp
+  tstDevPciVfio_LDFLAGS  = \
+  	-Wl,--wrap=open \
+  	-Wl,--wrap=open64 \
+  	-Wl,--wrap=close \
+  	-Wl,--wrap=dup2 \
+  	-Wl,--wrap=dup3 \
+  	-Wl,--wrap=ioctl \
+  	-Wl,--wrap=pread \
+  	-Wl,--wrap=pread64 \
+  	-Wl,--wrap=__pread_chk \
+  	-Wl,--wrap=__pread64_chk \
+  	-Wl,--wrap=pwrite \
+  	-Wl,--wrap=pwrite64 \
+  	-Wl,--wrap=mmap \
+  	-Wl,--wrap=mmap64
+ endif
+
+ #
  # PDM device testcase framework.
  #
  ifdef VBOX_WITH_TESTCASES_TSTDEV

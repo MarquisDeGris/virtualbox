@@ -35,6 +35,7 @@
 #include <VBox/msi.h>
 #include <VBox/pci.h>
 #include <VBox/vmm/pdmdev.h>
+#include <VBox/vmm/vmapi.h>
 
 #include "VBoxDD.h"
 #include <iprt/x86.h>
@@ -1543,6 +1544,43 @@ static DECLCALLBACK(int) ioapicR3LoadExec(PPDMDEVINS pDevIns, PSSMHANDLE pSSM, u
     if (uVersion > IOAPIC_SAVED_STATE_VERSION_NO_FLIPFLOP_MAP)
         for (uint8_t idx = 0; idx < RT_ELEMENTS(pThis->bmFlipFlop); idx++)
             pHlp->pfnSSMGetU64(pSSM, &pThis->bmFlipFlop[idx]);
+
+#ifdef RT_OS_LINUX
+    /*
+     * With KVM the APIC is the one of the kernel, which passes the EOI of a
+     * level-triggered interrupt on to us only for the vectors it was told
+     * about.  ioapicSetRedirTableEntry tells it when the guest writes an
+     * entry, and it does not have that from the saved state.  So tell it now
+     * about the entries which were loaded, or the remote IRR bit of such an
+     * entry is never cleared after its first interrupt, which then is its
+     * last one: the guest cannot write the bit, and it is an EOI or a reset
+     * which clears it.
+     *
+     * An entry which was saved with the bit set because of this stays that
+     * way after the load.  It cannot be told here from one whose interrupt is
+     * in service.
+     */
+    if (PDMDevHlpGetMainExecutionEngine(pDevIns) == VM_EXEC_ENGINE_NATIVE_API)
+    {
+        int rc = pHlp->pfnSSMHandleGetStatus(pSSM);
+        AssertRCReturn(rc, rc);
+
+        PIOAPICCC pThisCC = PDMDEVINS_2_DATA_CC(pDevIns, PIOAPICCC);
+        for (uint8_t idxRte = 0; idxRte < RT_ELEMENTS(pThis->au64RedirTable); idxRte++)
+        {
+            uint64_t const u64Rte = pThis->au64RedirTable[idxRte];
+            if (IOAPIC_RTE_GET_TRIGGER_MODE(u64Rte) == IOAPIC_RTE_TRIGGER_MODE_LEVEL)
+            {
+                rc = pThisCC->pIoApicHlp->pfnRteChanged(pDevIns, idxRte, IOAPIC_RTE_GET_DEST(u64Rte),
+                                                        IOAPIC_RTE_GET_DEST_MODE(u64Rte),
+                                                        IOAPIC_RTE_GET_DELIVERY_MODE(u64Rte),
+                                                        IOAPIC_RTE_GET_VECTOR(u64Rte),
+                                                        IOAPIC_RTE_GET_TRIGGER_MODE(u64Rte));
+                AssertLogRelRCReturn(rc, rc);
+            }
+        }
+    }
+#endif
 
     return VINF_SUCCESS;
 }
