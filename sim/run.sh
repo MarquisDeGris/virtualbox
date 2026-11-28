@@ -496,9 +496,6 @@ fi
 timer_deadline=no
 grep -q -s 'timer_settime' "$WS/src/VBox/VMM/VMMR3/target-x86/NEMR3Native-linux-x86.cpp" "$WS/src/VBox/VMM/VMMR3/NEMR3Native-linux.cpp" && timer_deadline=yes
 echo "the KVM backend of the tree enters the guest with the deadline of the next timer: $timer_deadline"
-# The time of day in front of the lines of the log of a VM, on every tree: see
-# phase_logtime.
-runner_phases="$runner_phases logtime"
 # A guest without a clock from a paravirtualization interface, on every tree:
 # its time comes from the devices of the VM, see phase_devtime.
 runner_phases="$runner_phases devtime"

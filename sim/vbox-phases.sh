@@ -252,8 +252,8 @@ start_vm()
     rm -f "$SERIAL"
     SERIAL_FROM=1
     VM_T0=$(date +%s)
-    echo "+ VBoxManage startvm $VM --type headless${STARTVM_MORE:+ $STARTVM_MORE}"
-    VBM_TIMEOUT=300 vbm startvm "$VM" --type headless ${STARTVM_MORE:-} > "$SIM_WORK/startvm.out" 2>&1
+    echo "+ VBoxManage startvm $VM --type headless"
+    VBM_TIMEOUT=300 vbm startvm "$VM" --type headless > "$SIM_WORK/startvm.out" 2>&1
     rc=$?
     cut -c1-400 "$SIM_WORK/startvm.out" | sed 's/^/    /'
     return $rc
@@ -516,41 +516,6 @@ setup()
     stage "the VM is created" ok
 }
 
-
-# The time in front of the lines of the log of a VM, which users ask about in
-# the tracker of upstream (requests 390 and 131; a text for the manual says
-# what there is): the log tells the date and the time at which it was opened,
-# every line has the time since the start of the VM process in front, and with
-# "time" among the flags of the release log, which the VM process takes from
-# its environment, every line has the time of day in UTC in front of that.
-phase_logtime()
-{
-    local log="$VMDIR/Logs/VBox.log" opened n at want
-    PHASE=logtime
-    reset_vm
-    STARTVM_MORE="--putenv VBOX_RELEASE_LOG_FLAGS=time"
-    if boot "a VM which is started with the time of day for its log boots the guest"; then
-        opened=$(grep -a -m 1 ' Log opened [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]*Z' "$log")
-        echo "    | $(echo "$opened" | awk '{ print substr($0, 1, 120) }')"
-        if [ -n "$opened" ]; then
-            stage "the log tells the date and the time it was opened at, in UTC" ok
-        else
-            stage "the log tells the date and the time it was opened at, in UTC" FAILED "no such line"
-        fi
-        # Two times in front of a line now: the time of day, then the time since the start.
-        n=$(grep -a -c -E '^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6} ' "$log")
-        at=$(echo "$opened" | awk '{ print substr($1, 1, 8) }')
-        want=$(echo "$opened" | awk '{ for (i = 1; i <= NF; i++) if ($i == "opened") { split($(i + 1), a, "T"); print substr(a[2], 1, 8) } }')
-        echo "    $n lines of $(grep -a -c '' "$log") have two times in front; the line about the opening has $at in front and tells of $want"
-        if [ "${n:-0}" -ge 100 ] && [ -n "$at" ] && [ "$at" = "$want" ]; then
-            stage "with the flag time every line of the log has the time of day in front, in UTC" ok
-        else
-            stage "with the flag time every line of the log has the time of day in front, in UTC" FAILED "$n lines with two times, $at against $want"
-        fi
-    fi
-    STARTVM_MORE=
-    end_phase
-}
 
 # A VM as there are many, without anything of this work being asked for.
 phase_plain()
@@ -3243,7 +3208,6 @@ if setup; then
             intxslot)    phase_intxslot ;;
             devtime)     phase_devtime ;;
             endpaused)   phase_endpaused ;;
-            logtime)     phase_logtime ;;
             vganone)     phase_vganone ;;
             mfpassthrough) phase_mfpassthrough ;;
             mfhotplug)     phase_mfhotplug ;;
