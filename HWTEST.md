@@ -377,7 +377,15 @@ With the hot-plug settings of part 2.
 2. On the host the kernel removes the device, which returns promptly. The
    log has `the host wants the device back`. The VM keeps running. A Linux
    guest logs `pciehp: Slot(...): Link Down` and `Card not present` and
-   removes the device; Windows shows it as removed.
+   removes the device; Windows shows it as removed. The guest is not asked
+   to let go of a device which was pulled, so its log has no line about
+   the attention button here, and the host does not wait the seconds a
+   guest gets when it is asked (part F). **Note down how long the host
+   takes to remove the device** (the time between the kernel's lines about
+   the cable or the link and the line of `vfio-pci` or of the port about
+   the device being gone): that a device which was pulled is told from one
+   which is there was read in the source of the kernel and seen nowhere,
+   as nothing in the simulation pulls a device without asking first.
 3. Plug the cable in. Authorize the device on the host if it asks for
    that, bind it to `vfio-pci`, then `plugpci` as in part G. The
    device works in the guest again.
@@ -391,12 +399,34 @@ With the hot-plug settings of part 2.
        VFIO#0.0: The function is taken out of service: the host reported an error of the device
 
    for each function, the device is gone from the guest as in step 2, and
-   the VM keeps running. Once the host has the device again (bind it to
-   `vfio-pci` again if the host removed it), `plugpci` puts it back. Keep
-   the lines of both logs with the result. The simulation goes through
-   this with an error which is made up (STATUS.md, "An error of the
-   device, in the simulation"); what a real device is like after a real
-   error it cannot show.
+   the VM keeps running. The VM does not let go of the device at once: the
+   kernel resets the device right after it has told of such an error, and
+   puts back what the device had only when the VM lets go of it. So the
+   log goes on with
+
+       VFIO#0.0: The device is held on to for a moment before it is let go of, for the host to reset it first
+
+   and, two seconds and more later, with
+
+       VFIO#0.0: The device which was held on to is let go of 2000 ms after it was told to keep quiet: its time is up
+
+   `plugpci` before that last line is refused with words to try again in a
+   few seconds. After it, once the host has the device again (bind it to
+   `vfio-pci` again if the host removed it), `plugpci` puts it back.
+   **Note down the times of these lines and what the last one gives as
+   its reason**: a device which does not answer when its two seconds are
+   up is waited for, for 15 seconds at most, and the line says so; a reset
+   takes longer on real hardware than in the simulation, and none was seen.
+   Should `plugpci` say instead that the device has lost its addresses on
+   the host, do what it says (INSTALL.md, section 6: remove the device on
+   the host, have the bus scanned, bind the device again) and note that
+   down as a finding: it means the device was let go of before the host
+   was done with it, which holding on to it is there to prevent. Keep the
+   lines of both logs with the result. The simulation goes through this
+   with an error which is made up (STATUS.md, "An error of the device, in
+   the simulation", and "Holding on to the device" in the section about
+   the drive Windows did not start); what a real device is like after a
+   real error it cannot show.
 
 ### I. Starting without the device
 
