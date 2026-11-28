@@ -14,7 +14,7 @@ Updated: 2026-11-27
 | Notes and CI branch | `meta` (this branch, default branch of the fork) |
 | Merge request | [#1](https://github.com/MarquisDeGris/virtualbox/pull/1), inside this fork, marked ready for the hardware test: WP0 to WP7 |
 | Merge requests for the released lines | [#2](https://github.com/MarquisDeGris/virtualbox/pull/2): `pci-passthrough-hotplug-7.2-kvm` against `VBox-7.2`. [#3](https://github.com/MarquisDeGris/virtualbox/pull/3): `backports-7.1` against `VBox-7.1`, nothing of the passthrough work, what the 7.2 line received and 7.1 did not. [#4](https://github.com/MarquisDeGris/virtualbox/pull/4): `pci-passthrough-hotplug-7.1-kvm` against `VBox-7.1` |
-| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): `feat/gim-kvm-clock-option` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
+| Merge requests for requests of the upstream tracker | [#5](https://github.com/MarquisDeGris/virtualbox/pull/5): `feat/modifyvm-graphics-order` against `main`. [#6](https://github.com/MarquisDeGris/virtualbox/pull/6): `feat/doc-3d-object-memory` against `main`. [#8](https://github.com/MarquisDeGris/virtualbox/pull/8): `feat/nvram-firmware-setup` against `main`. [#9](https://github.com/MarquisDeGris/virtualbox/pull/9): `fix/doc-modifymedium-compact` against `main`, for a report and not a request. [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): `feat/gim-kvm-clock-option` against `main`. [#11](https://github.com/MarquisDeGris/virtualbox/pull/11): `feat/autorun-x-terminal-emulator` against `main`. Nothing of the passthrough work in any of them. See "Requests from the tracker of upstream" |
 | Issues in the tracker of upstream | [999](https://github.com/VirtualBox/virtualbox/issues/999): the work, since 2026-11-23. [1008](https://github.com/VirtualBox/virtualbox/issues/1008): two things read in the interrupt code of `main`, not tried. [1009](https://github.com/VirtualBox/virtualbox/issues/1009): two defects of Main, shown with `main` as it is, with the two commits which put them right. Both since 2026-11-26. [1012](https://github.com/VirtualBox/virtualbox/issues/1012): the timers of the KVM backend of `main`, which make a Linux guest without `kvm-clock` slow, shown with `main` as it is, since 2026-11-27. [1013](https://github.com/VirtualBox/virtualbox/issues/1013): what a VM with `ExposeVga` says on a host whose kernel gives no legacy VGA ranges away, shown with `main` as it is, since 2026-11-27 |
 | Throwaway branches | `scratch/*` (tests against the unmodified device, used as evidence) |
 
@@ -3898,6 +3898,7 @@ is for VMs without a card of their own.
 | 810 | strings of one's own in the DMI table of type 11, for handing a guest its name or a key | looked at on 2026-11-24, not taken up. Two such strings can be set today, by reading the code and not tried: the values `DmiOEMVBoxVer` and `DmiOEMVBoxRev` of the firmware device. More of them, or longer ones than 255 characters, take a DMI table larger than the 768 bytes it has, which reaches into the BIOS |
 | 881, 936 (reported as bugs) | the size of a screen does not follow the window with the Guest Additions in a guest with Wayland | looked at on 2026-11-24, not taken up: it takes a guest with a desktop and the Guest Additions, which the simulation does not have |
 | 580 | the KVM interface for a guest without its clock | done, merge request [#10](https://github.com/MarquisDeGris/virtualbox/pull/10): a configuration value, `VBoxInternal/GIM/KVM/Clock`, see below. The manual says to leave the clock offered on a Linux host with KVM, for what the checks showed of the KVM backend of upstream |
+| 979 | the installer of the Guest Additions to find the terminal emulator of a Debian system, `x-terminal-emulator`, for desktops whose own the script does not know | done, merge request [#11](https://github.com/MarquisDeGris/virtualbox/pull/11): one entry in the list of the script, tried last; tried here with emulators which are made up, see below |
 
 The tracker also has 20 open bugs about 3D. Nearly all need a graphics
 card and a certain host to be seen, which the runners do not have.
@@ -4156,13 +4157,42 @@ and they do: the guest told not to use the clock of the interface and
 the guest in a VM without an interface both take the HPET as their
 clock source, and 11 seconds of the guest take 10. No VM stops there.
 
-**The tracker was read up to issue 1011 on 2026-11-27.** New since
+**Request 979** (`feat/autorun-x-terminal-emulator` @ `35120aa7`, one
+commit on `main`, 2026-11-28, merge request #11). The disk with the
+Guest Additions starts its installer for Linux guests through
+`autorun.sh`, which looks for a terminal emulator to run it in and
+knows five by name. A desktop with none of them gets no window with
+the installer, which is where Linux Mint is with the terminal emulator
+it has switched to; its maintainer asks for the name Debian and what
+derives from it have for the terminal emulator of the system,
+`x-terminal-emulator`, which by their policy takes `-T` for the title
+and `-e` for the command like `xterm`. It is one entry in the list of
+`getxterm()` now, tried last, so nothing changes where one of the five
+is found. Tried here, which a shell script allows: the two functions
+taken out of the script and run with emulators which are made up as
+the only ones to be found. Each of the five is picked before the new
+name, it is picked when it is the only one, and it is started with the
+title and the command as the script passes them: nine checks, all
+pass, and the two about the new name fail with the script as it was.
+That was the shell of Git for Windows; no run of the workflow, which
+builds no disk with Guest Additions, and no Debian system. Not taken:
+the name of the one terminal emulator of Linux Mint, which the name of
+the system covers, and a place before `xterm`, which would change what
+happens today on a system with both.
+
+**The tracker was read up to issue 1015 on 2026-11-28.** New since
 1004: a Linux guest with kernel 7.3 and the Guest Additions which
 hangs, on a Windows host with Hyper-V (1005); a crash of the user
 interface on a Windows host (1006); a request for a VMXNET3 network
 adapter (1007); a Windows guest which is slow after an update of
-Windows, on a Windows host (1010); a desktop guest with VMSVGA (1011).
-None of them is small and can be tried here.
+Windows, on a Windows host (1010); a desktop guest with VMSVGA (1011);
+guests which stall on a Windows host with an AMD processor (1014); the
+user interface crashing when a snapshot is cancelled while it is taken,
+and the VM ending at the next snapshot, on a Linux host (1015). None of
+them is small and can be tried here as it stands. The last one is about
+taking a snapshot of a running VM and cancelling that, which
+`VBoxManage` and the simulation can do without the user interface; it
+was not tried.
 
 ### The 7.1 line and what the 7.2 line received after it (2026-11-20)
 
@@ -4895,8 +4925,10 @@ harness since WP5, saved states since the fourth part of WP6.
 4f. Requests from the tracker of upstream, see the section of that
    name: 798 and the manual text for 674 and 904 are merge requests,
    and so are 944 (the setup of the firmware) and the report 996 about
-   the manual, and since 2026-11-27 request 580 (the KVM interface
-   without its clock).
+   the manual, since 2026-11-27 request 580 (the KVM interface
+   without its clock), and since 2026-11-28 request 979 (the terminal
+   emulator of a Debian system for the installer of the Guest
+   Additions, merge request #11).
    What could follow, each small and to be tested without a graphics
    card: other requests about `VBoxManage` and about settings. The two
    large ones about 3D are not planned.
@@ -5180,6 +5212,7 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | Three versions on branches of their own (`scratch/hold`, `-hold2`, `-hold3`), each built by the workflow, the first two read by one reader each | It could not be built here, and it changes how a device is let go of. The first did not build, which cost a run; the one change to the device in the third was not read again |
 | 2026-11-28 | The random test of the slot runs twice, the second time with 30 ms for holding on to a device, 150 ms at most, and the host resetting the bus for half of the errors | It was the one random test in which nothing could go on while a device is held on to: what it checks after each operation went by a device being closed at once, so it ran like the tests before the change. The times are short for many operations to fall into them |
 | 2026-11-28 | A build for machines with real hardware is made and published now (`vbox-17f8e83b630c-3d`), though no run needed one | Three changes of 2026-11-27 are about what real hardware does and the simulation does not or seldom: a kernel without legacy VGA ranges for a card, a device left without its addresses, and holding on to a device through the kernel's reset. Whoever tests next should test with them |
+| 2026-11-28 | Request 979, one entry in a shell script, was tried with the shell on this machine and by no run of the workflow | The workflow builds no disk with Guest Additions and starts no installer, so a run would have built VirtualBox to try nothing of the change. The function was run with terminal emulators which are made up; a Debian system with its own shell has not run it, and the merge request says so |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
