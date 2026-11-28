@@ -43,10 +43,6 @@
 #include "PlatformImpl.h"
 #include "VMMDev.h"
 #include "Global.h"
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
-# include "PCIRawDevImpl.h"
-#endif
-
 // generated header
 #include "SchemaDefs.h"
 
@@ -256,115 +252,243 @@ int Console::SetBiosDiskInfo(ComPtr<IMachine> pMachine, PCFGMNODE pCfg, PCFGMNOD
     return VINF_SUCCESS;
 }
 
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
-HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, BusAssignmentManager *pBusMgr, PCFGMNODE pDevices)
-{
-# ifndef VBOX_WITH_EXTPACK
-    RT_NOREF(pUVM);
-# endif
-    HRESULT hrc = S_OK;
-    PCFGMNODE pInst, pCfg, pLunL0, pLunL1;
 
+HRESULT Console::i_attachRawPCIDevices(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *pBusMgr, PCFGMNODE pDevices)
+{
     SafeIfaceArray<IPCIDeviceAttachment> assignments;
     ComPtr<IMachine> aMachine = i_machine();
 
-    hrc = aMachine->COMGETTER(PCIDeviceAssignments)(ComSafeArrayAsOutParam(assignments));
+    HRESULT hrc = aMachine->COMGETTER(PCIDeviceAssignments)(ComSafeArrayAsOutParam(assignments));
     if (   hrc != S_OK
         || assignments.size() < 1)
         return hrc;
 
-    /*
-     * PCI passthrough is only available if the proper ExtPack is installed.
-     *
-     * Note. Configuring PCI passthrough here and providing messages about
-     * the missing extpack isn't exactly clean, but it is a necessary evil
-     * to patch over legacy compatability issues introduced by the new
-     * distribution model.
-     */
-# ifdef VBOX_WITH_EXTPACK
-    static const char *s_pszPCIRawExtPackName = VBOX_PUEL_PRODUCT;
-    if (   !mptrExtPackManager->i_isExtPackUsable(s_pszPCIRawExtPackName)
-        && !mptrExtPackManager->i_isExtPackUsable("Oracle VM VirtualBox Extension Pack")) /* Legacy name -- see @bugref{10690}. */
-        /* Always fatal! */
-        return pVMM->pfnVMR3SetError(pUVM, VERR_NOT_FOUND, RT_SRC_POS,
-                                     N_("Implementation of the PCI passthrough framework not found!\n"
-                                        "The VM cannot be started. To fix this problem, either "
-                                        "install the '%s' or disable PCI passthrough via VBoxManage"),
-                                     s_pszPCIRawExtPackName);
-# endif
-
+#ifdef RT_OS_LINUX
     /* Now actually add devices */
     PCFGMNODE pPCIDevs = NULL;
+    PCFGMNODE pInst, pCfg;
+    InsertConfigNode(pDevices, "pci-vfio",  &pPCIDevs);
 
-    if (assignments.size() > 0)
+    /*
+     * PCI device functions share the same base device instance.
+     * Build a sorted map, for easier consumption.
+     */
+    std::map<PCIBusAddress,PCIBusAddress> PCIMap;
+    for (size_t i = 0; i < assignments.size(); i++)
     {
-        InsertConfigNode(pDevices, "pciraw",  &pPCIDevs);
+        ComPtr<IPCIDeviceAttachment> const assignment = assignments[i];
 
-        PCFGMNODE pRoot = CFGMR3GetParent(pDevices); Assert(pRoot);
-
-        /* Tell PGM to tell GPCIRaw about guest mappings. */
-        CFGMR3InsertNode(pRoot, "PGM", NULL);
-        InsertConfigInteger(CFGMR3GetChild(pRoot, "PGM"), "PciPassThrough", 1);
-
-        /*
-         * Currently, using IOMMU needed for PCI passthrough
-         * requires RAM preallocation.
-         */
-        /** @todo check if we can lift this requirement */
-        CFGMR3RemoveValue(pRoot, "RamPreAlloc");
-        InsertConfigInteger(pRoot, "RamPreAlloc", 1);
-    }
-
-    for (size_t iDev = 0; iDev < assignments.size(); iDev++)
-    {
-        ComPtr<IPCIDeviceAttachment> const assignment = assignments[iDev];
-
-        LONG host;
+        ULONG host;
         hrc = assignment->COMGETTER(HostAddress)(&host);            H();
-        LONG guest;
+        ULONG guest;
         hrc = assignment->COMGETTER(GuestAddress)(&guest);          H();
-        Bstr bstrDevName;
-        hrc = assignment->COMGETTER(Name)(bstrDevName.asOutParam());   H();
-
-        InsertConfigNodeF(pPCIDevs, &pInst, "%d", iDev);
-        InsertConfigInteger(pInst, "Trusted", 1);
 
         PCIBusAddress HostPCIAddress(host);
         Assert(HostPCIAddress.valid());
-        InsertConfigNode(pInst,        "Config",  &pCfg);
-        InsertConfigString(pCfg,       "DeviceName",  bstrDevName);
-
-        InsertConfigInteger(pCfg,      "DetachHostDriver",  1);
-        InsertConfigInteger(pCfg,      "HostPCIBusNo",      HostPCIAddress.miBus);
-        InsertConfigInteger(pCfg,      "HostPCIDeviceNo",   HostPCIAddress.miDevice);
-        InsertConfigInteger(pCfg,      "HostPCIFunctionNo", HostPCIAddress.miFn);
 
         PCIBusAddress GuestPCIAddress(guest);
         Assert(GuestPCIAddress.valid());
-        hrc = pBusMgr->assignHostPCIDevice("pciraw", pInst, HostPCIAddress, GuestPCIAddress, true);
-        if (hrc != S_OK)
-            return hrc;
+        PCIMap[HostPCIAddress] = GuestPCIAddress;
+    }
 
-        InsertConfigInteger(pCfg,      "GuestPCIBusNo",      GuestPCIAddress.miBus);
-        InsertConfigInteger(pCfg,      "GuestPCIDeviceNo",   GuestPCIAddress.miDevice);
-        InsertConfigInteger(pCfg,      "GuestPCIFunctionNo", GuestPCIAddress.miFn);
+    uint32_t iDev = 0;
+    PCIBusAddress hostPciAddrCur(UINT32_MAX);
+    uint8_t  idxFn = 0;
+    for (std::map<PCIBusAddress,PCIBusAddress>::iterator it = PCIMap.begin(); it != PCIMap.end(); it++)
+    {
+        PCIBusAddress hostAddress = it->first;
+        PCIBusAddress guestAddress = it->second;
 
-        /* the driver */
-        InsertConfigNode(pInst,        "LUN#0",   &pLunL0);
-        InsertConfigString(pLunL0,     "Driver", "pciraw");
-        InsertConfigNode(pLunL0,       "AttachedDriver", &pLunL1);
+        /*
+         * Enforce some sanity here:
+         *    1. Individual functions belonging to the same host device must also belong to the same guest device.
+         *    2. Can't mash different host devices into the same guest device.
+         *    3. Functions need to be ascending starting with 0.
+         */
 
-        /* the Main driver */
-        InsertConfigString(pLunL1,     "Driver", "MainPciRaw");
-        InsertConfigNode(pLunL1,       "Config", &pCfg);
-        PCIRawDev *pMainDev = new PCIRawDev(this);
-# error This is not allowed any more
-        InsertConfigInteger(pCfg,      "Object", (uintptr_t)pMainDev);
+        /* New device (ignores function)?  The first one is, whatever its address. */
+        if (   iDev == 0
+            || hostAddress.mu16Domain != hostPciAddrCur.mu16Domain
+            || hostAddress.miBus      != hostPciAddrCur.miBus
+            || hostAddress.miDevice   != hostPciAddrCur.miDevice)
+        {
+            /* New device. */
+            InsertConfigNodeF(pPCIDevs, &pInst, "%d", iDev++);
+            InsertConfigInteger(pInst, "Trusted", 1);
+
+            InsertConfigNode(pInst,    "Config",  &pCfg);
+            hrc = pBusMgr->assignHostPCIDevice("pci-vfio", pInst, hostAddress, guestAddress, true);
+            if (hrc != S_OK)
+                return hrc;
+
+            HostPciDevice HostDev;
+            HostDev.iInstance     = iDev - 1;
+            HostDev.uGuestAddress = guestAddress.asLong();
+            mHostPciDevices.push_back(HostDev);
+
+            if (mfHostPciHotPlug)
+            {
+                /*
+                 * The device goes into the hot-plug capable slot of the root port in front
+                 * of it.  That takes a root port on the first bus which was created for this
+                 * device, see BusAssignmentManager::assignPCIDeviceImpl(), and the device has
+                 * to be where a slot has its device.  That nothing else ends up on the bus of
+                 * the slot is checked when everything has its address, see
+                 * Console::i_hostPciCheckSlots().
+                 */
+                PCFGMNODE pBridgeCfg = NULL;
+                if (   (guestAddress.miBus == 1 || guestAddress.miBus == 2)
+                    && guestAddress.miDevice == 0
+                    && guestAddress.miFn == 0)
+                {
+                    char szBridge[16];
+                    RTStrPrintf(szBridge, sizeof(szBridge), "%d", guestAddress.miBus - 1);
+                    pBridgeCfg = pVMM->pfnCFGMR3GetChild(pDevices, "ich9pcibridge");
+                    if (pBridgeCfg)
+                        pBridgeCfg = pVMM->pfnCFGMR3GetChild(pBridgeCfg, szBridge);
+                    if (pBridgeCfg)
+                        pBridgeCfg = pVMM->pfnCFGMR3GetChild(pBridgeCfg, "Config");
+                }
+                if (   !pBridgeCfg
+                    || pVMM->pfnCFGMR3Exists(pBridgeCfg, "HotPlug"))
+                {
+                    pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                          N_("With hot-plug for PCI devices of the host, each of them has to be at the "
+                                             "guest PCI address 01:00.0 or 02:00.0 and the only device on that bus. This "
+                                             "is not so for the host device %04x:%02x:%02x"),
+                                          hostAddress.mu16Domain, hostAddress.miBus, hostAddress.miDevice);
+                    return E_INVALIDARG;
+                }
+                InsertConfigInteger(pBridgeCfg, "HotPlug", 1);
+            }
+
+            hostPciAddrCur = hostAddress;
+            idxFn = 0; /* Start the function from the beginning again. */
+        }
+
+        char szHostAddr[32]; /* Format is xxxx:xx:xx.x */
+        RTStrPrintf(szHostAddr, sizeof(szHostAddr), "%04x:%02x:%02x.%u",
+                    hostAddress.mu16Domain, hostAddress.miBus, hostAddress.miDevice, hostAddress.miFn);
+
+        PCFGMNODE pCfgFun = NULL;
+        InsertConfigNodeF(pCfg, &pCfgFun, "Fun%u", idxFn);
+        InsertConfigString(pCfgFun, "HostAddress", szHostAddr);
+        mHostPciDevices.back().vecFunctions.push_back(hostAddress.asLong());
+
+        /*
+         * What the VM is built from for the function if the device isn't there when the VM
+         * starts: what the device has told when the VM was started with it, see
+         * Console::i_hostPciStoreLayouts().  The values go in as they were told.
+         */
+        if (mfHostPciHotPlug)
+        {
+            Bstr bstrLayout;
+            hrc = aMachine->GetExtraData(BstrFmt("VBoxInternal2/HostPCILayout/%s", szHostAddr).raw(),
+                                         bstrLayout.asOutParam());                              H();
+            Utf8Str const strLayout(bstrLayout);
+            if (strLayout.isNotEmpty())
+            {
+                PCFGMNODE pCfgLayout = NULL;
+                InsertConfigNode(pCfgFun, "Layout", &pCfgLayout);
+                const char *psz = strLayout.c_str();
+                while (*psz)
+                {
+                    const char * const pszEq  = strchr(psz, '=');
+                    const char        *pszEnd = strchr(psz, ';');
+                    if (!pszEnd)
+                        pszEnd = strchr(psz, '\0');
+                    char     szName[64];
+                    char    *pszNext = NULL;
+                    uint64_t u64     = 0;
+                    int      vrc     = VERR_PARSE_ERROR;
+                    if (   pszEq
+                        && pszEq > psz
+                        && pszEq < pszEnd
+                        && (size_t)(pszEq - psz) < sizeof(szName))
+                        vrc = RTStrToUInt64Ex(pszEq + 1, &pszNext, 10, &u64);
+                    if (   (vrc != VINF_SUCCESS && vrc != VWRN_TRAILING_CHARS)
+                        || pszNext != pszEnd)
+                    {
+                        pVMM->pfnVMR3SetError(pUVM, VERR_PARSE_ERROR, RT_SRC_POS,
+                                              N_("The layout stored for the PCI device %s of the host is damaged. Remove the "
+                                                 "extra data item VBoxInternal2/HostPCILayout/%s and start the virtual machine "
+                                                 "with the device"), szHostAddr, szHostAddr);
+                        return E_INVALIDARG;
+                    }
+                    RTStrCopyEx(szName, sizeof(szName), psz, (size_t)(pszEq - psz));
+                    InsertConfigInteger(pCfgLayout, szName, u64);
+                    psz = *pszEnd ? pszEnd + 1 : pszEnd;
+                }
+            }
+        }
+        idxFn++;
     }
 
     return hrc;
-}
+#else
+    RT_NOREF(pBusMgr, pDevices);
+
+    pVMM->pfnVMR3SetError(pUVM, VERR_NOT_SUPPORTED, RT_SRC_POS,
+                          N_("Host PCI device passthrough is not supported on this host"));
+    return E_NOTIMPL;
 #endif
+}
+
+
+/**
+ * Checks that each PCI device of the host which is in a hot-plug capable slot
+ * has the secondary bus of the root port with that slot to itself.  Whatever is
+ * on that bus is the device in the slot for the root port, and the guest does
+ * not reach it while the slot is empty or switched off.
+ *
+ * @returns VBox status code, with the error of the VM set on failure.
+ * @param   pUVM        The user mode VM handle.
+ * @param   pVMM        The VMM vtable.
+ * @param   pBusMgr     Who knows the PCI addresses of all devices of the VM.
+ */
+int Console::i_hostPciCheckSlots(PUVM pUVM, PCVMMR3VTABLE pVMM, BusAssignmentManager *pBusMgr)
+{
+    if (   !mfHostPciHotPlug
+        || mHostPciDevices.empty())
+        return VINF_SUCCESS;
+
+    std::vector<BusAssignmentManager::PCIDeviceInfo> vecAttached;
+    pBusMgr->listAttachedPCIDevices(vecAttached);
+    for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
+    {
+        /* What is known of a device of the host is its first function, see
+           Console::i_attachRawPCIDevices().  Its other functions would be fine too. */
+        PCIBusAddress const GuestAddress(mHostPciDevices[iDev].uGuestAddress);
+        for (size_t i = 0; i < vecAttached.size(); i++)
+        {
+            if (   vecAttached[i].guestAddress.miBus != GuestAddress.miBus
+                || (   vecAttached[i].guestAddress.miDevice == GuestAddress.miDevice
+                    && vecAttached[i].hostAddress.valid()))
+                continue;
+
+            /* The bridge to a further bus is no device the user has given the VM. */
+            if (vecAttached[i].strDeviceName == "ich9pcibridge")
+                return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                             N_("With hot-plug for PCI devices of the host, each of them has to be the only "
+                                                "device on its guest PCI bus. The virtual machine has more storage controllers "
+                                                "than it has places for elsewhere and needs a PCI bridge on guest PCI bus %d "
+                                                "for them, at %02x:%02x.%d. Attach the PCI device of the host at 01:00.0, or "
+                                                "give the virtual machine fewer storage controllers"),
+                                             GuestAddress.miBus, vecAttached[i].guestAddress.miBus,
+                                             vecAttached[i].guestAddress.miDevice, vecAttached[i].guestAddress.miFn);
+            return pVMM->pfnVMR3SetError(pUVM, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                         N_("With hot-plug for PCI devices of the host, each of them has to be the only "
+                                            "device on its guest PCI bus. The device '%s' of the virtual machine is on "
+                                            "guest PCI bus %d as well, at %02x:%02x.%d. Attach the PCI device of the "
+                                            "host at 01:00.0 or 02:00.0, whichever is free, or give the virtual machine "
+                                            "fewer storage controllers or network adapters"),
+                                         vecAttached[i].strDeviceName.c_str(), GuestAddress.miBus,
+                                         vecAttached[i].guestAddress.miBus, vecAttached[i].guestAddress.miDevice,
+                                         vecAttached[i].guestAddress.miFn);
+        }
+    }
+    return VINF_SUCCESS;
+}
 
 
 /**
@@ -1226,10 +1350,13 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
             InsertConfigInteger(pCfg,  "McfgBase",   uMcfgBase);
             InsertConfigInteger(pCfg,  "McfgLength", cbMcfgLength);
 
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
-            /* Add PCI passthrough devices */
-            hrc = i_attachRawPCIDevices(pUVM, pBusMgr, pDevices);                           H();
-#endif
+            /* Add PCI passthrough devices, in hot-plug capable slots if that is asked for. */
+            hrc = pMachine->GetExtraData(Bstr("VBoxInternal2/HostPCIHotPlug").raw(), bstr.asOutParam());    H();
+            mfHostPciHotPlug = Utf8Str(bstr).equals("1");
+            hrc = i_attachRawPCIDevices(pUVM, pVMM, pBusMgr, pDevices);
+            if (hrc == E_INVALIDARG) /* A mistake in the configuration, the error of the VM says which. */
+                return VERR_INVALID_PARAMETER;
+            H();
 
             if (enmIommuType == IommuType_AMD)
             {
@@ -1253,7 +1380,7 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                                                      N_("Failed to find PCI address of the assigned IOMMU device!"));
                 }
 
-                PCIBusAddress PCIAddr = PCIBusAddress((int32_t)uIoApicPciAddress);
+                PCIBusAddress PCIAddr = PCIBusAddress(uIoApicPciAddress);
                 hrc = pBusMgr->assignPCIDevice("sb-ioapic", NULL /* pCfg */, PCIAddr, true /*fGuestAddressRequired*/);  H();
             }
             else if (enmIommuType == IommuType_Intel)
@@ -1265,7 +1392,7 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 InsertConfigNode(pInst,    "Config", &pCfg);
                 hrc = pBusMgr->assignPCIDevice("iommu-intel", pInst);                       H();
 
-                PCIBusAddress PCIAddr = PCIBusAddress((int32_t)uIoApicPciAddress);
+                PCIBusAddress PCIAddr = PCIBusAddress(uIoApicPciAddress);
                 hrc = pBusMgr->assignPCIDevice("sb-ioapic", NULL /* pCfg */, PCIAddr, true /*fGuestAddressRequired*/);  H();
             }
         }
@@ -1982,6 +2109,10 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
                 /* 64-bit prefetch window root resource: Only for ICH9 and if PAE or Long Mode is enabled (@bugref{5454}). */
                 if (fIsGuest64Bit || fEnablePAE)
                     InsertConfigInteger(pCfg,  "PciPref64Enabled", 1);
+                /* The guest takes care of PCI express hot-plug itself if PCI devices of the host are in
+                   hot-plug capable slots. */
+                if (mfHostPciHotPlug && !mHostPciDevices.empty())
+                    InsertConfigInteger(pCfg,  "PciExpressNativeHotPlug", 1);
             }
             InsertConfigInteger(pCfg,  "HostBusPciAddress", uHbcPCIAddress);
             InsertConfigInteger(pCfg,  "ShowCpu", fShowCpu);
@@ -2062,6 +2193,14 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
          * Configure DBGF (Debug(ger) Facility) and DBGC (Debugger Console).
          */
         vrc = i_configGuestDbg(virtualBox, pMachine, pRoot);                                VRC();
+
+        /*
+         * Everything has its PCI address now: the PCI devices of the host in hot-plug
+         * capable slots have to be alone on their buses.
+         */
+        vrc = i_hostPciCheckSlots(pUVM, pVMM, pBusMgr);
+        if (RT_FAILURE(vrc))
+            return vrc;
     }
     catch (ConfigError &x)
     {

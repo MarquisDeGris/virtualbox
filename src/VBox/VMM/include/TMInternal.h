@@ -600,8 +600,12 @@ typedef struct TM
     bool volatile               fRunningQueues;
     /** Indicates that the virtual sync queue is being run. */
     bool volatile               fRunningVirtualSyncQueue;
+    /** Set when tmR3TimerCallback found VMCPU_FF_TIMER pending already, for
+     * telling at its next call that the flag has been pending for a whole
+     * interval of the timer.  Only tmR3TimerCallback uses it. */
+    bool                        fTimerFFSeenPending;
     /** Alignment */
-    bool                        afAlignment3[2];
+    bool                        afAlignment3[1];
 
     /** Lock serializing access to the VirtualSync clock and the associated
      * timer queue.

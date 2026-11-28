@@ -36,8 +36,8 @@
 struct PCIDeviceAttachment::Data
 {
     Data(const Utf8Str &aDevName,
-         LONG          aHostAddress,
-         LONG          aGuestAddress,
+         ULONG         aHostAddress,
+         ULONG         aGuestAddress,
          BOOL          afPhysical) :
         DevName(aDevName),
         HostAddress(aHostAddress),
@@ -47,8 +47,8 @@ struct PCIDeviceAttachment::Data
     }
 
     Utf8Str          DevName;
-    LONG             HostAddress;
-    LONG             GuestAddress;
+    ULONG            HostAddress;
+    ULONG            GuestAddress;
     BOOL             fPhysical;
 };
 
@@ -73,8 +73,8 @@ void PCIDeviceAttachment::FinalRelease()
 /////////////////////////////////////////////////////////////////////////////
 HRESULT PCIDeviceAttachment::init(IMachine      *aParent,
                                   const Utf8Str &aDevName,
-                                  LONG          aHostAddress,
-                                  LONG          aGuestAddress,
+                                  ULONG         aHostAddress,
+                                  ULONG         aGuestAddress,
                                   BOOL          fPhysical)
 {
     NOREF(aParent);
@@ -103,17 +103,15 @@ HRESULT PCIDeviceAttachment::initCopy(IMachine *aParent, PCIDeviceAttachment *aT
 HRESULT PCIDeviceAttachment::i_loadSettings(IMachine *aParent,
                                             const settings::HostPCIDeviceAttachment &hpda)
 {
-    /** @todo r=bird: Inconsistent signed/unsigned crap. */
-    return init(aParent, hpda.strDeviceName, (LONG)hpda.uHostAddress, (LONG)hpda.uGuestAddress, TRUE);
+    return init(aParent, hpda.strDeviceName, hpda.uHostAddress, hpda.uGuestAddress, TRUE);
 }
 
 
 HRESULT PCIDeviceAttachment::i_saveSettings(settings::HostPCIDeviceAttachment &data)
 {
     Assert(m);
-    /** @todo r=bird: Inconsistent signed/unsigned crap. */
-    data.uHostAddress  = (uint32_t)m->HostAddress;
-    data.uGuestAddress = (uint32_t)m->GuestAddress;
+    data.uHostAddress  = m->HostAddress;
+    data.uGuestAddress = m->GuestAddress;
     data.strDeviceName = m->DevName;
 
     return S_OK;
@@ -148,12 +146,12 @@ HRESULT PCIDeviceAttachment::getIsPhysicalDevice(BOOL *aIsPhysicalDevice)
     return S_OK;
 }
 
-HRESULT PCIDeviceAttachment::getHostAddress(LONG *aHostAddress)
+HRESULT PCIDeviceAttachment::getHostAddress(ULONG *aHostAddress)
 {
     *aHostAddress = m->HostAddress;
     return S_OK;
 }
-HRESULT PCIDeviceAttachment::getGuestAddress(LONG *aGuestAddress)
+HRESULT PCIDeviceAttachment::getGuestAddress(ULONG *aGuestAddress)
 {
     *aGuestAddress = m->GuestAddress;
     return S_OK;

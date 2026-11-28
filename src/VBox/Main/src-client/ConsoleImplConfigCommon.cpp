@@ -56,9 +56,6 @@
 #endif
 #include "VMMDev.h"
 #include "Global.h"
-#ifdef VBOX_WITH_PCI_PASSTHROUGH
-# include "PCIRawDevImpl.h"
-#endif
 
 // generated header
 #include "SchemaDefs.h"
@@ -510,6 +507,10 @@ Console::i_configConstructor(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, void *pvCon
  */
 int Console::i_configConstructorInner(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, AutoWriteLock *pAlock)
 {
+    /* Nothing is known yet about PCI devices of the host in this VM, see i_attachRawPCIDevices(). */
+    mfHostPciHotPlug = false;
+    mHostPciDevices.clear();
+
     ComPtr<IMachine> const pMachine = i_machine();
 
     ComPtr<IPlatform> pPlatform;
@@ -4786,7 +4787,7 @@ int Console::i_configNetworkCtrls(ComPtr<IMachine> pMachine, ComPtr<IPlatformPro
         else /* Platforms other than x86 just use the auto assignment, no slot swap hack there. */
             iPCIDeviceNo = -1;
 
-        PCIBusAddress PCIAddr = PCIBusAddress(0, iPCIDeviceNo, 0);
+        PCIBusAddress PCIAddr = PCIBusAddress(0, 0, iPCIDeviceNo, 0);
         hrc = pBusMgr->assignPCIDevice(pszAdapterName, pInst, PCIAddr);                 H();
 
         InsertConfigNode(pInst, "Config", &pCfg);

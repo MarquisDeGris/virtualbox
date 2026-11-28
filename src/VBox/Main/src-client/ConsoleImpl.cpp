@@ -120,6 +120,7 @@
 #include <iprt/process.h>
 #include <iprt/string.h>
 #include <iprt/system.h>
+#include <iprt/time.h>
 #include <iprt/base64.h>
 #include <iprt/memsafer.h>
 
@@ -423,6 +424,7 @@ Console::Console()
     , mfVMHasUsbController(false)
     , mfTurnResetIntoPowerOff(false)
     , mfPowerOffCausedByReset(false)
+    , mfHostPciHotPlug(false)
     , mpVmm2UserMethods(NULL)
     , m_pVMMDev(NULL)
     , mAudioVRDE(NULL)
@@ -793,6 +795,24 @@ void Console::uninit()
         i_powerDown();
         Assert(mpUVM == NULL);
     }
+
+    /*
+     * A VM which is powered down tells of its last state on a thread of its
+     * own, and i_vmstateChangeCallback() takes that to i_setMachineState(),
+     * which gives up for a thread that cannot become a caller of this object,
+     * as none but this one can since this function was entered.  The state
+     * stayed Stopping then, here and on the server, be it this function which
+     * powered the VM down or somebody who was at it when this function came.
+     * The session ends right after, in good order, and for a session which
+     * ends that way the server leaves the state of the machine alone: a
+     * machine with no session in a state which says that it is busy, which
+     * takes no session until the server is started anew.  So what the
+     * callback could not do is done here.  Nobody else is powering the VM
+     * down any more at this point, they were waited for.
+     */
+    if (   mpUVM == NULL
+        && mMachineState == MachineState_Stopping)
+        i_setMachineState(MachineState_PoweredOff);
 
     if (mVMZeroCallersSem != NIL_RTSEMEVENT)
     {
@@ -3222,6 +3242,280 @@ HRESULT Console::findUSBDeviceById(const com::Guid &aId, ComPtr<IUSBDevice> &aDe
 #endif  /* !VBOX_WITH_USB */
 }
 
+/**
+ * Gets the interface for managing a PCI device of the host which is passed
+ * through to the VM.
+ *
+ * @returns COM status code, with error info.
+ * @param   aHostAddress    The address of the device on the host, of any of its functions.
+ * @param   pVMM            The VMM vtable.
+ * @param   pUVM            The user mode VM handle.
+ * @param   ppPort          Where to return the interface.
+ *
+ * @note    The caller holds the object lock and has made sure that the VM stays.
+ */
+HRESULT Console::i_hostPciGetPort(ULONG aHostAddress, PCVMMR3VTABLE pVMM, PUVM pUVM, PPDMIPCIPASSTHROUGHPORT *ppPort)
+{
+    *ppPort = NULL;
+    PCIBusAddress const Address(aHostAddress);
+
+    /* A device is all of its functions. */
+    for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
+        for (size_t iFun = 0; iFun < mHostPciDevices[iDev].vecFunctions.size(); iFun++)
+            if ((mHostPciDevices[iDev].vecFunctions[iFun] & ~(uint32_t)7) == (aHostAddress & ~(uint32_t)7))
+            {
+                PPDMIBASE pBase = NULL;
+                int vrc = pVMM->pfnPDMR3QueryDeviceLun(pUVM, "pci-vfio", mHostPciDevices[iDev].iInstance, 0 /*iLun*/, &pBase);
+                if (RT_SUCCESS(vrc))
+                {
+                    *ppPort = PDMIBASE_QUERY_INTERFACE(pBase, PDMIPCIPASSTHROUGHPORT);
+                    if (*ppPort)
+                        return S_OK;
+                    vrc = VERR_PDM_MISSING_INTERFACE;
+                }
+                return setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                    tr("The PCI device %04x:%02x:%02x of the host can't be reached in the virtual machine (%Rrc)"),
+                                    Address.mu16Domain, Address.miBus, Address.miDevice, vrc);
+            }
+
+    return setError(VBOX_E_OBJECT_NOT_FOUND,
+                    tr("No PCI device of the host with the address %04x:%02x:%02x.%d is attached to the virtual machine"),
+                    Address.mu16Domain, Address.miBus, Address.miDevice, Address.miFn);
+}
+
+/**
+ * @callback_method_impl{FNPDMPCIPASSTHROUGHLAYOUTVALUE,
+ *      Adds a value to the string the layout of a function is stored as.}
+ */
+static DECLCALLBACK(int) consoleHostPciLayoutValue(void *pvUser, const char *pszName, uint64_t u64Value)
+{
+    Utf8Str *pStrLayout = (Utf8Str *)pvUser;
+    return pStrLayout->appendPrintfNoThrow("%s%s=%RU64", pStrLayout->isEmpty() ? "" : ";", pszName, u64Value);
+}
+
+/**
+ * Takes note of what the VM is built from for the PCI devices of the host in
+ * hot-plug capable slots: the layout each function has for its device.  The VM
+ * can be started without the devices then, as Console::i_attachRawPCIDevices()
+ * puts the layouts into the configuration.
+ *
+ * Failing to do so is logged and nothing more: the VM runs, and the next start
+ * needs the devices to be there like this one did.
+ *
+ * @param   pUVM            The user mode VM handle.
+ * @param   pVMM            The VMM vtable.
+ *
+ * @note    Called while the VM is powered up, with the object lock not held.
+ */
+void Console::i_hostPciStoreLayouts(PUVM pUVM, PCVMMR3VTABLE pVMM)
+{
+    if (!mfHostPciHotPlug)
+        return;
+
+    for (size_t iDev = 0; iDev < mHostPciDevices.size(); iDev++)
+    {
+        PPDMIBASE pBase = NULL;
+        int vrc = pVMM->pfnPDMR3QueryDeviceLun(pUVM, "pci-vfio", mHostPciDevices[iDev].iInstance, 0 /*iLun*/, &pBase);
+        PPDMIPCIPASSTHROUGHPORT pPort = RT_SUCCESS(vrc) ? PDMIBASE_QUERY_INTERFACE(pBase, PDMIPCIPASSTHROUGHPORT) : NULL;
+        if (!pPort)
+        {
+            LogRel(("Console: No interface for managing pci-vfio#%u (%Rrc), the layout of its device is not stored\n",
+                    mHostPciDevices[iDev].iInstance, vrc));
+            continue;
+        }
+
+        for (size_t iFun = 0; iFun < mHostPciDevices[iDev].vecFunctions.size(); iFun++)
+        {
+            PCIBusAddress const Address(mHostPciDevices[iDev].vecFunctions[iFun]);
+            Utf8Str             strLayout;
+            vrc = pPort->pfnQueryLayout(pPort, (uint32_t)iFun, consoleHostPciLayoutValue, &strLayout);
+            HRESULT hrc = E_FAIL;
+            if (RT_SUCCESS(vrc))
+            {
+                BstrFmt const bstrKey("VBoxInternal2/HostPCILayout/%04x:%02x:%02x.%d",
+                                      Address.mu16Domain, Address.miBus, Address.miDevice, Address.miFn);
+                Bstr          bstrOld;
+                hrc = mMachine->GetExtraData(bstrKey.raw(), bstrOld.asOutParam());
+                if (   SUCCEEDED(hrc)
+                    && Utf8Str(bstrOld) != strLayout)
+                    hrc = mMachine->SetExtraData(bstrKey.raw(), Bstr(strLayout).raw());
+            }
+            if (FAILED(hrc))
+                LogRel(("Console: The layout of the PCI device %04x:%02x:%02x.%d of the host could not be stored (%Rrc, %Rhrc)\n",
+                        Address.mu16Domain, Address.miBus, Address.miDevice, Address.miFn, vrc, hrc));
+        }
+    }
+}
+
+HRESULT Console::plugHostPCIDevice(ULONG aHostAddress)
+{
+    LogFlowThisFuncEnter();
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (   mMachineState != MachineState_Running
+        && mMachineState != MachineState_Paused)
+        return i_setInvalidMachineStateError();
+
+    /* get the VM handle. */
+    SafeVMPtr ptrVM(this);
+    HRESULT hrc = ptrVM.hrc();
+    if (SUCCEEDED(hrc))
+    {
+        PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+        hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
+        if (SUCCEEDED(hrc))
+        {
+            /* The device does this on an EMT and tells the guest; release the lock for that. */
+            alock.release();
+            int vrc = pPort->pfnAttach(pPort);
+            if (RT_SUCCESS(vrc))
+                hrc = S_OK;
+            else if (vrc == VERR_NOT_SUPPORTED)
+                hrc = setErrorBoth(VBOX_E_NOT_SUPPORTED, vrc,
+                                   tr("The PCI device of the host is not in a hot-plug capable slot of the virtual machine"));
+            else if (vrc == VERR_ALREADY_EXISTS)
+                hrc = setErrorBoth(VBOX_E_OBJECT_IN_USE, vrc,
+                                   tr("The PCI device of the host is in the virtual machine already"));
+            else if (vrc == VERR_VM_INVALID_VM_STATE)
+                hrc = setErrorBoth(VBOX_E_INVALID_VM_STATE, vrc,
+                                   tr("The virtual machine is neither running nor paused, or its state is being saved"));
+            else if (vrc == VERR_MISMATCH)
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host is of another kind than the one the virtual machine is built for. The release log has the details"));
+            else if (vrc == VERR_IO_NOT_READY)
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host has lost its addresses there, as a reset of its bus leaves it when nothing sets the device up again afterwards. To have the host set it up again, remove the device there and have the bus scanned again: as root, write 1 to the file 'remove' of each function of the device in /sys/bus/pci/devices and then 1 to /sys/bus/pci/rescan. After that the device has to be bound to vfio-pci again. The release log has the details"));
+            else if (vrc == VERR_RESOURCE_IN_USE)
+                hrc = setErrorBoth(VBOX_E_INVALID_OBJECT_STATE, vrc,
+                                   tr("The virtual machine still holds on to the PCI device of the host after an error the host reported of it, which gives the host the time to reset the device. Try again in a few seconds. The release log tells when the device is let go of"));
+            else
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("The PCI device of the host could not be put into the virtual machine (%Rrc). The release log has the details"),
+                                   vrc);
+        }
+    }
+
+    LogFlowThisFunc(("hrc=%Rhrc\n", hrc));
+    LogFlowThisFuncLeave();
+    return hrc;
+}
+
+HRESULT Console::unplugHostPCIDevice(ULONG aHostAddress, ULONG aTimeout, BOOL aForce)
+{
+    LogFlowThisFuncEnter();
+
+    /*
+     * The guest is waited for in pieces, and the VM is let go of in between:
+     * powering the VM off waits for everybody who holds on to it.  The time
+     * the guest gets counts from when it is asked first.
+     */
+    RTMSINTERVAL const cMsPiece = 250;
+    uint64_t           msStart  = 0;
+    bool               fStarted = false;
+    HRESULT            hrc      = S_OK;
+    for (;;)
+    {
+        AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+        if (   mMachineState != MachineState_Running
+            && mMachineState != MachineState_Paused)
+        {
+            hrc = i_setInvalidMachineStateError();
+            break;
+        }
+
+        /* get the VM handle. */
+        SafeVMPtr ptrVM(this);
+        hrc = ptrVM.hrc();
+        if (FAILED(hrc))
+            break;
+
+        PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+        hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
+        if (FAILED(hrc))
+            break;
+
+        /* This waits for the guest; release the lock for that. */
+        alock.release();
+        uint64_t const     msNow      = RTTimeMilliTS();
+        if (!fStarted)
+        {
+            msStart  = msNow;
+            fStarted = true;
+        }
+        uint64_t const     cMsElapsed = msNow - msStart;
+        RTMSINTERVAL const cMsLeft    = cMsElapsed < aTimeout ? (RTMSINTERVAL)(aTimeout - cMsElapsed) : 0;
+        bool const         fLast      = cMsLeft <= cMsPiece;
+        int const vrc = pPort->pfnDetach(pPort, fLast ? cMsLeft : cMsPiece, fLast && RT_BOOL(aForce));
+        if (   vrc == VERR_TIMEOUT
+            && !fLast)
+            continue;
+
+        if (RT_SUCCESS(vrc))
+            hrc = S_OK;
+        else if (vrc == VERR_NOT_SUPPORTED)
+            hrc = setErrorBoth(VBOX_E_NOT_SUPPORTED, vrc,
+                               tr("The PCI device of the host is not in a hot-plug capable slot of the virtual machine"));
+        else if (vrc == VERR_TIMEOUT)
+            hrc = setErrorBoth(VBOX_E_TIMEOUT, vrc,
+                               tr("The guest did not let go of the PCI device of the host in time. It was asked to and can still do so"));
+        else
+            hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                               tr("The PCI device of the host could not be taken out of the virtual machine (%Rrc)"), vrc);
+        break;
+    }
+
+    LogFlowThisFunc(("hrc=%Rhrc\n", hrc));
+    LogFlowThisFuncLeave();
+    return hrc;
+}
+
+HRESULT Console::getHostPCIDeviceState(ULONG aHostAddress, BOOL *aHotPluggable, BOOL *aPresent, BOOL *aInUse)
+{
+    LogFlowThisFuncEnter();
+
+    *aHotPluggable = FALSE;
+    *aPresent      = FALSE;
+    *aInUse        = FALSE;
+
+    AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
+
+    if (   mMachineState != MachineState_Running
+        && mMachineState != MachineState_Paused)
+        return i_setInvalidMachineStateError();
+
+    /* get the VM handle. */
+    SafeVMPtr ptrVM(this);
+    HRESULT hrc = ptrVM.hrc();
+    if (SUCCEEDED(hrc))
+    {
+        PPDMIPCIPASSTHROUGHPORT pPort = NULL;
+        hrc = i_hostPciGetPort(aHostAddress, ptrVM.vtable(), ptrVM.rawUVM(), &pPort);
+        if (SUCCEEDED(hrc))
+        {
+            // no need to release lock, as there are no cross-thread callbacks
+            bool fHotPlug = false;
+            bool fPresent = false;
+            bool fInUse   = false;
+            int vrc = pPort->pfnQueryState(pPort, &fHotPlug, &fPresent, &fInUse);
+            if (RT_SUCCESS(vrc))
+            {
+                *aHotPluggable = fHotPlug;
+                *aPresent      = fPresent;
+                *aInUse        = fInUse;
+            }
+            else
+                hrc = setErrorBoth(VBOX_E_PDM_ERROR, vrc,
+                                   tr("Asking for the state of the PCI device of the host failed (%Rrc)"), vrc);
+        }
+    }
+
+    LogFlowThisFunc(("hrc=%Rhrc\n", hrc));
+    LogFlowThisFuncLeave();
+    return hrc;
+}
+
 HRESULT Console::createSharedFolder(const com::Utf8Str &aName, const com::Utf8Str &aHostPath, BOOL aWritable,
                                     BOOL aAutomount, const com::Utf8Str &aAutoMountPoint)
 {
@@ -5563,49 +5857,52 @@ DECLCALLBACK(int) Console::i_changeSerialPortAttachment(Console *pThis, PUVM pUV
     if (SUCCEEDED(hrc))
     {
         /* Check whether the port mode changed and act accordingly. */
-        Assert(ulSlot < 4);
-
-        PortMode_T eHostMode;
-        hrc = pSerialPort->COMGETTER(HostMode)(&eHostMode);
-        if (SUCCEEDED(hrc))
+        if (ulSlot < 4)
         {
-            PCFGMNODE pInst = pVMM->pfnCFGMR3GetChildF(pVMM->pfnCFGMR3GetRootU(pUVM), "Devices/serial/%d/", ulSlot);
-            AssertRelease(pInst);
-
-            /* Remove old driver. */
-            if (pThis->m_aeSerialPortMode[ulSlot] != PortMode_Disconnected)
+            PortMode_T eHostMode;
+            hrc = pSerialPort->COMGETTER(HostMode)(&eHostMode);
+            if (SUCCEEDED(hrc))
             {
-                vrc = pVMM->pfnPDMR3DeviceDetach(pUVM, "serial", ulSlot, 0, 0);
-                PCFGMNODE pLunL0 = pVMM->pfnCFGMR3GetChildF(pInst, "LUN#0");
-                pVMM->pfnCFGMR3RemoveNode(pLunL0);
-            }
+                PCFGMNODE pInst = pVMM->pfnCFGMR3GetChildF(pVMM->pfnCFGMR3GetRootU(pUVM), "Devices/serial/%d/", ulSlot);
+                AssertRelease(pInst);
 
-            if (RT_SUCCESS(vrc))
-            {
-                BOOL fServer;
-                Bstr bstrPath;
-                hrc = pSerialPort->COMGETTER(Server)(&fServer);
-                if (SUCCEEDED(hrc))
-                    hrc = pSerialPort->COMGETTER(Path)(bstrPath.asOutParam());
-
-                /* Configure new driver. */
-                if (   SUCCEEDED(hrc)
-                    && eHostMode != PortMode_Disconnected)
+                /* Remove old driver. */
+                if (pThis->m_aeSerialPortMode[ulSlot] != PortMode_Disconnected)
                 {
-                    vrc = pThis->i_configSerialPort(pInst, eHostMode, Utf8Str(bstrPath).c_str(), RT_BOOL(fServer));
-                    if (RT_SUCCESS(vrc))
-                    {
-                        /*
-                         * Attach the driver.
-                         */
-                        PPDMIBASE pBase;
-                        vrc = pVMM->pfnPDMR3DeviceAttach(pUVM, "serial", ulSlot, 0, 0, &pBase);
+                    vrc = pVMM->pfnPDMR3DeviceDetach(pUVM, "serial", ulSlot, 0, 0);
+                    PCFGMNODE pLunL0 = pVMM->pfnCFGMR3GetChildF(pInst, "LUN#0");
+                    pVMM->pfnCFGMR3RemoveNode(pLunL0);
+                }
 
-                        pVMM->pfnCFGMR3Dump(pInst);
+                if (RT_SUCCESS(vrc))
+                {
+                    BOOL fServer;
+                    Bstr bstrPath;
+                    hrc = pSerialPort->COMGETTER(Server)(&fServer);
+                    if (SUCCEEDED(hrc))
+                        hrc = pSerialPort->COMGETTER(Path)(bstrPath.asOutParam());
+
+                    /* Configure new driver. */
+                    if (   SUCCEEDED(hrc)
+                        && eHostMode != PortMode_Disconnected)
+                    {
+                        vrc = pThis->i_configSerialPort(pInst, eHostMode, Utf8Str(bstrPath).c_str(), RT_BOOL(fServer));
+                        if (RT_SUCCESS(vrc))
+                        {
+                            /*
+                             * Attach the driver.
+                             */
+                            PPDMIBASE pBase;
+                            vrc = pVMM->pfnPDMR3DeviceAttach(pUVM, "serial", ulSlot, 0, 0, &pBase);
+
+                            pVMM->pfnCFGMR3Dump(pInst);
+                        }
                     }
                 }
             }
         }
+        else
+            vrc = VERR_BUFFER_OVERFLOW;
     }
 
     if (RT_SUCCESS(vrc) && FAILED(hrc))
@@ -5640,35 +5937,38 @@ HRESULT Console::i_onSerialPortChange(ISerialPort *aSerialPort)
         if (SUCCEEDED(hrc) && fEnabled)
         {
             /* Check whether the port mode changed and act accordingly. */
-            Assert(ulSlot < 4);
-
-            PortMode_T eHostMode;
-            hrc = aSerialPort->COMGETTER(HostMode)(&eHostMode);
-            if (SUCCEEDED(hrc) && m_aeSerialPortMode[ulSlot] != eHostMode)
+            if (ulSlot < 4)
             {
-                /*
-                 * Suspend the VM first.
-                 */
-                bool fResume = false;
-                hrc = i_suspendBeforeConfigChange(ptrVM.rawUVM(), ptrVM.vtable(), NULL, &fResume);
-                if (FAILED(hrc))
-                    return hrc;
+                PortMode_T eHostMode;
+                hrc = aSerialPort->COMGETTER(HostMode)(&eHostMode);
+                if (SUCCEEDED(hrc) && m_aeSerialPortMode[ulSlot] != eHostMode)
+                {
+                    /*
+                     * Suspend the VM first.
+                     */
+                    bool fResume = false;
+                    hrc = i_suspendBeforeConfigChange(ptrVM.rawUVM(), ptrVM.vtable(), NULL, &fResume);
+                    if (FAILED(hrc))
+                        return hrc;
 
-                /*
-                 * Call worker in EMT, that's faster and safer than doing everything
-                 * using VM3ReqCallWait.
-                 */
-                int vrc = ptrVM.vtable()->pfnVMR3ReqCallWaitU(ptrVM.rawUVM(), 0 /*idDstCpu*/,
-                                                              (PFNRT)i_changeSerialPortAttachment, 4,
-                                                              this, ptrVM.rawUVM(), ptrVM.vtable(), aSerialPort);
+                    /*
+                     * Call worker in EMT, that's faster and safer than doing everything
+                     * using VM3ReqCallWait.
+                     */
+                    int vrc = ptrVM.vtable()->pfnVMR3ReqCallWaitU(ptrVM.rawUVM(), 0 /*idDstCpu*/,
+                                                                  (PFNRT)i_changeSerialPortAttachment, 4,
+                                                                  this, ptrVM.rawUVM(), ptrVM.vtable(), aSerialPort);
 
-                if (fResume)
-                    i_resumeAfterConfigChange(ptrVM.rawUVM(), ptrVM.vtable());
-                if (RT_SUCCESS(vrc))
-                    m_aeSerialPortMode[ulSlot] = eHostMode;
-                else
-                    hrc = setErrorBoth(E_FAIL, vrc, tr("Failed to change the serial port attachment (%Rrc)"), vrc);
+                    if (fResume)
+                        i_resumeAfterConfigChange(ptrVM.rawUVM(), ptrVM.vtable());
+                    if (RT_SUCCESS(vrc))
+                        m_aeSerialPortMode[ulSlot] = eHostMode;
+                    else
+                        hrc = setErrorBoth(E_FAIL, vrc, tr("Failed to change the serial port attachment (%Rrc)"), vrc);
+                }
             }
+            else
+                hrc = setErrorBoth(E_FAIL, VERR_BUFFER_OVERFLOW, tr("The slot index exceeds the maximum allowed (%u vs 4)"), ulSlot);
         }
     }
 
@@ -7584,7 +7884,7 @@ HRESULT Console::i_saveState(Reason_T aReason, const ComPtr<IProgress> &aProgres
     }
 
     LogFlowFuncLeave();
-    return S_OK;
+    return hrc;
 }
 
 /**
@@ -8128,8 +8428,21 @@ HRESULT Console::i_addVMCaller(bool aQuiet /* = false */,
  */
 void Console::i_releaseVMCaller()
 {
+    /*
+     * Whoever got to count up counts down again, whatever has become of this
+     * object meanwhile.  uninit() lets nobody else become a caller of the
+     * object from its start on, waits for the callers there are, and powers
+     * the VM down then, which waits for this count to reach zero.  Somebody who
+     * held on to the VM when uninit() started is no caller of the object here
+     * any more, and giving up for that left the count where it was and
+     * i_powerDown() waiting for good.  That takes a method which holds on to the
+     * VM for a while, and Console::unplugHostPCIDevice() does for as long as the
+     * guest is given.  The object is there: from the start of uninit() on nobody
+     * else gets to hold on to the VM, and uninit() does not get past
+     * i_powerDown() while somebody does.
+     */
     AutoCaller autoCaller(this);
-    AssertComRCReturnVoid(autoCaller.hrc());
+    Assert(SUCCEEDED(autoCaller.hrc()) || getObjectState().getState() == ObjectState::InUninit);
 
     AutoWriteLock alock(this COMMA_LOCKVAL_SRC_POS);
 
@@ -11422,6 +11735,12 @@ void Console::i_powerUpThreadTask(VMPowerUpTask *pTask)
 
                 /* Release the lock before a lengthy operation. */
                 alock.release();
+
+                /*
+                 * Take note of what the VM is built from for the PCI devices of the host in
+                 * hot-plug capable slots, for starting it without them the next time.
+                 */
+                pConsole->i_hostPciStoreLayouts(pConsole->mpUVM, pVMM);
 
 #ifdef VBOX_WITH_RECORDING
                 /*

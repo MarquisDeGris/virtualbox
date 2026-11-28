@@ -5164,7 +5164,7 @@ static DECLCALLBACK(int) vmmdevConstruct(PPDMDEVINS pDevIns, int iInstance, PCFG
      */
     if (pThis->fHeapEnabled)
     {
-        rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, 2 /*iPciRegion*/, VMMDEV_HEAP_SIZE, PCI_ADDRESS_SPACE_MEM_PREFETCH,
+        rc = PDMDevHlpPCIIORegionCreateMmio2Ex(pDevIns, pDevIns->apPciDevs[0], 2 /*iPciRegion*/, VMMDEV_HEAP_SIZE, PCI_ADDRESS_SPACE_MEM_PREFETCH,
                                                0 /*fFlags*/, vmmdevMmio2HeapRegionMap, "VMMDev Heap",
                                                (void **)&pThisCC->pVMMDevHeapR3, &pThis->hMmio2Heap);
         if (RT_FAILURE(rc))

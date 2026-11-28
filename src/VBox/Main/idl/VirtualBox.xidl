@@ -4108,6 +4108,10 @@
       <desc>Import all disks to VDI format</desc>
     </const>
 
+    <const name="KeepExtraData"     value="4">
+      <desc>Import machine extra-data from the appliance.</desc>
+    </const>
+
   </enum>
 
   <enum
@@ -6459,52 +6463,8 @@
   </interface>
 
   <interface
-    name="IPCIAddress" extends="$unknown"
-    uuid="c984d15f-e191-400b-840e-970f3dad7296"
-    wsmap="managed"
-    rest="managed"
-    >
-
-    <desc>
-      Address on the PCI bus.
-    </desc>
-
-    <attribute name="bus" type="short">
-      <desc>
-        Bus number.
-      </desc>
-    </attribute>
-
-    <attribute name="device" type="short">
-      <desc>
-        Device number.
-      </desc>
-    </attribute>
-
-    <attribute name="devFunction" type="short">
-      <desc>
-        Device function number.
-      </desc>
-    </attribute>
-
-    <method name="asLong">
-      <desc>
-        Convert PCI address into long.
-      </desc>
-      <param name="result" type="long" dir="return" />
-    </method>
-
-    <method name="fromLong">
-      <desc>
-        Make PCI address from long.
-      </desc>
-      <param name="number" type="long" dir="in" />
-    </method>
-  </interface>
-
-  <interface
     name="IPCIDeviceAttachment" extends="$unknown"
-    uuid="91f33d6f-e621-4f70-a77e-15f0e3c714d5"
+    uuid="989d0e07-fac7-42ed-9709-8fbe2a52bd64"
     wsmap="struct"
     rest="managed"
     >
@@ -6525,15 +6485,153 @@
       </desc>
     </attribute>
 
-    <attribute name="hostAddress" type="long" readonly="yes">
+    <attribute name="hostAddress" type="unsigned long" readonly="yes">
       <desc>
         Address of device on the host, applicable only to host devices.
       </desc>
     </attribute>
 
-    <attribute name="guestAddress" type="long" readonly="yes">
+    <attribute name="guestAddress" type="unsigned long" readonly="yes">
       <desc>
         Address of device in the guest.
+      </desc>
+    </attribute>
+
+  </interface>
+
+  <!--
+  // IHostPCIDevice
+  /////////////////////////////////////////////////////////////////////////
+  -->
+
+  <enum
+    name="PCIDeviceState"
+    uuid="d56b0c97-a4ab-4663-afa0-d69685dca57a"
+    >
+    <desc>
+      PCI device state. This enumeration represents all possible states
+      of the PCI device physically attached to the host computer regarding
+      its state on the host computer and availability to guest computers.
+
+      <see><link to="IHostPCIDevice"/></see>
+    </desc>
+
+    <const name="NotSupported"          value="0">
+      <desc>
+        Not supported by the VirtualBox server, not available to guests.
+      </desc>
+    </const>
+    <const name="Unavailable"           value="1">
+      <desc>
+        Being used by the host computer exclusively,
+        not available to guests.
+      </desc>
+    </const>
+    <const name="Busy"                  value="2">
+      <desc>
+        Being used by the host computer, potentially available to guests.
+
+        <note>
+          This is currently not being implemented, as it would require
+          being able to detach the currently used driver on the host,
+          and reconfigure the device to be available for the guest.
+        </note>
+      </desc>
+    </const>
+    <const name="AccessDenied"          value="3">
+      <desc>
+        Access to the device is denied due to insufficient permissions.
+      </desc>
+    </const>
+    <const name="Available"             value="4">
+      <desc>
+        Not used by the host computer, available to guests (the host computer
+        can also start using the device at any time).
+      </desc>
+    </const>
+    <const name="Captured"              value="5">
+      <desc>
+        Captured by one of the guest computers, not available
+        to anybody else.
+      </desc>
+    </const>
+  </enum>
+
+  <interface
+    name="IHostPCIDevice" extends="$unknown"
+    uuid="7ee979fe-790a-405a-abff-059f942bb8e5"
+    wsmap="managed"
+    rest="managed"
+    reservedAttributes="4"
+    >
+    <desc>
+      The IHostPCIDevice interface represents a physical host PCI device which
+      may be available for passthrough to a VM.
+
+      A collection of objects implementing this interface is stored in the
+      <link to="IHost::PCIDevices"/> attribute which lists all accessible PCI
+      devices of the host.
+    </desc>
+
+    <attribute name="state" type="PCIDeviceState" readonly="yes">
+      <desc>The PCI device state</desc>
+    </attribute>
+
+    <attribute name="vendorId" type="unsigned short" readonly="yes">
+      <desc>Vendor ID.</desc>
+    </attribute>
+
+    <attribute name="deviceId" type="unsigned short" readonly="yes">
+      <desc>Device ID.</desc>
+    </attribute>
+
+    <attribute name="revisionId" type="unsigned short" readonly="yes">
+      <desc>Revision ID.</desc>
+    </attribute>
+
+    <attribute name="deviceClass" type="unsigned long" readonly="yes">
+      <desc>
+        PCI device base class, sub class and interface bytes lumped into
+        one integer.
+      </desc>
+    </attribute>
+
+    <attribute name="manufacturer" type="wstring" readonly="yes">
+      <desc>Manufacturer string.</desc>
+    </attribute>
+
+    <attribute name="product" type="wstring" readonly="yes">
+      <desc>Product string.</desc>
+    </attribute>
+
+    <attribute name="domain" type="unsigned short" readonly="yes">
+      <desc>
+        PCI domain number this device belongs to.
+      </desc>
+    </attribute>
+
+    <attribute name="bus" type="unsigned short" readonly="yes">
+      <desc>
+        Bus number the device is attached to.
+      </desc>
+    </attribute>
+
+    <attribute name="device" type="unsigned short" readonly="yes">
+      <desc>
+        Device number the device is attached to.
+      </desc>
+    </attribute>
+
+    <attribute name="devFunction" type="unsigned short" readonly="yes">
+      <desc>
+        Device function number.
+      </desc>
+    </attribute>
+
+    <attribute name="address" type="wstring" readonly="yes">
+      <desc>
+        Host-specific address of the device, uniquely
+        identifying a physically connected device in the system.
       </desc>
     </attribute>
 
@@ -9158,7 +9256,9 @@
         <see><link to="IHostPCIDevicePlugEvent"/></see>
 
         <result name="VBOX_E_INVALID_VM_STATE">
-          Virtual machine state is not stopped (PCI hotplug not yet implemented).
+          Virtual machine state is not stopped. A device which is attached can be
+          put into the running virtual machine and taken out of it, see
+          <link to="IConsole::plugHostPCIDevice"/>.
         </result>
         <result name="VBOX_E_PDM_ERROR">
           Virtual machine does not have a PCI controller allowing attachment of physical devices.
@@ -9167,10 +9267,10 @@
           Hardware or host OS doesn't allow PCI device passthrough.
         </result>
       </desc>
-      <param name="hostAddress" type="long" dir="in">
+      <param name="hostAddress" type="unsigned long" dir="in">
         <desc>Address of the host PCI device.</desc>
       </param>
-      <param name="desiredGuestAddress" type="long" dir="in">
+      <param name="desiredGuestAddress" type="unsigned long" dir="in">
         <desc>Desired position of this device on guest PCI bus.</desc>
       </param>
       <param name="tryToUnbind" type="boolean" dir="in">
@@ -9190,7 +9290,8 @@
         <see><link to="IHostPCIDevicePlugEvent"/></see>
 
         <result name="VBOX_E_INVALID_VM_STATE">
-          Virtual machine state is not stopped (PCI hotplug not yet implemented).
+          Virtual machine state is not stopped. For taking a device out of the
+          running virtual machine see <link to="IConsole::unplugHostPCIDevice"/>.
         </result>
         <result name="VBOX_E_OBJECT_NOT_FOUND">
           This host device is not attached to this machine.
@@ -9202,7 +9303,7 @@
           Hardware or host OS doesn't allow PCI device passthrough.
         </result>
       </desc>
-      <param name="hostAddress" type="long" dir="in">
+      <param name="hostAddress" type="unsigned long" dir="in">
         <desc>Address of the host PCI device.</desc>
       </param>
     </method>
@@ -11037,7 +11138,7 @@
     uuid="6ac83d89-6ee7-4e33-8ae6-b257b2e81be8"
     wsmap="managed"
     rest="managed"
-    reservedMethods="8" reservedAttributes="8"
+    reservedMethods="5" reservedAttributes="8"
     >
     <desc>
       The IConsole interface represents an interface to control virtual
@@ -11467,6 +11568,129 @@
       </param>
       <param name="device" type="IUSBDevice" dir="return">
         <desc>Found USB device object.</desc>
+      </param>
+    </method>
+
+    <method name="plugHostPCIDevice">
+      <desc>
+        Puts a PCI device of the host into the running virtual machine. The
+        device has to be one of those attached to the machine with
+        <link to="IMachine::attachHostPCIDevice"/>, and it has to be in a
+        hot-plug capable slot of the virtual machine which is empty: the
+        device was not there when the virtual machine was started, or it was
+        taken out since. The guest is told that a device was plugged in.
+
+        The device has to be of the same kind as the one the virtual machine
+        was started with or was configured for.
+
+        <result name="VBOX_E_INVALID_VM_STATE">
+          Virtual machine is neither running nor paused.
+        </result>
+        <result name="VBOX_E_OBJECT_NOT_FOUND">
+          No PCI device of the host with this address is attached to the machine.
+        </result>
+        <result name="VBOX_E_NOT_SUPPORTED">
+          The device is not in a hot-plug capable slot.
+        </result>
+        <result name="VBOX_E_OBJECT_IN_USE">
+          There is a device in the slot.
+        </result>
+        <result name="VBOX_E_INVALID_OBJECT_STATE">
+          The device which was in the slot is still held on to after an error
+          the host reported of it, which gives the host the time to reset
+          the device and is a matter of seconds. Try again then.
+        </result>
+        <result name="VBOX_E_PDM_ERROR">
+          The device could not be put into the slot: it is not there, cannot
+          be used, or is of another kind than the one the virtual machine is
+          built for. The release log has the details.
+        </result>
+      </desc>
+      <param name="hostAddress" type="unsigned long" dir="in">
+        <desc>Address of the PCI device on the host, of any of its functions.</desc>
+      </param>
+    </method>
+
+    <method name="unplugHostPCIDevice">
+      <desc>
+        Takes a PCI device of the host out of the running virtual machine,
+        which requires the device to be in a hot-plug capable slot. If the
+        guest has the slot switched on, it is asked to let go of the device
+        the way the attention button of a slot does it, and gets time for
+        doing so. The device stays attached to the machine and can be put in
+        again with <link to="IConsole::plugHostPCIDevice"/>.
+
+        <result name="VBOX_E_INVALID_VM_STATE">
+          Virtual machine is neither running nor paused, or it stopped
+          being so while the guest was given time. The device is not taken
+          away from the guest then, whatever @a force says.
+        </result>
+        <result name="VBOX_E_OBJECT_NOT_FOUND">
+          No PCI device of the host with this address is attached to the machine.
+        </result>
+        <result name="VBOX_E_NOT_SUPPORTED">
+          The device is not in a hot-plug capable slot.
+        </result>
+        <result name="VBOX_E_TIMEOUT">
+          The guest did not let go of the device in time and @a force is
+          not set. The device is where it was. The guest was asked and can
+          still switch the slot off, which leaves the device in the slot.
+        </result>
+        <result name="VBOX_E_PDM_ERROR">
+          Taking the device out failed.
+        </result>
+      </desc>
+      <param name="hostAddress" type="unsigned long" dir="in">
+        <desc>Address of the PCI device on the host, of any of its functions.</desc>
+      </param>
+      <param name="timeout" type="unsigned long" dir="in">
+        <desc>
+          How long to wait for the guest to let go of the device, in
+          milliseconds. Guests take five seconds and more.
+        </desc>
+      </param>
+      <param name="force" type="boolean" dir="in">
+        <desc>
+          Whether the device is taken away from the guest if the guest did
+          not let go of it in time.
+        </desc>
+      </param>
+    </method>
+
+    <method name="getHostPCIDeviceState">
+      <desc>
+        Tells how things are with a PCI device of the host which is attached
+        to the running virtual machine.
+
+        <result name="VBOX_E_INVALID_VM_STATE">
+          Virtual machine is neither running nor paused.
+        </result>
+        <result name="VBOX_E_OBJECT_NOT_FOUND">
+          No PCI device of the host with this address is attached to the machine.
+        </result>
+        <result name="VBOX_E_PDM_ERROR">
+          Asking the device failed.
+        </result>
+      </desc>
+      <param name="hostAddress" type="unsigned long" dir="in">
+        <desc>Address of the PCI device on the host, of any of its functions.</desc>
+      </param>
+      <param name="hotPluggable" type="boolean" dir="out">
+        <desc>
+          Whether the device is in a hot-plug capable slot, which is what
+          <link to="IConsole::plugHostPCIDevice"/> and
+          <link to="IConsole::unplugHostPCIDevice"/> require.
+        </desc>
+      </param>
+      <param name="present" type="boolean" dir="out">
+        <desc>Whether the device is in the virtual machine right now.</desc>
+      </param>
+      <param name="inUse" type="boolean" dir="out">
+        <desc>
+          Whether the guest can reach the device: it is in the virtual
+          machine, and in a hot-plug capable slot the guest has the slot
+          switched on.
+        </desc>
       </param>
     </method>
 
@@ -12382,7 +12606,7 @@
 
   <interface
     name="IHost" extends="$unknown"
-    uuid="d5dcece0-b202-4416-a138-03502784cc07"
+    uuid="6bc99ee3-0fd2-43a3-892e-d290a5f7a117"
     wsmap="managed"
     rest="managed"
     reservedMethods="6" reservedAttributes="12"
@@ -12494,6 +12718,19 @@
 
     <attribute name="hostDrives" type="IHostDrive" readonly="yes" safearray="yes">
       <desc>List of the host drive available to use in the VirtualBox.</desc>
+    </attribute>
+
+    <attribute name="PCIDevices" type="IHostPCIDevice" readonly="yes" safearray="yes">
+      <desc>
+        List of PCI devices currently attached to the host.
+        Once a new device is physically attached to the host computer,
+        it appears in this list and remains there until detached.
+
+        <note>
+          If PCI passthrough functionality is not available on the host,
+          this method will set the result code to @c E_NOTIMPL.
+        </note>
+      </desc>
     </attribute>
 
     <method name="getProcessorSpeed">

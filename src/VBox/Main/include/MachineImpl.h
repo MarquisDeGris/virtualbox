@@ -1106,10 +1106,10 @@ private:
                                 LONG aControllerPort,
                                 LONG aDevice,
                                 ComPtr<IMediumAttachment> &aAttachment);
-    HRESULT attachHostPCIDevice(LONG aHostAddress,
-                                LONG aDesiredGuestAddress,
+    HRESULT attachHostPCIDevice(ULONG aHostAddress,
+                                ULONG aDesiredGuestAddress,
                                 BOOL aTryToUnbind);
-    HRESULT detachHostPCIDevice(LONG aHostAddress);
+    HRESULT detachHostPCIDevice(ULONG aHostAddress);
     HRESULT getNetworkAdapter(ULONG aSlot,
                               ComPtr<INetworkAdapter> &aAdapter);
     HRESULT addStorageController(const com::Utf8Str &aName,

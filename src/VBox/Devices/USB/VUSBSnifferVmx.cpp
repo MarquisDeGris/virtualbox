@@ -177,12 +177,15 @@ static DECLCALLBACK(int) vusbSnifferFmtVmxRecordEvent(PVUSBSNIFFERFMTINT pThis, 
         }
         else
         {
-            if (   enmEvent == VUSBSNIFFEREVENT_SUBMIT
-                && pUrb->enmDir == VUSBDIRECTION_OUT)
-                rc = vusbSnifferFmtVmxLogData(pThis, &Time, &pUrb->abData[0], pUrb->cbData);
-            else if (   enmEvent == VUSBSNIFFEREVENT_COMPLETE
-                     && pUrb->enmDir == VUSBDIRECTION_IN)
-                rc = vusbSnifferFmtVmxLogData(pThis, &Time, &pUrb->abData[0], pUrb->cbData);
+            if (pUrb->cbData)
+            {
+                if (   enmEvent == VUSBSNIFFEREVENT_SUBMIT
+                    && pUrb->enmDir == VUSBDIRECTION_OUT)
+                    rc = vusbSnifferFmtVmxLogData(pThis, &Time, &pUrb->abData[0], pUrb->cbData);
+                else if (   enmEvent == VUSBSNIFFEREVENT_COMPLETE
+                         && pUrb->enmDir == VUSBDIRECTION_IN)
+                    rc = vusbSnifferFmtVmxLogData(pThis, &Time, &pUrb->abData[0], pUrb->cbData);
+            }
         }
     }
 

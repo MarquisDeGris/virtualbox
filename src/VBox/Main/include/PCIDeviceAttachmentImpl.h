@@ -50,8 +50,8 @@ public:
     // public initializer/uninitializer for internal purposes only
     HRESULT init(IMachine *    aParent,
                  const Utf8Str &aDevName,
-                 LONG          aHostAddess,
-                 LONG          aGuestAddress,
+                 ULONG         aHostAddess,
+                 ULONG         aGuestAddress,
                  BOOL          fPhysical);
     HRESULT initCopy(IMachine *aParent, PCIDeviceAttachment *aThat);
     void uninit();
@@ -69,8 +69,8 @@ private:
     // wrapped IPCIDeviceAttachment properties
     HRESULT getName(com::Utf8Str &aName);
     HRESULT getIsPhysicalDevice(BOOL *aIsPhysicalDevice);
-    HRESULT getHostAddress(LONG *aHostAddress);
-    HRESULT getGuestAddress(LONG *aGuestAddress);
+    HRESULT getHostAddress(ULONG *aHostAddress);
+    HRESULT getGuestAddress(ULONG *aGuestAddress);
 
     struct Data;
     Data*  m;

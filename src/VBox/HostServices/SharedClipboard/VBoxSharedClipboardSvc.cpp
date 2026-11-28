@@ -1057,12 +1057,15 @@ static int shClSvcClientMsgGet(PSHCLCLIENT pClient, VBOXHGCMCALLHANDLE hCall, ui
                                  idMsgExpected, ShClHostMsgToStr(idMsgExpected), cParms),
                                 VERR_WRONG_PARAMETER_COUNT);
 
-        /* Check the parameter types. */
+        /* Each parameter index has the role defined by the queued message ID. */
         for (uint32_t i = 0; i < cParms; i++)
             ASSERT_GUEST_MSG_RETURN(pFirstMsg->aParms[i].type == paParms[i].type,
                                     ("param #%u: type %u, caller expected %u (idMsg=%u %s)\n", i, pFirstMsg->aParms[i].type,
                                      paParms[i].type, pFirstMsg->idMsg, ShClHostMsgToStr(pFirstMsg->idMsg)),
                                     VERR_WRONG_PARAMETER_TYPE);
+
+        RT_UNTRUSTED_VALIDATED_FENCE();
+
         /*
          * Copy out the parameters.
          *

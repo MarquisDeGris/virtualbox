@@ -86,6 +86,7 @@
         <arg choice="plain">usbhost</arg>
         <arg choice="plain">vms</arg>
         <arg choice="plain">webcams</arg>
+        <arg choice="plain">hostpcidevices</arg>
       </group>
     </cmdsynopsis>
   </refsynopsisdiv>
@@ -530,6 +531,18 @@
         The output is a list of absolute paths or aliases that are used
         to attach the webcams to the VM by using the <command>VBoxManage
         webcam attach</command> command.
+      </para>
+    </refsect2>
+    <refsect2 id="vboxmanage-list-hostpcidevices">
+      <title>List the PCI Devices on the Host System</title>
+      <cmdsynopsis id="synopsis-vboxmanage-list-hostpcidevices">
+        <command>VBoxManage list</command>
+        <arg choice="plain">hostpcidevices</arg>
+      </cmdsynopsis>
+      <para>
+        The <command>VBoxManage list hostpcidevices</command> command shows
+        information about the PCI devices that are attached to the host
+        system.
       </para>
     </refsect2>
   </refsect1>
