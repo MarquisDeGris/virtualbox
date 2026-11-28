@@ -9,3 +9,4 @@ vbox-585a816662b0-3d-ubuntu2404.tar.zst 7b2f2860820ab51fe32bce25c95291cf34f07768
 vbox-572356d18f9e-3d-ubuntu2404.tar.zst 2a5e2417411721a9b09e965d3a9a76bb29024a700b0bfe19e74931f03e5e23ba pci-passthrough-hotplug-7.2-kvm
 vbox-cc3dc981fd82-3d-ubuntu2404.tar.zst 8ce796aed56ea36c4a6d1a5616cc13152481fb908b4ba720331f8edfdd4ead54 pci-passthrough-hotplug-7.2-kvm
 vbox-b1136fa26e96-3d-ubuntu2404.tar.zst de4fb2ca0fc12c7e7b78b7adefb81f9cb75dca3144030876817f9d649b9f651d pci-passthrough-hotplug-7.2-kvm
+vbox-17f8e83b630c-3d-ubuntu2404.tar.zst 74fb5d1a8fd0532ab7327d4bc0ee74eb71e113316215d37e16003ba2578f4816 pci-passthrough-hotplug-7.2-kvm
