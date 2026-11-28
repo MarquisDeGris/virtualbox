@@ -7,7 +7,7 @@ Updated: 2026-11-27
 | Item | Value |
 |------|-------|
 | Upstream base | `main` @ `b6bea721` |
-| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `69ae4877`, 51 commits. The last two are of 2026-11-27: a device the host reported an error of is held on to until the host has reset it, where it was let go of at once, and a device which was pulled is told by a register the host passes on to it. The one before them is of the same day: a device which has lost its addresses on the host, as a reset of its bus can leave it, is refused when it is opened, with words for what gets them back. For the three see "A drive which Windows does not start after an error the host takes for fatal". The two before them are of the same day: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
+| Branch of the merge request | `pci-passthrough-hotplug-v1` @ `177dc429`, 52 commits. The last one is of 2026-11-28 and in the testcase only: its random test of the slot runs a second time, with a device held on to after an error. The two before it are of 2026-11-27: a device the host reported an error of is held on to until the host has reset it, where it was let go of at once, and a device which was pulled is told by a register the host passes on to it. The one before them is of the same day: a device which has lost its addresses on the host, as a reset of its bus can leave it, is refused when it is opened, with words for what gets them back. For the three see "A drive which Windows does not start after an error the host takes for fatal". The two before them are of the same day: a kernel which gives no legacy VGA ranges for a device is told as that, and the testcase has a graphics device with these ranges in the slot, see "A graphics card with its legacy VGA ranges in the slot". The two before them are of 2026-11-26 and in Main, which is code of upstream: the VM process ends and VirtualBox knows that the VM is off when a frontend is told to end with a device of the host in the VM, see "Who waits for whom, in Main and in the root port". The five before them are of 2026-11-25 and came of a second reading of four commits and of the reading of what came of that, see "A second reader for four later commits": the PCI lock where a function goes away for the guest and the lock of the slot where a live state is refused, each with a test, and what the log and some comments say. The one before them is in the testcase only, which waits for the slot to be told that it is empty, see "A check of the testcase which came too early". The one before it has the device not ask a function which is out of service, in since 2026-11-24, see "VMs with the sanitizers". The one before it is INTx, in since 2026-11-22, see "INTx (WP8)". The two before that are for hosts with KVM and not about the device (a timer notification which was missed, level-triggered interrupts after a saved state was loaded), in since 2026-11-19, see runs 227 to 233 |
 | Branch the runs were made on | `scratch/timer-wakeup` @ `f563e7f8`, the commit which is the head of the merge request; before the two commits `scratch/quiet-reset` @ `dd43ddf3` |
 | Branches for the maintenance lines | `pci-passthrough-hotplug-7.2` and `-7.1`: the work on those lines, built and tested, without an execution engine for it. `pci-passthrough-hotplug-7.2-kvm` and `-7.1-kvm`: the same with the KVM backend of Cyberus Technology, on which the simulation runs the device. See "The maintenance branches" |
 | Old code branch | `pci-passthrough-hotplug` @ `c5cc9847`, no longer moved |
@@ -1708,8 +1708,8 @@ hardware does: the script gets the file which is listed, with its
 checksum, its `VBoxManage` runs, and the first test goes through its 15
 checks with that build. All 130 checks of the run pass. **Run 378**
 (2026-11-26, `package` with 3D acceleration, the same branch @
-`b1136fa2`, 20 minutes, Intel Xeon 6975P-C) made the build which is
-fetched since, `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB: it
+`b1136fa2`, 20 minutes, Intel Xeon 6975P-C) made the build which was
+fetched until 2026-11-28, `vbox-b1136fa26e96-3d-ubuntu2404.tar.zst`, 155 MB: it
 has, besides, the two changes to Main of that day, see "Who waits for
 whom, in Main and in the root port". The testcase passes in the run.
 **Run 379** (the same day, `sim` with the parts runner and barhost,
@@ -1717,7 +1717,21 @@ strict, the same commit, 29 minutes, AMD EPYC 9V74) fetched it as a
 machine with real hardware does: the script gets the file which is
 listed, with its checksum, its `VBoxManage` runs, and the first test
 goes through its 15 checks with that build. All 51 checks of the run
-pass.
+pass. **Run 413** (2026-11-28, `package` with 3D acceleration, the same
+branch @ `17f8e83b`, 14 minutes, Intel Xeon 6975P-C) made the build
+which is fetched since, `vbox-17f8e83b630c-3d-ubuntu2404.tar.zst`, 154
+MB. It has, besides, the changes of 2026-11-27, which are about what
+real hardware does more often than the simulation: a kernel which
+gives no legacy VGA ranges for a card is told as that, a device
+without its addresses on the host is refused with words for what gets
+them back, and a device the host reported an error of is held on to
+until the host has reset it. No run needed that build; it was made for
+whoever tests next. The testcase passes in the run. **Run 415** (the
+same day, `sim` with the parts runner and barhost, strict, the same
+commit, 34 minutes, Intel Xeon 6975P-C) fetched it as a machine with
+real hardware does: the script gets the file which is listed, with its
+checksum, its `VBoxManage` runs, and the first test goes through its 15
+checks with that build. All 64 checks of the run pass.
 
 **The scripts tried here.** The simulation runs `test-a.sh` at the end
 of its parts with the Linux guest, with the emulated NVMe drive as the
@@ -3741,12 +3755,37 @@ their number. What they show is the order, which the log of the VM has
 each time: the device is closed two seconds and more after the kernel
 has told of the error, and the kernel resets right after telling.
 
-The heads are `pci-passthrough-hotplug-v1` @ `69ae4877` (51 commits),
+The heads were `pci-passthrough-hotplug-v1` @ `69ae4877` (51 commits),
 `-7.2` @ `d5cfbd35`, `-7.2-kvm` @ `6876af7e`, `-7.1` @ `75164450` and
-`-7.1-kvm` @ `16f2acff`. INSTALL.md has the holding on in section 6,
+`-7.1-kvm` @ `16f2acff`, and are, with the commit to the testcase of
+the next paragraph, `177dc429` (52 commits), `c99951b4`, `17f8e83b`,
+`fc0a7a80` and `8b96d45e`. INSTALL.md has the holding on in section 6,
 and the phases with an error wait for the device to be let go of
 before they look at its addresses and put it in again (meta
 `61f5366`).
+
+**The random test with a device held on to (the night after, commit
+`177dc429`, in the testcase only).** The random test of the slot ran
+with a device being let go of at once, like every test written before
+the change: what it holds after each operation went by that. It runs a
+second time now, with 30 ms for holding on and 150 ms as the longest
+time. In that pass the host reports more errors, and for half of them
+it resets the bus first, so the device is without its addresses and
+does not answer until the test says it does again. Everything else
+goes on at random meanwhile: a device is put into the slot, taken out,
+wanted back by the host or pulled, the VM is reset, and its state is
+saved and loaded. A device which is put in while one is held on to has
+to be refused; one which was let go of while it did not answer has to
+be refused as a device without addresses, and has to be without them;
+any other has to have them and go in. The first pass is what it was,
+with the same operations for the same seed.
+
+Run 412 (`sanitize`, `scratch/fuzzhold` @ `177dc429`, which is the
+head of the merge request since, 11 minutes, Intel Xeon 6975P-C): 64
+tests and four random ones, no report. The second pass in full length
+is 100000 operations, in which the device is put in 2198 times and
+taken by the host 1072 times, and 2388 states are saved and 1951
+loaded. It found nothing.
 
 **What is left.**
 
@@ -3766,15 +3805,15 @@ before they look at its addresses and put it in again (meta
 - A VM process which is killed lets go of its device at once, at
   whatever moment. The device is told as one without addresses then
   when it is opened next, and set up again by hand.
-- The random test of the slot does not run with a time for holding on:
-  its checks go by a device being closed at once. Next, item 7e.
+- A port which takes its link down by itself and the two older
+  findings are what is left as item 7e under Next.
 - The weakness of the destructor and the two older findings of the
   second reader, see above.
 - A host which is not x86, and a device sysfs tells nothing of, are not
   looked at by the check for a device without addresses.
-- The build for machines with real hardware which is published
-  (`vbox-b1136fa26e96-3d`) is without these changes. The next one has
-  them.
+- The build for machines with real hardware has these changes since
+  2026-11-28 (`vbox-17f8e83b630c-3d`, run 413), see "Machines with real
+  hardware".
 
 ### The issue with upstream, 2026-11-23
 
@@ -4934,12 +4973,13 @@ harness since WP5, saved states since the fourth part of WP6.
    branches (runs 405 to 411). The reading of the kernel for it found
    that a device which was pulled could not be told from one which is
    there, which is the second commit.
-7e. Left of 7d, nothing of it started. The random test of the slot
-   does not run with a time for holding on, as its checks go by a
-   device being closed at once. A port which takes its link down by
-   itself on an error is in no test with a kernel; the port the
-   simulation has does not do that. And the older findings of the
-   second reader: the watcher thread waiting with the lock of the slot
+7e. Left of 7d. Done on 2026-11-28: the random test of the slot runs a
+   second time with a device held on to after an error, see "The
+   random test with a device held on to" in the section named under
+   7c (run 412). Not started: a port which takes its link down by
+   itself on an error is in no test with a kernel, as the port the
+   simulation has does not do that; and the older findings of the
+   second reader, the watcher thread waiting with the lock of the slot
    for an EMT the kernel keeps waiting, and the destructor going on
    after five minutes under a watcher thread which has not ended.
 8. Done on 2026-11-24: a register of a function which went out of
@@ -5138,6 +5178,8 @@ harness since WP5, saved states since the fourth part of WP6.
 | 2026-11-27 | The destructor waits ten times 30 seconds for the watcher thread and goes on then as it did after 30 | The kernel can keep that thread waiting for as long as it has a device locked. A device cannot keep its instance from being freed, so the rest of that weakness stays and is written down |
 | 2026-11-27 | The testcase lets go of a device at once unless a test sets the time | Some sixty tests go by the device being closed right after an error. The time which ships is gone through by the tests of the hold and by the simulation |
 | 2026-11-27 | Three versions on branches of their own (`scratch/hold`, `-hold2`, `-hold3`), each built by the workflow, the first two read by one reader each | It could not be built here, and it changes how a device is let go of. The first did not build, which cost a run; the one change to the device in the third was not read again |
+| 2026-11-28 | The random test of the slot runs twice, the second time with 30 ms for holding on to a device, 150 ms at most, and the host resetting the bus for half of the errors | It was the one random test in which nothing could go on while a device is held on to: what it checks after each operation went by a device being closed at once, so it ran like the tests before the change. The times are short for many operations to fall into them |
+| 2026-11-28 | A build for machines with real hardware is made and published now (`vbox-17f8e83b630c-3d`), though no run needed one | Three changes of 2026-11-27 are about what real hardware does and the simulation does not or seldom: a kernel without legacy VGA ranges for a card, a device left without its addresses, and holding on to a device through the kernel's reset. Whoever tests next should test with them |
 | 2026-11-23 | No second run is started for a branch and a flavor while one is in flight | The workflow cancels the older one then, which is what happened to run 298. Two runs of the same code at a time take two names for the commit |
 | 2026-11-20 | The simulation gets checks for what is not part of the work and a VM for it needs all the same: a network behind NAT, an appliance exported and imported, a TPM 2.0 in the VM with Windows; and the workflow runs the testcases of the host services | The branches for 7.1 carry changes to these parts taken over from 7.2, which no check went through; and a Windows 11 guest, which is what the hot-plug is for, does not run without a TPM |
 | 2026-11-13 | Unbuilt code is reviewed by independent readers and every point is checked against the code before anything is changed | No compiler and no test run are to be had for now; a second pair of eyes finds what the author no longer sees, and a reviewer can be wrong (one point was: the lock of a getter in Main) |
@@ -5499,5 +5541,9 @@ IOMMU of AMD, and what a host does which is not a virtual machine.
 | 409 | `pci-passthrough-hotplug-7.2-kvm` @ `6876af7e` | sim with the part errhost | passed | 21 minutes, Intel Xeon 6975P-C. All 94 pass. The third version on the 7.2 line with the KVM backend: it builds, the testcase passes, and after both errors the device is held on to (2.1 and 2.2 seconds), has its addresses, is put in again and the guest reads |
 | 410 | `pci-passthrough-hotplug-7.1-kvm` @ `16f2acff` | tests | passed | 12 minutes, Intel Xeon 6975P-C. The change on the 7.1 line with the KVM backend: it builds and the testcase passes with its 64 tests and three random ones |
 | 411 | `pci-passthrough-hotplug-7.2-kvm` @ `6876af7e` | winsim with the parts runner, win and hdawinhost, exploring | passed (1 check of the simulation fails) | 53 minutes, Intel Xeon 6975P-C. 149 pass, 1 is left out as before. Windows with the device of a drive and an audio controller, the part of run 389: after the error which the kernel takes for fatal both functions are held on to (2.1 and 2.3 seconds), the device has its addresses, is put in again, and Windows has the drive with its driver and reads from it. The one which fails is before the errors and of the script: it went on with half a line of the guest, the one about the second function after `plugpci`, which was complete a moment later. Fixed in the script, not run again |
+| 412 | `scratch/fuzzhold` @ `177dc429` | sanitize | passed | 11 minutes, Intel Xeon 6975P-C. The commit which has the random test of the slot run a second time with a device held on to, before it went to the branches; it is the head of the merge request since. 64 tests and four random ones, no report. The second pass in full length: 100000 operations, the device put in 2198 times, taken by the host 1072 times, 2388 states saved and 1951 loaded |
+| 413 | `pci-passthrough-hotplug-7.2-kvm` @ `17f8e83b` | package, built with 3D acceleration | passed | 14 minutes, Intel Xeon 6975P-C. The package `vbox-17f8e83b630c-3d-ubuntu2404.tar.zst`, 154 MB, of the head with the changes of 2026-11-27: the testcase passes in the run with its 64 tests and four random ones, the release workflow published the package, and `hw/builds.txt` has it as the build which is fetched |
+| 414 | `pci-passthrough-hotplug-7.1-kvm` @ `8b96d45e` | tests | passed | 15 minutes, AMD EPYC 7763. The commit to the testcase on the 7.1 line with the KVM backend: 64 tests and four random ones |
+| 415 | `pci-passthrough-hotplug-7.2-kvm` @ `17f8e83b` | sim with the parts runner and barhost, strict | passed | 34 minutes, Intel Xeon 6975P-C. All 64 pass. The first run which fetches the package of run 413: the script gets the file which is listed, its VBoxManage runs, and the first test of the scripts for a machine with real hardware goes through its 15 checks with that build |
 
 Run numbers are those GitHub shows for the `build` workflow.
